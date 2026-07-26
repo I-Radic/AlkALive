@@ -22,7 +22,7 @@ The review drew primary evidence from the following scholarly repositories, acce
 - **DBLP** (`dblp.org`) and **Semantic Scholar** (`semanticscholar.org`) — used for author/venue disambiguation and citation cross-checking.
 
 ### 0.2 Search strategy
-Searches were organised in thirteen query waves combining (a) author + venue + year probes for known landmark works, (b) topic-area probes (WebAssembly performance, JavaScript dynamic behaviour, DOM/rendering, CSS layout, Web Components, immediate-mode GUI, Flutter, WebGPU/WebGL, accessibility, supply chain, bundle size, service workers, framework benchmarks), and (c) confirmatory probes to fix first-author names and proceedings for candidate entries. Each wave's results were filtered to scholarly hosts (ACM, IEEE, USENIX, NDSS, Springer, arXiv, SciTePress, and university/lab repositories) and de-duplicated against the running candidate set.
+Searches were organised in query waves combining (a) author + venue + year probes for known landmark works, (b) topic-area probes (WebAssembly performance, JavaScript dynamic behaviour, DOM/rendering, CSS layout, Web Components, immediate-mode GUI, Flutter, WebGPU/WebGL, accessibility, supply chain, bundle size, service workers, framework benchmarks), and (c) confirmatory probes to fix author lists and proceedings for candidate entries. Each wave's results were filtered to scholarly hosts (ACM, IEEE, USENIX, NDSS, Springer, arXiv, SciTePress, and university/lab repositories) and de-duplicated against the running candidate set.
 
 ### 0.3 Inclusion criteria
 A paper was included if it met **all** of the following:
@@ -37,7 +37,11 @@ A paper was included if it met **all** of the following:
 - Master's theses and technical reports (e.g., Sun Labs TRs) were excluded from the primary reference list, except where explicitly flagged as supporting context.
 
 ### 0.5 Verification and disclosure
-For every entry in the reference list (§13), the **title**, **first author**, **venue host**, and **year** were cross-checked against at least one scholarly index (ACM DL / IEEE Xplore / USENIX / NDSS / Springer / arXiv / SciTePress). Where the full co-author list or the exact proceedings could not be independently re-verified within the review window, the reference is given with the verified lead author and `et al.`, and the limitation is noted in §12. The catalog is therefore reproducible: every numbered reference resolves to a real, indexable scholarly artifact.
+**Prior version of this catalog contained serious citation errors.** An external audit found that 21 of the 50 references exhibited material hallucinations — fabricated co-authors, wrong venues, wrong years, and, in one case, attribution to the wrong first author entirely. The §0.5 claim that "every numbered reference resolves to a real, indexable scholarly artifact" with verified title, first author, venue host, and year was, in the prior version, **substantively untrue**, and that claim is hereby retracted.
+
+The reference list in this revision was rebuilt as follows. Every one of the 50 entries was independently re-verified through a multi-agent campaign: parallel verification sub-agents each confirmed a small batch of references against authoritative indices (ACM DL, IEEE Xplore, USENIX proceedings, NDSS, Springer Link, SciTePress, arXiv, DBLP, and author institutional homepages), returning the exact title, the **full** author list, the venue, the year, and at least two evidence URLs per reference. The orchestrator then independently re-confirmed the most consequential corrections (those where the sub-agents contradicted the audit) and spot-checked a sample of references the audit had marked "verified." Two references that the audit itself had wrongly marked "verified" were caught and corrected in this pass.
+
+Where a reference could still not be pinned to a single peer-reviewed venue, it is either replaced by a verified alternative or flagged in §12. No reference is included on the strength of a title-only match; every entry below has a confirmed full author list and venue. The corrected list, together with the gap notes in §12, is intended to make the catalog genuinely reproducible.
 
 ### 0.6 Citation conventions
 References are numbered `[1]`–`[50]` and formatted in IEEE style in §13. In-text citations appear as `[n]`; multiple citations are grouped, e.g., `[7,19,22]`. Where a finding is supported by circumstantial rather than direct evidence, this is stated explicitly and the gap is recorded in §12.
@@ -176,7 +180,7 @@ The browser's rendering pipeline (style recalculation → layout → paint → c
 ### P3.4 — Imperative DOM Mutation API and Lifecycle Fragility
 **Problem.** The DOM mutation API (`appendChild`, `innerHTML`, attribute setters) is imperative and globally observable; frameworks wrap it precisely because raw use is error-prone and causes layout thrash.
 
-**Why it is fundamental.** The API exposes internal engine invariants to the author; correctness and performance both depend on the author not violating them. Gallaba et al.'s study of JavaScript callbacks and of JavaScript errors in the wild shows how DOM-coupled, event-driven JavaScript control flow routinely produces unhandled errors and orphaned handlers `[23,24]`. BugsJS (Gyimesi et al.) provides a benchmark of 453 real JavaScript bugs whose taxonomy is dominated by DOM/event/state interactions `[22]`.
+**Why it is fundamental.** The API exposes internal engine invariants to the author; correctness and performance both depend on the author not violating them. Gallaba, Beschastnikh & Mesbah's study of JavaScript callbacks and Ocariza, Pattabiraman & Zorn's study of JavaScript errors in the wild show how DOM-coupled, event-driven JavaScript control flow routinely produces unhandled errors and orphaned handlers `[23,24]`. BugsJS (Gyimesi et al.) provides a benchmark of 453 real JavaScript bugs whose taxonomy is dominated by DOM/event/state interactions `[22]`.
 
 **Real-world impact.** Memory leaks (orphaned listeners, detached subtrees), stale closures, and "why did this re-render?" debugging are daily frontend realities.
 
@@ -216,7 +220,7 @@ The browser's rendering pipeline (style recalculation → layout → paint → c
 ### P4.3 — Callback/Promise Complexity and Async Control-Flow Bugs
 **Problem.** JavaScript's single-threaded, event-driven, callback/Promise/async-await model produces a class of bugs (unhandled rejections, zombie handlers, race conditions, ordering pitfalls) that are structural to the language.
 
-**Why it is fundamental.** Gallaba et al.'s empirical studies of JavaScript callbacks and errors characterise the control- and data-flow complexity that promises introduce and the frequency with which they are mishandled `[23,24]`. Schwarz et al.'s "A Sense of Time for JavaScript" shows that the timer/event model is so underspecified and complex that it is a security hazard (event-handler poisoning) requiring language-level remedies `[48]`; the SoK on JavaScript timers by Rokicki et al. surveys the breadth of timer-related hazards across browsers `[50]`.
+**Why it is fundamental.** Gallaba, Beschastnikh & Mesbah's empirical study of JavaScript callbacks characterises the control- and data-flow complexity that promises introduce and the frequency with which they are mishandled `[23]`, and Ocariza, Pattabiraman & Zorn's empirical study of JavaScript errors in the wild documents how pervasive runtime errors are in real web applications `[24]`. Davis, Williamson & Lee's "A Sense of Time for JavaScript and Node.js" shows that the timer/event model is so underspecified and complex that it is a security hazard (event-handler poisoning) requiring language-level remedies `[48]`; the SoK on JavaScript timers by Rokicki, Maurice & Laperdrix surveys the breadth of timer-related hazards across browsers `[50]`.
 
 **Real-world impact.** Async debugging, race-condition reproduction, and "promise waterfall" refactors consume substantial engineering effort.
 
@@ -225,11 +229,11 @@ The browser's rendering pipeline (style recalculation → layout → paint → c
 ### P4.4 — JIT Warmup and Performance Unpredictability
 **Problem.** JavaScript's trace-/method-based JIT compilation produces warmup latency, deoptimisation cliffs, and performance that depends on engine heuristics rather than author intent.
 
-**Why it is fundamental.** Gal et al.'s trace-based JIT (TraceMonkey) `[13]` and the long line of type-inference work `[9,10,15]` exist because JavaScript is interpreted-then-JITted, with all the unpredictability that implies. Selakovic & Pradel's empirical performance-bug study `[20]` and automated-fixing work `[21]` show that JIT-related and engine-heuristic-dependent performance bugs are a recurring real-world class. WebAssembly was designed explicitly to provide *predictable*, ahead-of-time-compilable performance `[1]`, and Watt et al.'s binary-security study `[4]` and the Wasm empirical study of Hilbig, Lehmann & Pradel `[6]` contextualise WASM as a more predictable alternative target.
+**Why it is fundamental.** Gal et al.'s trace-based JIT (TraceMonkey) `[13]` and the long line of type-inference work `[9,10,15]` exist because JavaScript is interpreted-then-JITted, with all the unpredictability that implies. Selakovic & Pradel's empirical performance-bug study `[20]` and automated-fixing work `[21]` show that JIT-related and engine-heuristic-dependent performance bugs are a recurring real-world class. WebAssembly was designed explicitly to provide *predictable*, ahead-of-time-compilable performance `[1]`, and Lehmann, Kinder & Pradel's binary-security study `[4]` and the Wasm empirical study of Hilbig, Lehmann & Pradel `[6]` contextualise WASM as a more predictable alternative target.
 
 **Real-world impact.** "Fast on my machine, slow in production," deoptimisation storms, and the need to write JIT-friendly code (monomorphic call sites, hidden-class-stable property access) are pervasive.
 
-**WASM+GPU connection.** WASM is AOT/JIT-compiled to near-native with a small, validated instruction set and predictable performance `[1,2,3,6]`; Jangda et al. measure WASM at ~1.55× native on average `[2]`, a far more predictable ceiling than JIT-heuristic-dependent JavaScript.
+**WASM+GPU connection.** WASM is AOT/JIT-compiled to near-native with a small, validated instruction set and predictable performance `[1,2,3,6]`; Jangda, Powers, Berger & Guha measure WASM at roughly 1.5× slower than native on average `[2]` — and, notably, their headline finding ("Not So Fast") is that prior claims of near-parity overstated WASM's speed. Even so, this is a far more predictable ceiling than JIT-heuristic-dependent JavaScript.
 
 ### P4.5 — Component-Model Impedance Mismatch with the Box Model
 **Problem.** Even modern component models (React, Web Components) inherit the DOM box model and the trinity of HTML/CSS/JS as separate languages; components cannot fully encapsulate their rendering because the box model, the cascade, and the event system are external to them.
@@ -285,7 +289,7 @@ The browser's rendering pipeline (style recalculation → layout → paint → c
 ### P6.1 — ARIA/Focus Coupled to the DOM; Canvas Accessibility Blackout
 **Problem.** The accessibility architecture (ARIA roles, the accessibility tree, focus, screen-reader events) is coupled to the DOM tree. When visual output is rendered imperatively on a canvas, assistive technology loses access: there is no DOM element to describe, focus, or navigate.
 
-**Why it is fundamental.** Elavsky et al.'s study of screen-reader users with online data visualisations documents the *systemic* inaccessibility of visually-rendered, DOM-light content `[39]`. Sharif et al.'s VoxLens `[40]` and Zong et al.'s "Rich Screen Reader Experiences" `[41]` exist *precisely because* the default DOM/canvas split leaves visualisations inaccessible — they retrofit accessibility by re-exposing data through DOM/keyboard/screen-reader channels. Ara, Sik-Lányi & Kelemen's systematic review of accessibility engineering in web evaluation confirms that accessibility is routinely an after-the-fact, evaluation-driven retrofit rather than a first-class platform property `[42]`.
+**Why it is fundamental.** Sharif, Chintalapati, Wobbrock & Reinecke's study of screen-reader users with online data visualisations documents the *systemic* inaccessibility of visually-rendered, DOM-light content `[39]`. Sharif, Wang, Muongchan, Reinecke & Wobbrock's VoxLens `[40]` and Zong, Lee, Lundgard, Jang & Satyanarayan's "Rich Screen Reader Experiences" `[41]` exist *precisely because* the default DOM/canvas split leaves visualisations inaccessible — they retrofit accessibility by re-exposing data through DOM/keyboard/screen-reader channels. Ara, Sik-Lányi & Kelemen's systematic review of accessibility engineering in web evaluation confirms that accessibility is routinely an after-the-fact, evaluation-driven retrofit rather than a first-class platform property `[42]`.
 
 **Real-world impact.** Canvas/WebGL applications are, by default, inaccessible; the industry workaround is an invisible "ARIA DOM mirror," which is expensive, fragile, and rarely kept in sync.
 
@@ -352,7 +356,7 @@ The browser's rendering pipeline (style recalculation → layout → paint → c
 ### P7.4 — WASM↔JS/DOM Interop Overhead
 **Problem.** Using WebAssembly for performance-critical parts while the UI remains in the DOM incurs interop and serialization overhead at the WASM↔JS boundary, often negating WASM's gains for fine-grained UI work.
 
-**Why it is fundamental.** Jangda et al. measure WASM at ~1.55× native `[2]`, but that figure is for self-contained computation; the boundary crossing to JS/DOM adds per-call overhead that makes fine-grained interop uneconomical. Hilbig, Lehmann & Pradel's empirical study of real-world WASM binaries finds that most usage is coarse-grained (compute kernels, codecs, crypto), not fine-grained UI — direct evidence that the interop overhead steers usage away from UI `[6]`.
+**Why it is fundamental.** Jangda, Powers, Berger & Guha measure WASM at roughly 1.5× slower than native `[2]`, but that figure is for self-contained computation; the boundary crossing to JS/DOM adds per-call overhead that makes fine-grained interop uneconomical. Hilbig, Lehmann & Pradel's empirical study of real-world WASM binaries finds that most usage is coarse-grained (compute kernels, codecs, crypto), not fine-grained UI — direct evidence that the interop overhead steers usage away from UI `[6]`.
 
 **Real-world impact.** "We tried WASM for the UI; it was slower because of the marshalling" is a common outcome, reinforcing the DOM status quo.
 
@@ -423,7 +427,7 @@ The browser's rendering pipeline (style recalculation → layout → paint → c
 ### P9.3 — Dependency Bloat
 **Problem.** JavaScript packages routinely ship bloated, unused transitive dependencies, inflating bundles and attack surface.
 
-**Why it is fundamental.** Soto-Valero, Durieux, Harrand & Barais empirically detect and measure bloated dependencies in JavaScript packages `[44]`; Decan, Mens & Grosjean's comparison of dependency-network evolution across seven ecosystems shows npm's network is among the densest and fastest-evolving, amplifying bloat and churn `[45]`.
+**Why it is fundamental.** Liu, Tiwari, Bogdan & Baudry empirically detect and measure bloated dependencies in JavaScript/CommonJS packages `[44]`; Decan, Mens & Grosjean's comparison of dependency-network evolution across seven ecosystems shows npm's network is among the densest and fastest-evolving, amplifying bloat and churn `[45]`.
 
 **Real-world impact.** Bundle size, install time, and security surface all grow with unused dependencies; debloating is an active engineering practice.
 
@@ -466,7 +470,7 @@ The browser's rendering pipeline (style recalculation → layout → paint → c
 **WASM+GPU connection.** A WASM UI language could offer *either* a retained render-object model (Flutter-like) *or* an immediate-mode function-call model (ImGui-like) as a library choice, because the author owns the render list either way.
 
 ### P10.3 — WebGL/WebGPU Direct Rendering
-**What the literature shows.** Sengupta et al. provide a reality check on browser GPU acceleration, finding WebGL/WebGPU performance uneven and documenting the gap between "GPU available" and "GPU uniformly usable across the UI" `[35]`. Santos-Grueiro et al. measure WebGPU privacy leakage through shaders `[36]`; Hohentanner et al. show WebGPU enables hardware fingerprinting `[37]`; Maczan et al. characterise WebGPU dispatch overhead for demanding workloads `[38]`. Together these show WebGPU is *real and capable* but currently used for islands of computation, not as a unified UI substrate — precisely the gap the proposed stack targets.
+**What the literature shows.** Sengupta et al. provide a reality check on browser GPU acceleration, finding WebGL/WebGPU performance uneven and documenting the gap between "GPU available" and "GPU uniformly usable across the UI" `[35]`. Santos-Grueiro measures WebGPU privacy leakage through shaders `[36]`; Hohentanner et al. show WebGPU enables hardware fingerprinting `[37]`; Maczan et al. characterise WebGPU dispatch overhead for demanding workloads `[38]`. Together these show WebGPU is *real and capable* but currently used for islands of computation, not as a unified UI substrate — precisely the gap the proposed stack targets.
 
 **Why this highlights DOM deficiencies.** The fact that WebGPU is repeatedly studied as a *separate, island* acceleration path — not as the UI substrate — is itself evidence that the DOM stands between the author and the GPU (P1.1, P1.2, P2.5).
 
@@ -506,7 +510,8 @@ The following sub-problems lack direct, strong peer-reviewed evidence and are in
 - **G4. Web-Worker serialization overhead as a UI bottleneck.** The single-main-thread-DOM-ownership contract is well established, but direct fine-grained measurement of serialization-induced UI jank is thin.
 - **G5. URL/history model limits for canvas applications.** Indirect evidence from AJAX-state inference `[27,28,29]`; direct canvas-navigation studies are sparse.
 - **G6. Input-pipeline (stylus/multi-touch/gamepad) overhead for virtual/drawn elements.** Structural coupling to the DOM is clear, but direct measurement is sparse.
-- **G7. Co-author/venue re-verification for a small number of older references.** `[24]` (JavaScript Errors in the Wild) is hosted in a verified research-lab repository (UBC ECE) with a confirmed lead author and topic, but the full co-author list could not be independently re-verified in the review window; it is included with that disclosed limitation. All other references have verified title, lead author, and venue host.
+- **G7. Prior verification debt (resolved).** The prior version of this catalog attributed `[24]` ("JavaScript Errors in the Wild") to K. Gallaba et al. (2018, UBC ECE) with a §0.5/§12 disclosure admitting incomplete verification. That disclosure was itself misleading: the real paper is by Frolin S. Ocariza Jr., Karthik Pattabiraman, and Benjamin G. Zorn, *IEEE ISSRE 2011*, pp. 100–109. This has now been corrected in §13, and the misleading disclosure is retracted. No remaining reference relies on an unverified author list.
+- **G8. Replacement of a fabricated citation.** The prior `[44]` ("Soto-Valero, Durieux, Harrand, Barais, 'Detecting and removing bloated dependencies in JavaScript packages,' EMSE, 2021") did not correspond to any real paper — that author quartet has never co-authored a JavaScript-bloat study; the EMSE 2021 paper by (some of) those authors is instead about Java/Maven. `[44]` has been replaced with the verified JavaScript/CommonJS bloat study by Liu, Tiwari, Bogdan, and Baudry (*Journal of Systems and Software*, 2025), which substantively supports the same P9.3 claim.
 
 These gaps do not undermine the catalog's central conclusions, which rest on the strongly-verified evidence in §1–§11, but they identify where the manifesto's strongest claims would benefit from targeted empirical studies.
 
@@ -516,15 +521,15 @@ These gaps do not undermine the catalog's central conclusions, which rest on the
 
 [1] A. Haas, A. Rossberg, D. L. Schuff, B. L. Titzer, M. Holman, D. Gohman, L. Wagner, A. Zakai, J.-F. Bastien, and M. Shapiro, "Bringing the Web up to speed with WebAssembly," in *Proc. 38th ACM SIGPLAN Conf. Programming Language Design and Implementation (PLDI)*, 2017, pp. 185–200. [ACM DL]
 
-[2] A. Jangda, D. Pinckney, S. Brunthaler, J. G. Politz, E. Kaxiras, S. Burckhardt, M. Musuvathi, and G. Yorsh, "Analyzing the performance of WebAssembly vs. native code," *arXiv:1901.09056*, 2019. [arXiv]
+[2] A. Jangda, B. Powers, E. D. Berger, and A. Guha, "Not so fast: Analyzing the performance of WebAssembly vs. native code," in *Proc. 2019 USENIX Annual Technical Conf. (USENIX ATC)*, 2019. (also *arXiv:1901.09056*) [USENIX]
 
-[3] C. Watt, J. Pombrio, and N. Krishnaswami, "Mechanising and verifying the WebAssembly specification," in *Proc. 8th ACM SIGPLAN Int. Conf. Certified Programs and Proofs (CPP)*, 2019. [ACM DL]
+[3] C. Watt, "Mechanising and verifying the WebAssembly specification," in *Proc. 7th ACM SIGPLAN Int. Conf. Certified Programs and Proofs (CPP)*, 2018. doi: 10.1145/3167082 [ACM DL]
 
-[4] C. Watt, N. Renner, D. Popescu, S. Blue, G. Barthe, and A. Solar-Lezama, "Everything old is new again: Binary security of WebAssembly," in *Proc. 28th USENIX Security Symp.*, 2019. [USENIX]
+[4] D. Lehmann, J. Kinder, and M. Pradel, "Everything old is new again: Binary security of WebAssembly," in *Proc. 29th USENIX Security Symp.*, 2020, pp. 217–234. [USENIX]
 
-[5] X. Rao, A.-L. Georges, M. Legoupil, D. Patterson, and C. Watt, "Iris-Wasm: Robust and modular verification of WebAssembly programs," in *Proc. 44th ACM SIGPLAN Conf. Programming Language Design and Implementation (PLDI)*, 2023. [ACM DL]
+[5] X. Rao, A.-L. Georges, M. Legoupil, C. Watt, J. Pichon-Pharabod, P. Gardner, and L. Birkedal, "Iris-Wasm: Robust and modular verification of WebAssembly programs," in *Proc. 44th ACM SIGPLAN Conf. Programming Language Design and Implementation (PLDI)*, 2023. doi: 10.1145/3591230 [ACM DL]
 
-[6] A. Hilbig, D. Lehmann, and M. Pradel, "An empirical study of real-world WebAssembly binaries: Security, languages, use cases," in *Proc. ECOOP*, 2021. [software-lab.org / Dagstuhl]
+[6] A. Hilbig, D. Lehmann, and M. Pradel, "An empirical study of real-world WebAssembly binaries: Security, languages, use cases," in *Proc. The Web Conference 2021 (WWW '21)*, Ljubljana, Slovenia, 2021. doi: 10.1145/3442381.3450138 [ACM DL]
 
 [7] G. Richards, S. Lebresne, B. Burg, and J. Vitek, "An analysis of the dynamic behavior of JavaScript programs," in *Proc. PLDI*, 2010, pp. 1–12. [ACM DL]
 
@@ -544,75 +549,75 @@ These gaps do not undermine the catalog's central conclusions, which rest on the
 
 [15] S. H. Jensen, A. Møller, and P. Thiemann, "Type analysis for JavaScript," in *Proc. 16th Int. Static Analysis Symp. (SAS)*, 2009. [Springer]
 
-[16] S. H. Jensen, M. Madsen, and A. Møller, "Modeling the HTML DOM and browser API in static analysis of JavaScript," in *Proc. ECOOP*, 2011. [ACM DL / Aarhus Univ.]
+[16] S. H. Jensen, M. Madsen, and A. Møller, "Modeling the HTML DOM and browser API in static analysis of JavaScript web applications," in *Proc. 19th ACM SIGSOFT Symp. Foundations of Software Engineering (ESEC/FSE '11)*, 2011. doi: 10.1145/2025113.2025125 [ACM DL]
 
 [17] S. Maffeis and A. Taly, "Language-based isolation of untrusted JavaScript," in *Proc. 22nd IEEE Computer Security Foundations Symp. (CSF)*, 2009. [ACM DL]
 
 [18] L. A. Meyerovich and B. Livshits, "ConScript: Specifying and enforcing fine-grained security policies for JavaScript in the browser," in *Proc. IEEE Symp. Security and Privacy (S&P)*, 2010. [IEEE]
 
-[19] Z. Gao, C. Bird, and E. T. Barr, "To type or not to type: Quantifying detectable bugs in JavaScript," in *Proc. OOPSLA*, 2017. [ACM DL]
+[19] Z. Gao, C. Bird, and E. T. Barr, "To type or not to type: Quantifying detectable bugs in JavaScript," in *Proc. 39th IEEE/ACM Int. Conf. Software Engineering (ICSE '17)*, 2017. doi: 10.1109/ICSE.2017.75 [IEEE/ACM]
 
-[20] M. Selakovic and M. Pradel, "Performance issues and optimizations in JavaScript: An empirical study," in *Proc. 31st IEEE/ACM Int. Conf. Automated Software Engineering (ASE)*, 2016. [ACM DL]
+[20] M. Selakovic and M. Pradel, "Performance issues and optimizations in JavaScript: An empirical study," in *Proc. 38th IEEE/ACM Int. Conf. Software Engineering (ICSE '16)*, 2016, pp. 61–72. doi: 10.1145/2884781.2884829 [ACM DL]
 
-[21] M. Selakovic and M. Pradel, "Automatically fixing real-world JavaScript performance bugs," in *Proc. ICSE (New Ideas and Emerging Results)*, 2016. [ACM DL]
+[21] M. Selakovic and M. Pradel, "Poster: Automatically fixing real-world JavaScript performance bugs," in *Proc. 37th IEEE/ACM Int. Conf. Software Engineering (ICSE '15), Vol. 2*, 2015, pp. 811–812. [ACM DL]
 
 [22] P. Gyimesi, B. Vancsics, A. Stocco, D. Mazinanian, Á. Beszédes, R. Ferenc, and A. Mesbah, "BugsJS: A benchmark and taxonomy of JavaScript bugs," in *Proc. IEEE Conf. Software Analysis, Evolution and Reengineering (SANER)*, 2019. [IEEE]
 
-[23] K. Gallaba, I. Beschastnikh, and A. Mesbah, "Characterizing callbacks in JavaScript," in *Proc. IEEE Int. Conf. Program Comprehension (ICPC)*, 2015. [ACM/IEEE]
+[23] K. Gallaba, I. Beschastnikh, and A. Mesbah, "Don't call us, we'll call you: Characterizing callbacks in JavaScript," in *Proc. IEEE Int. Conf. Program Comprehension (ICPC)*, 2015. [ACM/IEEE]
 
-[24] K. Gallaba et al., "JavaScript errors in the wild: An empirical study," 2018. [Univ. of British Columbia, ECE — verified title, lead author, and host; full co-author list not re-verified in review window; see §12-G7]
+[24] F. S. Ocariza Jr., K. Pattabiraman, and B. G. Zorn, "JavaScript errors in the wild: An empirical study," in *Proc. IEEE 22nd Int. Symp. Software Reliability Engineering (ISSRE)*, 2011, pp. 100–109. [IEEE]
 
 [25] S. Mirshokraie, A. Mesbah, and K. Pattabiraman, "Efficient JavaScript mutation testing," in *Proc. IEEE Int. Conf. Software Testing, Verification and Validation (ICST)*, 2013. [ACM/IEEE]
 
 [26] S. Mirshokraie, A. Mesbah, and K. Pattabiraman, "Guided mutation testing for JavaScript web applications," *IEEE Trans. Software Engineering (TSE)*, 2015. [IEEE]
 
-[27] A. Mesbah, E. Bozdag, and A. van Deursen, "Crawling AJAX by inferring user interface state changes," in *Proc. IEEE Int. Conf. Software Maintenance (ICSM)*, 2008. [IEEE]
+[27] A. Mesbah, E. Bozdag, and A. van Deursen, "Crawling AJAX by inferring user interface state changes," in *Proc. 8th Int. Conf. Web Engineering (ICWE '08)*, 2008, pp. 122–134. [IEEE/Springer]
 
-[28] A. Mesbah, A. van Deursen, and D. Roest, "Invariant-based automatic testing of AJAX user interfaces," in *Proc. ICST*, 2009. [IEEE]
+[28] A. Mesbah and A. van Deursen, "Invariant-based automatic testing of AJAX user interfaces," in *Proc. 31st Int. Conf. Software Engineering (ICSE '09)*, 2009, pp. 210–220. doi: 10.1109/ICSE.2009.5070522 [IEEE]
 
-[29] A. Marchetto, P. Tonella, and F. Ricca, "State-based testing of AJAX web applications," 2008. [ACM DL]
+[29] A. Marchetto, P. Tonella, and F. Ricca, "State-based testing of AJAX web applications," in *Proc. Int. Conf. Software Testing, Verification, and Validation (ICST '08)*, 2008. [IEEE/ACM]
 
 [30] S. R. Choudhary, H. Versee, and A. Orso, "WEBDIFF: Automated identification of cross-browser issues in web applications," in *Proc. ICST*, 2010. [IEEE]
 
 [31] A. Stocco, R. Yandrapally, and A. Mesbah, "Visual web test repair using computer vision," in *Proc. 26th ACM Joint Meeting European Software Engineering Conf. and Symp. Foundations of Software Engineering (ESEC/FSE)*, 2018. [ACM DL]
 
-[32] A. Taivalsaari and T. Mikkonen, "The web as a software platform: Ten years later," in *Proc. WEBIST (SciTePress)*, 2021. [SciTePress]
+[32] A. Taivalsaari and T. Mikkonen, "The web as a software platform: Ten years later," in *Proc. 13th Int. Conf. Web Information Systems and Technologies (WEBIST 2017)*, Porto, Portugal, 2017. [SciTePress]
 
 [33] L. A. Meyerovich and R. Bodik, "Fast and parallel webpage layout," in *Proc. 19th Int. Conf. World Wide Web (WWW)*, 2010. [ACM DL]
 
-[34] K. Wu et al., "Rendering contention channel made practical in web," in *Proc. 31st USENIX Security Symp.*, 2022. [USENIX]
+[34] S. Wu, J. Yu, M. Yang, and Y. Cao, "Rendering contention channel made practical in web browsers," in *Proc. 31st USENIX Security Symp.*, 2022, pp. 3183–3199. [USENIX]
 
-[35] S. Sengupta, N. Wu, M. Varvello, K. Jana, S. Chen, and B. Han, "From WebGL to WebGPU: A reality check of browser-based GPU acceleration," in *Proc. ACM*, 2025. [ACM DL]
+[35] S. Sengupta, N. Wu, M. Varvello, K. Jana, S. Chen, and B. Han, "A reality check of browser-based GPU acceleration," in *Proc. ACM*, 2025. (earlier preprint: "From WebGL to WebGPU: A reality check of browser-based GPU acceleration") [ACM DL]
 
-[36] I. Santos-Grueiro et al., "What browsers do in the shaders: A measurement study of WebGPU privacy," *arXiv:2606.26412*, 2026. [arXiv]
+[36] I. Santos-Grueiro, "What browsers do in the shaders: A measurement study of WebGPU privacy," *arXiv:2606.26412*, 2026. (sole author) [arXiv]
 
 [37] K. Hohentanner et al., "Unveiling privacy risks in WebGPU through hardware-based fingerprinting," in *Proc. ACM*, 2025. [ACM DL]
 
 [38] J. Maczan et al., "Characterizing WebGPU dispatch overhead for LLM inference," *arXiv*, 2026. [arXiv]
 
-[39] F. Elavsky, C. Fan, K. Reinecke, et al., "Understanding screen-reader users' experiences with online data visualizations," in *Proc. CHI*, 2022. [ACM DL]
+[39] A. Sharif, S. S. Chintalapati, J. O. Wobbrock, and K. Reinecke, "Understanding screen-reader users' experiences with online data visualizations," in *Proc. 23rd Int. ACM SIGACCESS Conf. Computers and Accessibility (ASSETS '21)*, 2021. doi: 10.1145/3441852.3471202 [ACM DL]
 
-[40] A. Sharif, O. H. Wang, J. O. Wobbrock, and K. Reinecke, "VoxLens: Making online data visualizations accessible with an interactive JavaScript plug-in," in *Proc. CHI*, 2022. [ACM DL]
+[40] A. Sharif, O. H. Wang, A. T. Muongchan, K. Reinecke, and J. O. Wobbrock, "VoxLens: Making online data visualizations accessible with an interactive JavaScript plug-in," in *Proc. CHI '22*, 2022. doi: 10.1145/3491102.3517431 [ACM DL]
 
 [41] J. Zong, C. Lee, A. Lundgard, J. Jang, and A. Satyanarayan, "Rich screen reader experiences for accessible data visualization," in *Proc. CHI*, 2022. [ACM DL / arXiv]
 
 [42] J. Ara, C. Sik-Lányi, and Á. Kelemen, "Accessibility engineering in web evaluation process," *Universal Access in the Information Society*, 2024. [Springer]
 
-[43] M. Ohm, H. Plate, A. Sykosch, and M. Meier, "Backstabber's knife collection: A review of open source software supply chain attacks," in *Proc. 17th Int. Conf. Mining Software Repositories (MSR)*, 2020. [ACM DL]
+[43] M. Ohm, H. Plate, A. Sykosch, and M. Meier, "Backstabber's knife collection: A review of open source software supply chain attacks," in *Proc. 17th Int. Conf. Detection of Intrusions and Malware, and Vulnerability Assessment (DIMVA 2020)*, 2020, pp. 23–43. doi: 10.1007/978-3-030-52683-2_2 [Springer LNCS]
 
-[44] C. Soto-Valero, T. Durieux, N. Harrand, and D. Barais, "Detecting and removing bloated dependencies in JavaScript packages," *Empirical Software Engineering (EMSE)*, 2021. [Springer]
+[44] Y. Liu, D. Tiwari, C. Bogdan, and B. Baudry, "Detecting and removing bloated dependencies in CommonJS packages," *Journal of Systems and Software (JSS)*, vol. 230, art. 112509, 2025. (preprint *arXiv:2405.17939*) doi: 10.1016/j.jss.2025.112509 [ScienceDirect/arXiv]
 
 [45] A. Decan, T. Mens, and P. Grosjean, "An empirical comparison of dependency network evolution in seven software packaging ecosystems," *Information and Software Technology (IST)*, 2019. [Elsevier / ACM DL]
 
-[46] L. A. Meyerovich and J. Rabkin, "Empirical analysis of programming language adoption," in *Proc. OOPSLA*, 2013. [ACM DL]
+[46] L. A. Meyerovich and A. S. Rabkin, "Empirical analysis of programming language adoption," in *Proc. OOPSLA '13*, 2013. doi: 10.1145/2509136.2509515 [ACM DL]
 
-[47] S. Lekies, B. Stock, M. Wentzel, and M. Johansson, "The unexpected dangers of dynamic JavaScript," in *Proc. USENIX Security Symp.*, 2015. [USENIX]
+[47] S. Lekies, B. Stock, M. Wentzel, and M. Johns, "The unexpected dangers of dynamic JavaScript," in *Proc. 24th USENIX Security Symp.*, 2015, pp. 723–735. [USENIX]
 
-[48] M. Schwarz, F. Lackner, and D. Gruss, "A sense of time for JavaScript and Node.js: First-class timeouts as a cure for event handler poisoning," in *Proc. USENIX Security Symp.*, 2018. [USENIX]
+[48] J. C. Davis, E. R. Williamson, and D. Lee, "A sense of time for JavaScript and Node.js: First-class timeouts as a cure for event handler poisoning," in *Proc. 27th USENIX Security Symp.*, 2018. [USENIX]
 
 [49] M. Schwarz, F. Lackner, and D. Gruss, "JavaScript template attacks: Automatically inferring host information for targeted exploits," in *Proc. Network and Distributed System Security Symp. (NDSS)*, 2019. [NDSS]
 
-[50] T. Rokicki et al., "SoK: In search of lost time — A review of JavaScript timers in browsers," in *Proc. IEEE Symp. Security and Privacy (S&P)*, 2024. [IEEE / SoK]
+[50] T. Rokicki, C. Maurice, and P. Laperdrix, "SoK: In search of lost time — A review of JavaScript timers in browsers," in *Proc. 6th IEEE European Symp. Security and Privacy (EuroS&P 2021)*, 2021, pp. 472–486. doi: 10.1109/EuroSP51992.2021.00039 [IEEE]
 
 ---
 
