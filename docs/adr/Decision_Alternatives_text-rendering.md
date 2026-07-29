@@ -1,5 +1,7 @@
 # Decision Alternatives: Text Rendering Strategy
 
+> **⚠ RESOLVED — superseded by [ADR 022](ADR.md#adr-022-forked-harfrust-in-wasm-text-stack).** The project owner chose **Approach A (forked HarfRust in-WASM stack)**, which overrides this file's prior "Recommended Approach B (hidden DOM surface)". This file is retained for historical context only; the live decision is ADR 022.
+
 ## Decision Point
 
 Choose the off-DOM text stack that satisfies contractual shaping, BiDi, selection, IME, and a11y for a WASM+GPU UI that abandons the DOM.

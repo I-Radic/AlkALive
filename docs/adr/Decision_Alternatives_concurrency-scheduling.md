@@ -1,5 +1,7 @@
 # Decision Alternatives: Concurrency and Scheduling Model
 
+> **⚠ RESOLVED — superseded by [ADR 021](ADR.md#adr-021-main-thread--on-demand-wasm-threads-with-socket-ipc).** The project owner chose a **new hybrid (main thread + on-demand WASM threads + socket IPC)** not present in this file's A/B/C options, which overrides the prior "Recommended Approach A (cooperative coroutines)". This file is retained for historical context only; the live decision is ADR 021.
+
 ## Decision Point
 
 Select the concurrency and scheduling model for the WASM UI language runtime — the mechanism by which layout, rendering, input (a11y/IME), and user-authored logic are multiplexed within each frame tick.

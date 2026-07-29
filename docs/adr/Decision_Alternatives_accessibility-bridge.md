@@ -1,5 +1,7 @@
 # Decision Alternatives: Accessibility Bridge Approach
 
+> **⚠ RESOLVED — superseded by [ADR 019](ADR.md#adr-019-accessibility-deferred).** The project owner chose **Approach A (no DOM mirror, accessibility deferred)**, which overrides this file's prior "Recommended Approach C (hybrid DOM projection)". This file is retained for historical context only; the live decision is ADR 019.
+
 ## Decision Point
 
 How a GPU-drawn UI surface exposes its semantic structure, roles, labels, and focus state to assistive technology (AT), given that canvas/WebGPU rendering bypasses the DOM accessibility tree entirely.

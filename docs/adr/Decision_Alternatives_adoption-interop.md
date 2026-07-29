@@ -1,5 +1,7 @@
 # Decision Alternatives: Adoption and Interop Strategy
 
+> **⚠ RESOLVED — superseded by [ADR 020](ADR.md#adr-020-metadata-only-dom-layer-for-seo).** The project owner chose **Approach C (DOM only for metadata/SEO, no UI DOM interop)**, which overrides this file's prior "Recommended Approach A (host-DOM interop bridges)". This file is retained for historical context only; the live decision is ADR 020.
+
 ## Decision Point
 
 How should the new stack coexist with the incumbent web stack during adoption — incremental interop, full rewrite, or greenfield isolation?

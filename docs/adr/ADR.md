@@ -32,12 +32,17 @@
 | [ADR 016](#adr-016-unified-author-owned-trace-with-split-determinism) | Unified Author-Owned Trace with Split Determinism | Medium |
 | [ADR 017](#adr-017-compiled-wasm-binary--webgpu-pipeline-precompilation) | Compiled WASM Binary + WebGPU Pipeline Precompilation | Medium |
 | [ADR 018](#adr-018-capability-scoped-imports--component-model-tree-shaking) | Capability-Scoped Imports + Component-Model Tree-Shaking | Medium |
+| [ADR 019](#adr-019-accessibility-deferred) | Defer Accessibility Bridge — No DOM Mirror | High |
+| [ADR 020](#adr-020-metadata-only-dom-layer-for-seo) | Metadata-Only DOM Layer for SEO — No UI DOM Interop | High |
+| [ADR 021](#adr-021-main-thread--on-demand-wasm-threads-with-socket-ipc) | Main Thread + On-Demand WASM Threads with Socket IPC | High |
+| [ADR 022](#adr-022-forked-harfrust-in-wasm-text-stack) | Forked HarfRust as the In-WASM Text Shaping/Rasterization Stack | High |
 
-**Decision Alternatives (Low confidence — separate files):**
-- [`Decision_Alternatives_text-rendering.md`](Decision_Alternatives_text-rendering.md) — Text rendering strategy (P3.5, decisive)
-- [`Decision_Alternatives_concurrency-scheduling.md`](Decision_Alternatives_concurrency-scheduling.md) — Concurrency/scheduling model (P4.3, multiple viable)
-- [`Decision_Alternatives_accessibility-bridge.md`](Decision_Alternatives_accessibility-bridge.md) — Accessibility bridge approach (P6.1, decisive)
-- [`Decision_Alternatives_adoption-interop.md`](Decision_Alternatives_adoption-interop.md) — Adoption/interop strategy (P9.5, strategic)
+**Decision Alternatives (Low confidence — separate files, now RESOLVED):**
+The following four Decision Alternatives files have been **resolved** by ADRs 019–022 above. They are retained for historical context but their "Recommended Approach" is **superseded** by the project owner's non-negotiable choices.
+- [`Decision_Alternatives_text-rendering.md`](Decision_Alternatives_text-rendering.md) — Text rendering strategy → **resolved by [ADR 022](#adr-022-forked-harfrust-in-wasm-text-stack)** (forked HarfRust; overrides the file's prior Approach B)
+- [`Decision_Alternatives_concurrency-scheduling.md`](Decision_Alternatives_concurrency-scheduling.md) — Concurrency/scheduling model → **resolved by [ADR 021](#adr-021-main-thread--on-demand-wasm-threads-with-socket-ipc)** (main thread + on-demand WASM threads + socket IPC; a new hybrid not in the file's A/B/C)
+- [`Decision_Alternatives_accessibility-bridge.md`](Decision_Alternatives_accessibility-bridge.md) — Accessibility bridge approach → **resolved by [ADR 019](#adr-019-accessibility-deferred)** (Approach A, no DOM mirror, a11y deferred; overrides the file's prior Approach C)
+- [`Decision_Alternatives_adoption-interop.md`](Decision_Alternatives_adoption-interop.md) — Adoption/interop strategy → **resolved by [ADR 020](#adr-020-metadata-only-dom-layer-for-seo)** (Approach C, DOM only for metadata/SEO; overrides the file's prior Approach A)
 
 ---
 
@@ -57,7 +62,7 @@ Proposed.
 
 **Negative:** Authors lose declarative box-model ergonomics, raising the burden for UI-centric content — [ADR 004](#adr-004-pluggable-constraint-solver-layout-with-mandatory-text-flow-measurement-contract) (layout) reintroduces high-level sugar atop the IR. Graph compilation adds per-frame overhead and a correctness burden around barrier and attachment-lifetime management. Mapping scene entities to graph nodes requires care — [ADR 007](#adr-007-single-owned-render-object-tree-component--subtree) (object model).
 
-**Cross-references:** Graph compilation (reordering/batching/occlusion-cull) runs on [ADR 003](#adr-003-single-gpudevice-render-thread--sabcoop-coep-compositor)'s single-owner render thread over SharedArrayBuffer-backed scene data; the occlusion-cull pass executes on that thread against a compositor-wide depth/visibility buffer. The compositor (ADR 003) consumes the compiled graph output and both ADRs must agree on a shared attachment-format and pass-boundary contract (to be specified in a future rendering-ABI ADR). Layout (ADR 004) and the object model (ADR 007) are downstream consumers that emit render-graph IR rather than box trees.
+**Cross-references:** Graph compilation (reordering/batching/occlusion-cull) is scheduled by [ADR 021](#adr-021-main-thread--on-demand-wasm-threads-with-socket-ipc)'s main-thread + on-demand WASM-worker pool (socket IPC over SharedArrayBuffer) and committed through [ADR 003](#adr-003-single-gpudevice-render-thread--sabcoop-coep-compositor)'s single-GPUDevice compositor; the occlusion-cull pass may run on any worker but serializes against the compositor-wide depth/visibility buffer. The compositor (ADR 003) consumes the compiled graph output and both ADRs must agree on a shared attachment-format and pass-boundary contract (to be specified in a future rendering-ABI ADR). Layout (ADR 004) and the object model (ADR 007) are downstream consumers that emit render-graph IR rather than box trees.
 
 ### Confidence
 **High.** The box-model atomicity limitation is well-documented [32,33], and render-graph IR directly resolves every stated constraint by making the draw call the atomic unit.
@@ -91,7 +96,7 @@ Proposed.
 Multiple scene graphs (UI, particles, world, overlays) must compose into one frame without per-graph contention (P1.5). But WebGPU's `GPUDevice` and derived objects are agent-bound: they cannot be shared across workers (a WebGPU-spec constraint, not a catalog P-entry; the rough draft §7 Solution states this directly). Concurrent submission from several workers would serialize at the browser boundary anyway, with no safe coordination mechanism.
 
 ### Decision
-Adopt **option (a)**: a single dedicated render thread owns the lone `GPUDevice` and serializes every render-graph submission from all scene graphs. Scene data (instance tables, transforms, draw lists) lives in a `SharedArrayBuffer` under COOP/COEP (`Cross-Origin-Opener-Policy: same-origin`, `Cross-Origin-Embedder-Policy: require-corp`). Graphs emit immutable render-graph IR ([ADR 001](#adr-001-render-graph-ir-as-the-atomic-rendering-unit)); the render thread merges, compiles, reorders, batches, then submits. The occlusion-cull pass executes on the render thread against a compositor-wide depth/visibility buffer.
+Adopt **option (a)**: a single dedicated render thread owns the lone `GPUDevice` and serializes every render-graph submission from all scene graphs — the persistent GPUDevice-owner thread of [ADR 021](#adr-021-main-thread--on-demand-wasm-threads-with-socket-ipc)'s model (either the main thread or a dedicated non-on-demand worker); on-demand WASM worker threads never acquire the GPUDevice, they feed render-graph IR over SharedArrayBuffer/socket IPC for the single owner to merge/submit. Scene data (instance tables, transforms, draw lists) lives in a `SharedArrayBuffer` under COOP/COEP (`Cross-Origin-Opener-Policy: same-origin`, `Cross-Origin-Embedder-Policy: require-corp`). Graphs emit immutable render-graph IR ([ADR 001](#adr-001-render-graph-ir-as-the-atomic-rendering-unit)); the render thread merges, compiles, reorders, batches, then submits. The occlusion-cull pass executes on the render thread against a compositor-wide depth/visibility buffer.
 
 ### Status
 Proposed.
@@ -99,7 +104,7 @@ Proposed.
 ### Consequences
 - **Positive:** one authoritative submission path; no GPUDevice-sharing hazards; graphs compose without lock-free complexity.
 - **Negative (COOP/COEP risk):** cross-origin isolation headers are required; this conflicts with embedding third-party iframes. Mitigations: `credentialless` COEP or iframe proxying. If unworkable, fall back to option (b) per-graph separate devices (loses shared compositor).
-- **Cross-references:** [ADR 001](#adr-001-render-graph-ir-as-the-atomic-rendering-unit) (render-graph IR is the input); [ADR 013](#adr-013-no-wasmdom-boundary-in-the-hot-path) (hot-path interop relies on this single-thread submission).
+- **Cross-references:** [ADR 001](#adr-001-render-graph-ir-as-the-atomic-rendering-unit) (render-graph IR is the input); [ADR 013](#adr-013-no-wasmdom-boundary-in-the-hot-path) (hot-path interop relies on this single-thread submission); [ADR 021](#adr-021-main-thread--on-demand-wasm-threads-with-socket-ipc) (threading model: render thread is the persistent GPUDevice owner distinct from on-demand workers); [ADR 022](#adr-022-forked-harfrust-in-wasm-text-stack) (forked HarfRust text stack emits glyph-run IR consumed by this compositor).
 
 ### Confidence
 **Medium.** The single-owner model is sound, but the COOP/COEP deployment constraint is a real-world risk that may force option (b) on iframe-heavy hosts.
@@ -112,7 +117,7 @@ Proposed.
 Flexbox and Grid are fixed rectangular-only solvers with unstable cross-engine semantics (P2.3, P2.4) [33,30]. They couple style-driven box-tree recalculation to layout, forcing full-tree reflows on minor style changes and producing divergent results across browsers. We need a layout substrate that (1) operates over first-class render objects rather than a CSS box tree, (2) admits non-rectangular constraints, and (3) emits results consumable directly by GPU transforms without an intermediate layout-tree serialization.
 
 ### Decision
-Adopt a **pluggable constraint solver** (Cassowary, impulse, or graph-based) operating over first-class objects. The layout-tree is solver-internal and never re-derived from styles. A **mandatory text-flow measurement contract** is always present: the solver consumes a synchronous *measured-run* interface (glyph-run metrics) regardless of backend. The preferred backing implementation is an in-WASM Knuth-Plass + HarfBuzz sub-solver; an interim hidden-DOM measurement shim (per [`Decision_Alternatives_text-rendering`](Decision_Alternatives_text-rendering.md), Approach B) may satisfy the contract pending in-WASM shaper maturity. Solver outputs (transforms, glyph runs) feed GPU transforms directly, with no style-driven box-tree recalculation.
+Adopt a **pluggable constraint solver** (Cassowary, impulse, or graph-based) operating over first-class objects. The layout-tree is solver-internal and never re-derived from styles. A **mandatory text-flow measurement contract** is always present: the solver consumes a synchronous *measured-run* interface (glyph-run metrics) regardless of backend. The backing implementation is the **forked HarfRust** in-WASM stack per [ADR 022](#adr-022-forked-harfrust-in-wasm-text-stack); no DOM text surface is permitted ([ADR 020](#adr-020-metadata-only-dom-layer-for-seo), [ADR 022](#adr-022-forked-harfrust-in-wasm-text-stack)). Solver outputs (transforms, glyph runs) feed GPU transforms directly, with no style-driven box-tree recalculation.
 
 Alternatives considered: (b) a single fixed solver — rejected for forfeiting non-rectangular and domain-specific layouts; (c) author-everything including text — rejected for re-introducing the exact fragmentation instability (P2.4) this design avoids.
 
@@ -122,7 +127,7 @@ Proposed.
 ### Consequences
 - **Locality** ([ADR 002](#adr-002-per-module-dirty-rect-invalidation-with-layout-locality)): per-module dirty-rect invalidation holds because the solver recomputes only constrained object subsets, never the full box tree.
 - **Styling** ([ADR 005](#adr-005-object-owned-per-instance-styling)): per-instance object-owned styles remain authoritative; the solver consumes style values as constraint inputs and never mutates them.
-- **Text rendering** ([`Decision_Alternatives_text-rendering`](Decision_Alternatives_text-rendering.md)): the layout engine consumes a synchronous measured-run interface; the backing implementation is pluggable (in-WASM Knuth-Plass+HarfBuzz preferred; hidden-DOM measurement shim as interim per Approach B). This keeps glyph metrics consistent across outer-solver swaps without mandating a single text backend.
+- **Text rendering** ([ADR 022](#adr-022-forked-harfrust-in-wasm-text-stack)): the layout engine consumes a synchronous measured-run interface; the backing implementation is the forked in-WASM HarfRust stack per ADR 022 (no DOM text surface per [ADR 020](#adr-020-metadata-only-dom-layer-for-seo)/[ADR 022](#adr-022-forked-harfrust-in-wasm-text-stack)). This keeps glyph metrics consistent across outer-solver swaps.
 - Coupling surface shrinks to the solver's transform-output contract; swapping solvers is internal and non-breaking.
 
 ### Confidence
@@ -186,7 +191,7 @@ Proposed.
 ### Consequences
 - **Positive:** eliminates the reconciliation layer (P3.2) and the imperative-mutation surface (P3.4); module-controlled construction/destruction; GPU-resident instancing decouples paint cost from tree size (P3.3).
 - **Negative:** loses DOM ergonomics for document-like content; requires first-class solutions for text (P3.5) and accessibility (P6.1) that the DOM previously provided.
-- **Cross-references:** [ADR 002](#adr-002-per-module-dirty-rect-invalidation-with-layout-locality) (invalidation) operates on this tree; [ADR 004](#adr-004-pluggable-constraint-solver-layout-with-mandatory-text-flow-measurement-contract) (layout) is a stage over it; [ADR 008](#adr-008-statically-typed-moduleoo-language-compiling-to-wasm) (language) defines the module/component unit; [ADR 011](#adr-011-unified-virtual-focusaccessibility-annotation-layer) (focus) derives from it; the text and accessibility solutions ([`Decision_Alternatives_text-rendering`](Decision_Alternatives_text-rendering.md), [`Decision_Alternatives_accessibility-bridge`](Decision_Alternatives_accessibility-bridge.md)) are decisive dependencies.
+- **Cross-references:** [ADR 002](#adr-002-per-module-dirty-rect-invalidation-with-layout-locality) (invalidation) operates on this tree; [ADR 004](#adr-004-pluggable-constraint-solver-layout-with-mandatory-text-flow-measurement-contract) (layout) is a stage over it; [ADR 008](#adr-008-statically-typed-moduleoo-language-compiling-to-wasm) (language) defines the module/component unit; [ADR 011](#adr-011-unified-virtual-focusaccessibility-annotation-layer) (focus) derives from it; the text solution is resolved by [ADR 022](#adr-022-forked-harfrust-in-wasm-text-stack) (in-WASM HarfRust stack) and accessibility by [ADR 019](#adr-019-accessibility-deferred) (a11y deferred, no DOM bridge); these were decisive dependencies, now satisfied.
 
 ### Confidence
 **High.** The impedance-mismatch evidence is direct [30,31,27,28,29], and the owned-tree model is the proven Flutter-class architecture.
@@ -207,7 +212,7 @@ Proposed.
 ### Consequences
 - **Positive:** type errors become compile-time; encapsulation is a language primitive; WASM's predictable AOT ceiling replaces JIT heuristics; first-class modules give precise HMR/test/dependency units.
 - **Negative:** new language ecosystem must be built (adoption risk — P9.5); abandons DOM/HTML/CSS as substrate (explicit architectural commitment).
-- **Cross-references:** [ADR 009](#adr-009-two-level-type-verification) (type verification); [ADR 013](#adr-013-no-wasmdom-boundary-in-the-hot-path) (hot-path); [ADR 018](#adr-018-capability-scoped-imports--component-model-tree-shaking) (capability-scoped imports); [`Decision_Alternatives_concurrency-scheduling`](Decision_Alternatives_concurrency-scheduling.md) (scheduling model).
+- **Cross-references:** [ADR 009](#adr-009-two-level-type-verification) (type verification); [ADR 013](#adr-013-no-wasmdom-boundary-in-the-hot-path) (hot-path); [ADR 018](#adr-018-capability-scoped-imports--component-model-tree-shaking) (capability-scoped imports); [ADR 021](#adr-021-main-thread--on-demand-wasm-threads-with-socket-ipc) (scheduling model — resolved).
 
 ### Confidence
 **High.** The dynamic-typing and JIT-unpredictability evidence is direct [7,19,22,13,20,21], and WASM's AOT profile is well-established [1,2,6].
@@ -262,7 +267,7 @@ Proposed.
 In DOM UI, focus, tab order, and the focus ring are document-tree properties that browsers and assistive technologies (AT) observe directly. Canvas-rendered UI has no host-native focus model that AT can introspect (P5.3) [39,40,41]. Focus state and accessibility announcement share a bidirectional hard dependency (P6.1).
 
 ### Decision
-Adopt a **unified virtual focus and accessibility tree**: one derived annotation layer over the render-object graph ([ADR 007](#adr-007-single-owned-render-object-tree-component--subtree)), not two. Focus and tab order are virtual — computed from render-object metadata, independent in derivation from any host document (though they may *project* onto a minimal AT-resolvable DOM surface where platform AT contracts require it — see [`Decision_Alternatives_accessibility-bridge`](Decision_Alternatives_accessibility-bridge.md), Approach C). Focus annotations are the only mutable facet of that layer; they are stored on the annotation layer, not on the render objects themselves, preserving [ADR 007](#adr-007-single-owned-render-object-tree-component--subtree)'s module ownership. The annotation layer is **cached and invalidated on render-object mutation** (not lazily recomputed per query). **Input dispatch is the sole writer** of focus state ([ADR 010](#adr-010-cpu-bounding-volume-hit-testing--first-class-device-event-input)); no other subsystem mutates it. **Accessibility is the sole reader/announcer**, consuming the current focus annotation to drive AT notifications and focus-ring rendering.
+Adopt a **unified virtual focus and accessibility tree**: one derived annotation layer over the render-object graph ([ADR 007](#adr-007-single-owned-render-object-tree-component--subtree)), not two. Focus and tab order are virtual — computed from render-object metadata, independent in derivation from any host document. Focus annotations are the only mutable facet of that layer; they are stored on the annotation layer, not on the render objects themselves, preserving [ADR 007](#adr-007-single-owned-render-object-tree-component--subtree)'s module ownership. The annotation layer is **cached and invalidated on render-object mutation** (not lazily recomputed per query). **Input dispatch is the sole writer** of focus state ([ADR 010](#adr-010-cpu-bounding-volume-hit-testing--first-class-device-event-input)); no other subsystem mutates it. **Focus-ring rendering is the sole active reader** of focus annotations. AT announcement / a11y-tree derivation is **deferred** per [ADR 019](#adr-019-accessibility-deferred) (no DOM bridge, no DOM projection surface).
 
 Alternatives considered:
 - (a) Unified virtual focus + a11y tree, input writes / a11y reads [chosen].
@@ -273,14 +278,14 @@ Alternatives considered:
 Proposed.
 
 ### Consequences
-- Single source of truth: focus and a11y never diverge; no sync layer *within* the virtual model, dissolving the P6.1 coupling. (An optional DOM projection surface for AT resolvability may introduce a read-only sync boundary — see [`Decision_Alternatives_accessibility-bridge`](Decision_Alternatives_accessibility-bridge.md) Approach C.)
+- Single source of truth: focus and a11y never diverge; no sync layer *within* the virtual model, dissolving the P6.1 coupling. (No DOM projection surface exists — a11y announcement is deferred per [ADR 019](#adr-019-accessibility-deferred).)
 - Strict writer discipline: only input dispatch ([ADR 010](#adr-010-cpu-bounding-volume-hit-testing--first-class-device-event-input)) mutates focus annotations, preventing animation/layout/script races.
 - Derivation coupling: the annotation layer derives from the render-object graph ([ADR 007](#adr-007-single-owned-render-object-tree-component--subtree)); object-model changes ripple into focus/a11y shape. [ADR 007](#adr-007-single-owned-render-object-tree-component--subtree) recognises this layer as a first-class derived annotation, distinct from the platform bridge.
 - Focus-ring rendering reads this layer, not DOM pseudo-classes.
-- Accessibility-tree derivation and any DOM projection surface are specified in [`Decision_Alternatives_accessibility-bridge`](Decision_Alternatives_accessibility-bridge.md), not here.
+- Accessibility-tree derivation and any DOM projection surface are deferred per [ADR 019](#adr-019-accessibility-deferred); none exist in this phase.
 
 ### Confidence
-**High** on unifying focus and accessibility into one derived annotation layer and on input-dispatch-as-sole-writer. **Medium** on whether a minimal DOM projection surface is required for AT resolvability on web targets — that question is deferred to [`Decision_Alternatives_accessibility-bridge`](Decision_Alternatives_accessibility-bridge.md).
+**High** on unifying focus and accessibility into one derived annotation layer and on input-dispatch-as-sole-writer. A11y announcement is deferred per [ADR 019](#adr-019-accessibility-deferred) (no DOM bridge, no DOM projection surface).
 
 ---
 
@@ -290,7 +295,7 @@ Proposed.
 URL/history APIs assume addressable document states, but canvas-rendered apps fabricate lossy navigation (P6.2) [27,28,29] *(catalog gap G5: direct canvas-navigation studies are sparse; evidence is indirect via AJAX-state inference)*. SEO depends on DOM content; pure-canvas surfaces are invisible to crawlers (P6.3).
 
 ### Decision
-Treat navigation/URL as a **structured navigation/state contract**: the app exposes declared routes plus serialisable state to the host explicitly. Handle SEO via **explicit per-app scope declaration**: each app declares either a *non-SEO domain* or a *hybrid/structured-content export*. Rejected: (b) ad-hoc URL mappings + universal DOM SEO; (c) no SEO handling.
+Treat navigation/URL as a **structured navigation/state contract**: the app exposes declared routes plus serialisable state to the host explicitly. Handle SEO via the concrete mechanism specified in [ADR 020](#adr-020-metadata-only-dom-layer-for-seo): DOM limited to `<title>`/`<meta>` plus a static HTML snapshot for search-engine crawlers (no UI DOM interop). Rejected: (b) ad-hoc URL mappings + universal DOM SEO; (c) no SEO handling.
 
 ### Status
 Proposed.
@@ -298,11 +303,11 @@ Proposed.
 ### Consequences
 - Predictable, restorable navigation; uniform host integration (P6.2).
 - Aligns with [ADR 007](#adr-007-single-owned-render-object-tree-component--subtree): routes and serialisable state are first-class objects.
-- Non-SEO apps relieved of DOM-a11y-SEO overhead; hybrid apps bear an explicit export obligation.
-- Cross-references [ADR 007](#adr-007-single-owned-render-object-tree-component--subtree); adoption path per [`Decision_Alternatives_adoption-interop`](Decision_Alternatives_adoption-interop.md).
+- Non-SEO apps relieved of DOM-a11y-SEO overhead; the SEO surface is the concrete `<title>`/`<meta>` + static snapshot per [ADR 020](#adr-020-metadata-only-dom-layer-for-seo), and a11y is deferred per [ADR 019](#adr-019-accessibility-deferred).
+- Cross-references [ADR 007](#adr-007-single-owned-render-object-tree-component--subtree); SEO mechanism per [ADR 020](#adr-020-metadata-only-dom-layer-for-seo); a11y deferral per [ADR 019](#adr-019-accessibility-deferred).
 
 ### Confidence
-**Medium.** The navigation contract follows from G5/P6.2; the SEO scope taxonomy is inferred from the Goal rather than an enumerated Solution requirement.
+**High.** The navigation contract follows from G5/P6.2, and the SEO mechanism is now concretely enumerated by [ADR 020](#adr-020-metadata-only-dom-layer-for-seo), eliminating the prior "inferred from the Goal rather than an enumerated Solution requirement" risk.
 
 ---
 
@@ -318,13 +323,13 @@ Adopt option (a): compile the UI itself to WASM so the layout module issues WebG
 Proposed.
 
 ### Consequences
-**Hot-path definition (scope of this ADR):** the hot path comprises per-frame operations — layout, composition, draw-call emission, hit-testing, and input dispatch. These must run entirely inside WASM with no WASM↔DOM boundary crossing. Text rasterization/glyph-generation is hot-path if it occurs per-frame; text *measurement* is hot-path for layout. Accessibility-tree mutation, navigation/state serialization, and SEO export are **non-hot-path** and may cross a controlled interop boundary (per [`Decision_Alternatives_adoption-interop`](Decision_Alternatives_adoption-interop.md), Approach A).
+**Hot-path definition (scope of this ADR):** the hot path comprises per-frame operations — layout, composition, draw-call emission, hit-testing, and input dispatch. These must run entirely inside WASM with no WASM↔DOM boundary crossing. Text rasterization/glyph-generation is hot-path if it occurs per-frame; text *measurement* is hot-path for layout (and is now fully in-WASM per [ADR 022](#adr-022-forked-harfrust-in-wasm-text-stack)). Accessibility-tree mutation, navigation/state serialization, and SEO export are **non-hot-path**; the DOM surface for SEO is scoped to `<title>`/`<meta>` + static snapshot per [ADR 020](#adr-020-metadata-only-dom-layer-for-seo).
 
 This decision is **conditional on [ADR 007](#adr-007-single-owned-render-object-tree-component--subtree)** (Composition/Document-Model residency): the scene graph must remain inside WASM end-to-end. If any scene-graph node escapes to JS, the no-boundary guarantee is voided and per-call overhead returns.
 
-Open dependencies: accessibility ([`Decision_Alternatives_accessibility-bridge`](Decision_Alternatives_accessibility-bridge.md)), text rendering ([`Decision_Alternatives_text-rendering`](Decision_Alternatives_text-rendering.md)), and adoption/interop ([`Decision_Alternatives_adoption-interop`](Decision_Alternatives_adoption-interop.md)) remain unresolved. These subsystems may require controlled, non-hot-path boundary crossings as classified above.
+Resolved dependencies: accessibility is deferred per [ADR 019](#adr-019-accessibility-deferred) (no DOM-based bridge); text rendering uses the forked in-WASM HarfRust stack per [ADR 022](#adr-022-forked-harfrust-in-wasm-text-stack) (no DOM text surface — text measurement/rasterization remain hot-path and are now fully in-WASM, eliminating the prior boundary concern); adoption/interop DOM surface is restricted to `<title>`/`<meta>` + SEO snapshot per [ADR 020](#adr-020-metadata-only-dom-layer-for-seo). Threading uses main thread + on-demand WASM threads with socket IPC per [ADR 021](#adr-021-main-thread--on-demand-wasm-threads-with-socket-ipc), preserving the no-DOM-boundary rule (socket IPC is WASM↔WASM, not DOM). Non-hot-path boundary crossings are now scoped by ADRs 019/020/022.
 
-Cross-references: [ADR 003](#adr-003-single-gpudevice-render-thread--sabcoop-coep-compositor) (compositor threading), [ADR 008](#adr-008-statically-typed-moduleoo-language-compiling-to-wasm) (language), [ADR 017](#adr-017-compiled-wasm-binary--webgpu-pipeline-precompilation) (startup/binary budgets — note: any performance budgets referenced by interop escalation live in ADR 017, not here; this ADR states the structural rule).
+Cross-references: [ADR 003](#adr-003-single-gpudevice-render-thread--sabcoop-coep-compositor) (compositor threading), [ADR 008](#adr-008-statically-typed-moduleoo-language-compiling-to-wasm) (language), [ADR 017](#adr-017-compiled-wasm-binary--webgpu-pipeline-precompilation) (startup/binary budgets — note: any performance budgets referenced by interop escalation live in ADR 017, not here; this ADR states the structural rule), [ADR 019](#adr-019-accessibility-deferred) (a11y), [ADR 020](#adr-020-metadata-only-dom-layer-for-seo) (DOM surface), [ADR 021](#adr-021-main-thread--on-demand-wasm-threads-with-socket-ipc) (threading/IPC), [ADR 022](#adr-022-forked-harfrust-in-wasm-text-stack) (text stack).
 
 ### Confidence
 **High.** The boundary-overhead evidence [2,6] is direct, and compiling the UI to WASM is the only option that eliminates the per-call cost structurally rather than mitigating it.
@@ -407,8 +412,8 @@ Proposed.
 
 ### Consequences
 - **Positive:** single streaming decode, no text parse floor; GPU pipelines precompiled asynchronously overlap with module decode.
-- **Negative:** single large module raises streaming-compile cost; monolithic-binary debuggability degrades.
-- **Trade-off:** Hot-path inlining ([ADR 013](#adr-013-no-wasmdom-boundary-in-the-hot-path)) must be decided at compile time. Language choice ([ADR 008](#adr-008-statically-typed-moduleoo-language-compiling-to-wasm)) constrained to WASM-targeting toolchains. Dependency bundling ([ADR 018](#adr-018-capability-scoped-imports--component-model-tree-shaking)) must avoid defeating streaming compilation granularity.
+- **Negative:** single large module raises streaming-compile cost; monolithic-binary debuggability degrades. Per [ADR 021](#adr-021-main-thread--on-demand-wasm-threads-with-socket-ipc) (on-demand WASM threads + socket IPC over SharedArrayBuffer) and [ADR 022](#adr-022-forked-harfrust-in-wasm-text-stack) (forked HarfRust in-WASM text stack), the binary now bundles a thread runtime, an IPC shim, and a shaping payload, sharpening the streaming-compile concern; sectioning/tree-shaking per [ADR 018](#adr-018-capability-scoped-imports--component-model-tree-shaking) becomes load-bearing.
+- **Trade-off:** Hot-path inlining ([ADR 013](#adr-013-no-wasmdom-boundary-in-the-hot-path)) must be decided at compile time. Language choice ([ADR 008](#adr-008-statically-typed-moduleoo-language-compiling-to-wasm)) constrained to WASM-targeting toolchains. Dependency bundling ([ADR 018](#adr-018-capability-scoped-imports--component-model-tree-shaking)) must avoid defeating streaming compilation granularity. Binary budgets are enlarged by ADR 021 (thread runtime + IPC shim) and ADR 022 (HarfRust shaper).
 
 ### Confidence
 **Medium.** WebGPU pipeline precompilation is still maturing across implementations, and the streaming-compile cost of one large module may not stay sub-decode without careful sectioning. Both risks are mitigable but not yet proven at target scale.
@@ -429,7 +434,7 @@ Proposed.
 ### Consequences
 - Trusted computing base shrinks to declared, typed, capability-scoped imports; supply-chain risk becomes auditable per module.
 - Relies on [ADR 008](#adr-008-statically-typed-moduleoo-language-compiling-to-wasm) (module boundary) and [ADR 009](#adr-009-two-level-type-verification) (verification attestation).
-- npm interop follows [`Decision_Alternatives_adoption-interop`](Decision_Alternatives_adoption-interop.md) (curated adapters behind capability-scoped boundaries).
+- npm interop follows [ADR 020](#adr-020-metadata-only-dom-layer-for-seo) (no UI DOM interop; only `<title>`/`<meta>` + SEO snapshot) — curated adapters wrap legacy packages behind capability-scoped component boundaries rather than importing them directly, and there is no DOM-interop bridge surface.
 - Adoption cost: capability instrumentation and component-model tooling are still maturing.
 
 ### Confidence
@@ -437,16 +442,100 @@ Proposed.
 
 ---
 
-## Decision Alternatives (Low confidence)
+## ADR 019: Defer Accessibility Bridge — No DOM Mirror
 
-The following decision points are recorded as separate files because confidence is too low to commit a standard ADR. Each contains a decision-point statement, the reason for uncertainty, ≥2 approaches with pros/cons, and a recommended approach.
+### Context
+`Decision_Alternatives_accessibility-bridge.md` flagged P6.1 (canvas severs every native DOM a11y affordance) as co-decisive with P3.5 and recommended **Approach C** (hybrid: virtual tree + read-only DOM projection surface). The project owner has issued a non-negotiable directive that overrides that recommendation: the language runtime will ship without any DOM-based accessibility bridge, and accessibility is deferred to a later phase. P6.1's decisive-problem status is retained but its resolution is no longer a release blocker.
 
-| File | Decision Point | Why Low Confidence | Recommended Approach |
-|------|----------------|--------------------|----------------------|
-| [`Decision_Alternatives_text-rendering.md`](Decision_Alternatives_text-rendering.md) | Text rendering strategy | P3.5 is the catalog's decisive hard problem; optimal off-DOM implementation unresolved | Approach B (hidden DOM text surface) as interim |
-| [`Decision_Alternatives_concurrency-scheduling.md`](Decision_Alternatives_concurrency-scheduling.md) | Concurrency/scheduling model | Multiple viable models; evidence (P4.3) underdetermines the choice | Approach A (cooperative coroutines + retain-mode loop), pending spike |
-| [`Decision_Alternatives_accessibility-bridge.md`](Decision_Alternatives_accessibility-bridge.md) | Accessibility bridge approach | P6.1 is co-decisive; WASM→platform-a11y-API access immature on web | Approach C (hybrid: virtual tree + read-only DOM projection) |
-| [`Decision_Alternatives_adoption-interop.md`](Decision_Alternatives_adoption-interop.md) | Adoption/interop strategy | P9.5 is strategic; ecosystem inertia dominates | Approach A (host-DOM interop bridges), time-boxed 18 months |
+### Decision
+Adopt **Approach A**: derive any future a11y-tree view from the render-object graph ([ADR 007](#adr-007-single-owned-render-object-tree-component--subtree)) bridged directly to platform a11y APIs, with **no DOM mirror or DOM projection surface** in the runtime. Accessibility is explicitly deferred; no a11y bridge ships in this phase.
+
+### Status
+Proposed.
+
+### Consequences
+- **Positive:** unblocks the project; removes DOM coupling from the runtime hot path (consistent with [ADR 013](#adr-013-no-wasmdom-boundary-in-the-hot-path)); preserves [ADR 007](#adr-007-single-owned-render-object-tree-component--subtree)'s single-source-of-truth object model with no sync boundary.
+- **Negative:** AT users have no a11y path until a later phase; P6.1's decisive-problem resolution is deferred, leaving the runtime non-conforming to web a11y contracts in the interim.
+- **Cross-references:** [ADR 007](#adr-007-single-owned-render-object-tree-component--subtree) (render-object tree remains the sole structural source for any future a11y derivation); [ADR 011](#adr-011-unified-virtual-focusaccessibility-annotation-layer) (focus model — its "DOM projection surface" clause is removed by this decision; only the focus-writer contract remains active); [ADR 010](#adr-010-cpu-bounding-volume-hit-testing--first-class-device-event-input) (input-dispatch-as-sole-focus-writer) is unaffected; [ADR 022](#adr-022-forked-harfrust-in-wasm-text-stack) (text a11y exposure now depends on this deferral, not on DOM contracts).
+
+### Confidence
+**High.** The project owner's choice is non-negotiable and explicitly overrides the Decision Alternative file's prior Approach C recommendation.
+
+---
+
+## ADR 020: Metadata-Only DOM Layer for SEO — No UI DOM Interop
+
+### Context
+P9.5 is strategic, not technical: ecosystem inertia dominates adoption, and the correct boundary between the WASM/WebGPU stack and the host DOM was unresolved (see [`Decision_Alternatives_adoption-interop.md`](Decision_Alternatives_adoption-interop.md)). That file recommended Approach A — host-DOM interop bridges for text/a11y/navigation, time-boxed 18 months. The project owner has now made a definitive, non-negotiable choice that **overrides** that recommendation.
+
+### Decision
+Adopt Approach C, narrowed: a **thin DOM layer solely to set `<title>`, `<meta>` tags, and emit a static HTML snapshot for search-engine crawlers**. All UI rendering happens on GPU via WASM, with no DOM-tree interaction for layout, text, a11y, navigation, or input. No host-DOM interop bridges are provided.
+
+### Status
+Proposed.
+
+### Consequences
+- **Positive.** No bridge/marshalling tax; the hot path stays entirely inside WASM, aligning cleanly with [ADR 013](#adr-013-no-wasmdom-boundary-in-the-hot-path). A single binary/startup story is preserved without dual-stack payload pressure ([ADR 017](#adr-017-compiled-wasm-binary--webgpu-pipeline-precompilation)). Seam bugs at the DOM frontier are eliminated.
+- **Negative.** No incremental adoption via the DOM: teams cannot embed the new stack inside existing pages. Loses the a11y, text-rendering, and navigation interop bridges Approach A relied on — these must now be solved entirely off-DOM (a11y deferred per [ADR 019](#adr-019-accessibility-deferred); text via [ADR 022](#adr-022-forked-harfrust-in-wasm-text-stack)).
+- **Cross-references.** [ADR 012](#adr-012-navigationurl-contract-and-explicit-seo-scope) (the metadata-only DOM is the explicit SEO export surface); [ADR 013](#adr-013-no-wasmdom-boundary-in-the-hot-path) (hot-path integrity preserved structurally); [ADR 017](#adr-017-compiled-wasm-binary--webgpu-pipeline-precompilation) (single-WASM startup budget uncompromised); [ADR 019](#adr-019-accessibility-deferred) (deferred accessibility — no DOM a11y bridge); [ADR 022](#adr-022-forked-harfrust-in-wasm-text-stack) (in-WASM text stack — no DOM text surface).
+
+### Confidence
+**High.** The project owner's non-negotiable choice, superseding the prior recommendation regardless of the strategic-adoption risks raised.
+
+---
+
+## ADR 021: Main Thread + On-Demand WASM Threads with Socket IPC
+
+### Context
+`Decision_Alternatives_concurrency-scheduling.md` recorded three candidate models (cooperative coroutines / preemptive actor threads / pure single-thread loop) for the WASM UI runtime scheduler and recommended Approach A (cooperative coroutines + retain-mode loop) pending a spike. The project owner has made a non-negotiable choice that resolves this without a spike: a **hybrid not present in the file's A/B/C options** — one main thread plus on-demand WASM threads with socket IPC.
+
+### Decision
+Adopt a **main thread + on-demand WASM threads** model. The main thread runs the retain-mode render loop (layout, rendering, hit-testing, input dispatch) and owns the GPUDevice per [ADR 003](#adr-003-single-gpudevice-render-thread--sabcoop-coep-compositor). Additional WASM threads are spawned **on demand** for asynchronous tasks (asset decoding, compute, IO). Inter-process communication (IPC) between threads uses **WASM sockets** over `SharedArrayBuffer` (via `wasm-sockets` or a similar mechanism).
+
+### Status
+Proposed.
+
+### Consequences
+- **Positive:** the main thread stays deterministic for the render loop per [ADR 016](#adr-016-unified-author-owned-trace-with-split-determinism); on-demand threads handle async work without polluting the frame timeline; socket IPC is a structured, typed channel (better than ad-hoc shared-memory races).
+- **Negative:** `SharedArrayBuffer` still requires COOP/COEP per [ADR 003](#adr-003-single-gpudevice-render-thread--sabcoop-coep-compositor) (deployment constraint); on-demand thread spawn cost must be amortized; socket IPC adds a serialization surface to cross-thread data.
+- **Cross-references:** [ADR 003](#adr-003-single-gpudevice-render-thread--sabcoop-coep-compositor) (compositor threading — the GPUDevice-owner render thread is the persistent main thread or a dedicated non-on-demand worker); [ADR 008](#adr-008-statically-typed-moduleoo-language-compiling-to-wasm) (language exposes the thread/IPC primitives); [ADR 016](#adr-016-unified-author-owned-trace-with-split-determinism) (per-tick trace determinism preserved on the main thread); [ADR 017](#adr-017-compiled-wasm-binary--webgpu-pipeline-precompilation) (binary now bundles thread runtime + IPC shim).
+
+### Confidence
+**High.** The owner's choice is non-negotiable and resolves the previously open P4.3 decision point without requiring the recommended spike.
+
+---
+
+## ADR 022: Forked HarfRust as the In-WASM Text Shaping/Rasterization Stack
+
+### Context
+The off-DOM text stack is P3.5's decisive hard problem: contractual shaping, BiDi, selection, IME, and a11y are guaranteed only on DOM text nodes, while `canvas.fillText` provides none. [`Decision_Alternatives_text-rendering`](Decision_Alternatives_text-rendering.md) recommended **Approach B (hidden DOM surface)** as the lowest-regret interim. The project owner has now made a non-negotiable choice that overrides that recommendation: commit to **Approach A (in-WASM text stack)**, naming **HarfRust** specifically and mandating a fork so updates apply independently of upstream release cadence.
+
+### Decision
+Adopt a **forked HarfRust** as the shaping and rasterization stack, running entirely inside WASM. The fork lives alongside the project (vendored in-repo) so shaping/rasterization fixes, platform patches, and BiDi/IME extensions can be applied independently of upstream.
+
+### Status
+Proposed.
+
+### Consequences
+- **Positive:** no DOM text dependency; shaping/rasterization stays in the WASM hot path per [ADR 013](#adr-013-no-wasmdom-boundary-in-the-hot-path) and serves [ADR 007](#adr-007-single-owned-render-object-tree-component--subtree)'s pure-object model (text as GPU-backed glyphs); the fork grants full control over timing and patches.
+- **Negative:** the project must maintain a fork; BiDi segmentation, selection, and IME composition must still be built atop HarfRust; the WASM payload grows by the shaper (sharpening [ADR 017](#adr-017-compiled-wasm-binary--webgpu-pipeline-precompilation)'s streaming-compile concern); a11y text exposure no longer inherits DOM contracts and now depends on [ADR 019](#adr-019-accessibility-deferred)'s deferred accessibility approach.
+- **Cross-references:** [ADR 004](#adr-004-pluggable-constraint-solver-layout-with-mandatory-text-flow-measurement-contract) (layout's measurement contract consumes HarfRust output); [ADR 007](#adr-007-single-owned-render-object-tree-component--subtree) (object model); [ADR 013](#adr-013-no-wasmdom-boundary-in-the-hot-path) (hot-path); [ADR 017](#adr-017-compiled-wasm-binary--webgpu-pipeline-precompilation) (binary size); [ADR 019](#adr-019-accessibility-deferred) (deferred accessibility).
+
+### Confidence
+**High.** This is the project owner's definitive, non-negotiable choice, which settles the residual uncertainty that previously kept text rendering a Decision Alternative rather than a committed ADR.
+
+---
+
+## Resolved Decision Alternatives
+
+The following four Decision Alternative files have been **resolved** by ADRs 019–022 above. They are retained for historical context but their "Recommended Approach" is **superseded** by the project owner's non-negotiable choices.
+
+| File | Decision Point | Resolved By | Override Note |
+|------|----------------|-------------|---------------|
+| [`Decision_Alternatives_text-rendering.md`](Decision_Alternatives_text-rendering.md) | Text rendering strategy | [ADR 022](#adr-022-forked-harfrust-in-wasm-text-stack) | Forked HarfRust (Approach A) overrides the file's prior Approach B (hidden DOM) |
+| [`Decision_Alternatives_concurrency-scheduling.md`](Decision_Alternatives_concurrency-scheduling.md) | Concurrency/scheduling model | [ADR 021](#adr-021-main-thread--on-demand-wasm-threads-with-socket-ipc) | Main thread + on-demand WASM threads + socket IPC (a new hybrid) overrides the file's prior Approach A (cooperative coroutines) |
+| [`Decision_Alternatives_accessibility-bridge.md`](Decision_Alternatives_accessibility-bridge.md) | Accessibility bridge approach | [ADR 019](#adr-019-accessibility-deferred) | Approach A (no DOM mirror, a11y deferred) overrides the file's prior Approach C (hybrid DOM projection) |
+| [`Decision_Alternatives_adoption-interop.md`](Decision_Alternatives_adoption-interop.md) | Adoption/interop strategy | [ADR 020](#adr-020-metadata-only-dom-layer-for-seo) | Approach C (DOM only for metadata/SEO) overrides the file's prior Approach A (host-DOM interop bridges) |
 
 ---
 
