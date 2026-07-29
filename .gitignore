@@ -1,0 +1,18 @@
+# Rust build artifacts
+/target
+**/target
+Cargo.lock
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Vendor (HarfRust fork is committed; build artifacts are not)
+vendor/harfrust/target

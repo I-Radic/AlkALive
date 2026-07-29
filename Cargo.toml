@@ -1,0 +1,49 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/alkalive-core",
+    "crates/alkalive-runtime",
+    "crates/alkalive-render",
+    "crates/alkalive-layout",
+    "crates/alkalive-text",
+    "crates/alkalive-style",
+    "crates/alkalive-input",
+    "crates/alkalive-dom",
+    "crates/alkalive-a11y",
+    "crates/alkalive-ipc",
+    "crates/alkalive-perf",
+    "crates/alkalive-error",
+    "crates/alkalive-test",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+authors = ["I-Radic"]
+repository = "https://github.com/I-Radic/AlkALive"
+description = "AlkALive — a custom WASM+GPU UI language and runtime"
+
+[workspace.dependencies]
+# Internal crates
+alkalive-core   = { path = "crates/alkalive-core" }
+alkalive-render = { path = "crates/alkalive-render" }
+alkalive-layout = { path = "crates/alkalive-layout" }
+alkalive-text   = { path = "crates/alkalive-text" }
+alkalive-style  = { path = "crates/alkalive-style" }
+alkalive-input  = { path = "crates/alkalive-input" }
+alkalive-dom    = { path = "crates/alkalive-dom" }
+alkalive-a11y   = { path = "crates/alkalive-a11y" }
+alkalive-ipc    = { path = "crates/alkalive-ipc" }
+alkalive-perf   = { path = "crates/alkalive-perf" }
+alkalive-error  = { path = "crates/alkalive-error" }
+alkalive-test   = { path = "crates/alkalive-test" }
+alkalive-runtime = { path = "crates/alkalive-runtime" }
+
+[profile.wasm-release]
+inherits = "release"
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
