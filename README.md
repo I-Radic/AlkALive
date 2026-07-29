@@ -8,9 +8,10 @@ AlkALive is an exploratory project investigating a **custom, module- and object-
 | --- | --- |
 | `docs/PROBLEM_CATALOG.md` | **Problem Catalog** — a literature-grounded investigation of the fundamental limitations of the HTML/CSS/JavaScript web frontend stack, synthesised from 50 peer-reviewed sources (IEEE/ACM/USENIX/NDSS/Springer/arXiv). |
 | `docs/ROUGH_DRAFT.md` | **Rough Draft** — an architectural response to the catalog: a four-part (Problem / Goal / Solution / Integration) design rationale per cluster, produced via a four-wave sub-agent validation campaign and cross-checked for internal consistency and evidence traceability. |
+| `docs/FINE_DRAFT.md` | **Fine Draft** — the definitive system design specification synthesizing the Rough Draft with all 22 ADRs. Twelve sections covering system overview, module/object model, rendering, layout, text, styling, input, concurrency, DOM interaction, accessibility, lifecycle, and integration. Ready for implementation. |
 | `docs/VERIFICATION_LOG.md` | **Verification Log** — evidence trail for the catalog's 50 references, documenting the multi-agent re-verification campaign that corrected 28 citations. |
-| `docs/adr/ADR.md` | **Architectural Decision Record** — 18 formal ADRs (ADR 001–018) consolidated in a single file, each recording a design choice with Context, Decision, Status, Consequences, and Confidence. |
-| `docs/adr/Decision_Alternatives_*.md` | **Decision Alternatives** — four low-confidence decision points (text rendering, concurrency/scheduling, accessibility bridge, adoption/interop) kept as precursor analyses rather than committed ADRs. |
+| `docs/adr/ADR.md` | **Architectural Decision Record** — 22 formal ADRs (ADR 001–022) consolidated in a single file, each recording a design choice with Context, Decision, Status, Consequences, and Confidence. |
+| `docs/adr/Decision_Alternatives_*.md` | **Decision Alternatives** — four resolved decision points (text rendering, concurrency/scheduling, accessibility bridge, adoption/interop), superseded by ADRs 019–022 and retained for historical context. |
 
 ## The catalog
 
