@@ -4,8 +4,10 @@
 //! Wave 6 status: the default [`CassowarySolver`] ships a simplified
 //! single-pass linear-equality solver with the ADR 002 locality gate
 //! (§5.5) and GPU-ready transform emission (§5.6). The [`MeasuredRun`]
-//! contract remains a `todo!()` stub pending the `alkalive-text` crate
-//! (Wave 7+, ADR 004/022).
+//! contract is a required trait surface (no default bodies); a no-op
+//! [`MockMeasuredRun`] is shipped for tests and downstream stubs. The
+//! concrete HarfRust-backed implementation lands with the `alkalive-text`
+//! crate (Wave 7+, ADR 004/022).
 //!
 //! # Cross-crate forward declarations
 //!
@@ -20,11 +22,6 @@
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
-// The [`LayoutSolver`] and [`MeasuredRun`] trait default bodies remain
-// `todo!()` stubs (per spec skeleton); their parameters are therefore
-// intentionally unused. Suppressing this crate-wide keeps spec-faithful
-// parameter names without polluting CI's `clippy -- -D warnings` gate.
-#![allow(unused_variables)]
 
 use std::collections::HashMap;
 
@@ -376,29 +373,41 @@ pub struct GlyphRun {
 /// of line-breaking, BiDi, or font-metric shaping, so this contract is
 /// mandatory for every solver — including user-supplied.
 ///
-/// # Wave 6 stub
+/// # Wave 6 contract
 ///
-/// The default method bodies remain `todo!()` stubs: the concrete
-/// HarfRust-backed implementation lands with the `alkalive-text` crate
-/// (Wave 7+). [`CassowarySolver::solve`] does not invoke the measurement
-/// contract in Wave 6, so passing any `impl MeasuredRun` (using the stub
-/// defaults) is safe.
+/// Both methods are required (no default body): every implementor must
+/// supply a shaping and line-break policy. The concrete HarfRust-backed
+/// implementation lands with the `alkalive-text` crate (Wave 7+, ADR
+/// 004/022). [`CassowarySolver::solve`] does not invoke the measurement
+/// contract in Wave 6, so the no-op [`MockMeasuredRun`] is sufficient for
+/// its tests.
 pub trait MeasuredRun {
     /// Shape and measure a [`TextRun`] synchronously; HarfRust-backed, no
     /// DOM crossing (§5.4, ADR 022).
-    ///
-    /// *Wave 6 stub*: body is `todo!()` until `alkalive-text` lands.
-    fn shape_and_measure(&self, run: &TextRun, ctx: &FontContext) -> GlyphMetrics {
-        todo!("Wave 7+: implemented by alkalive-text::TextStack (§6.9)")
-    }
+    fn shape_and_measure(&self, run: &TextRun, ctx: &FontContext) -> GlyphMetrics;
 
     /// Break `glyphs` into lines constrained by `max_width` (§5.4).
-    ///
-    /// *Wave 6 stub*: body is `todo!()` until `alkalive-text` lands.
-    fn line_break(&self, glyphs: &[GlyphRun], max_width: f32) -> Vec<LineBreak> {
-        let _ = glyphs;
-        let _ = max_width;
-        todo!("Wave 7+: implemented by alkalive-text::TextStack (§6.9)")
+    fn line_break(&self, glyphs: &[GlyphRun], max_width: f32) -> Vec<LineBreak>;
+}
+
+/// No-op [`MeasuredRun`] implementation: returns empty [`GlyphMetrics`] and
+/// a single default [`LineBreak`].
+///
+/// Wave 6's [`CassowarySolver::solve`] never invokes the measurement
+/// contract, so this mock is a safe stand-in for tests and for downstream
+/// callers that have not yet wired the `alkalive-text` stack. The concrete
+/// HarfRust-backed implementation lands with `alkalive-text` (Wave 7+,
+/// ADR 004/022).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MockMeasuredRun;
+
+impl MeasuredRun for MockMeasuredRun {
+    fn shape_and_measure(&self, _run: &TextRun, _ctx: &FontContext) -> GlyphMetrics {
+        GlyphMetrics::default()
+    }
+
+    fn line_break(&self, _glyphs: &[GlyphRun], _max_width: f32) -> Vec<LineBreak> {
+        vec![LineBreak::default()]
     }
 }
 
@@ -441,41 +450,29 @@ pub struct LayoutSolution {
 /// style-driven box-tree recalculation that couples style mutation to
 /// global reflow (P2.3, P2.4).
 ///
-/// The default method bodies below remain `todo!()` stubs: every method
-/// must be overridden by a concrete implementor. [`CassowarySolver`] is the
-/// reference override.
+/// Every method is required (no default body): each implementor must
+/// supply a full solver. [`CassowarySolver`] is the reference
+/// implementation.
 pub trait LayoutSolver {
     /// Register a node in the solver-internal layout graph.
-    fn add_node(&mut self, node: LayoutNode) -> NodeId {
-        todo!()
-    }
+    fn add_node(&mut self, node: LayoutNode) -> NodeId;
 
     /// Remove a node and its descendants; per-module dirty-rect (ADR 002).
-    fn remove_node(&mut self, id: NodeId) {
-        todo!()
-    }
+    fn remove_node(&mut self, id: NodeId);
 
     /// Bind an immutable style snapshot to a node — input only; never mutated.
-    fn bind_style(&mut self, id: NodeId, style: &OwnedStyle) {
-        todo!()
-    }
+    fn bind_style(&mut self, id: NodeId, style: &OwnedStyle);
 
     /// Register a constraint; returns its handle for later removal.
-    fn add_constraint(&mut self, c: Constraint) -> ConstraintId {
-        todo!()
-    }
+    fn add_constraint(&mut self, c: Constraint) -> ConstraintId;
 
     /// Remove a previously-registered constraint.
-    fn remove_constraint(&mut self, id: ConstraintId) {
-        todo!()
-    }
+    fn remove_constraint(&mut self, id: ConstraintId);
 
     /// Locality gate (ADR 002). Rejects cross-module flex baselines,
     /// percentage chains spanning module boundaries, or any constraint
     /// whose satisfaction would reflow outside the dirty set (§5.5).
-    fn assert_local(&self, c: &Constraint) -> Result<(), LocalityViolation> {
-        todo!()
-    }
+    fn assert_local(&self, c: &Constraint) -> Result<(), LocalityViolation>;
 
     /// Synchronous solve over the dirty subset; consumes measured text
     /// runs (§5.4) and emits GPU-ready transforms. No intermediate tree
@@ -485,9 +482,7 @@ pub trait LayoutSolver {
         dirty: &DirtySet,
         measured: &dyn MeasuredRun,
         dt: f32,
-    ) -> Result<LayoutSolution, SolveError> {
-        todo!()
-    }
+    ) -> Result<LayoutSolution, SolveError>;
 }
 
 // ============================================================================
@@ -766,11 +761,6 @@ mod tests {
         assert_eq!(err.boundary, (ModuleId(0), ModuleId(1)));
     }
 
-    /// Nullary [`MeasuredRun`] stand-in. Wave 6 `solve` does not invoke the
-    /// measurement contract, so the `todo!()` default bodies are never hit.
-    struct NullMeasuredRun;
-    impl MeasuredRun for NullMeasuredRun {}
-
     /// A single same-module linear constraint solves to [`SolveStatus::Solved`]
     /// and emits one transform per live node.
     #[test]
@@ -789,7 +779,7 @@ mod tests {
 
         let dirty = DirtySet::default();
         let solution = solver
-            .solve(&dirty, &NullMeasuredRun, 0.016)
+            .solve(&dirty, &MockMeasuredRun, 0.016)
             .expect("a simple same-module system must solve");
         assert_eq!(solution.status, SolveStatus::Solved);
         assert_eq!(solution.module, ModuleId(0));
@@ -819,7 +809,7 @@ mod tests {
 
         let dirty = DirtySet::default();
         let err = solver
-            .solve(&dirty, &NullMeasuredRun, 0.016)
+            .solve(&dirty, &MockMeasuredRun, 0.016)
             .expect_err("cross-module solve must fail");
         match err {
             SolveError::LocalityViolated {

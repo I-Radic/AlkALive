@@ -11,13 +11,14 @@
 //!
 //! # Wave 7 status
 //!
-//! The [`HitTester`] and [`FocusManager`] traits now ship concrete
-//! reference implementations — [`HitTesterImpl`] and
-//! [`FocusManagerImpl`] — backed by a flat CPU bounding-volume mirror
-//! and a single-slot focus owner. [`GrabHandle`] and [`GestureState`]
-//! remain `todo!()` skeletons: they need the full render-object tree
-//! (ADR 007, Wave 4), which is not yet wired into this crate, so their
-//! default bodies are left as compile-time-deferred panics.
+//! The [`HitTester`] and [`FocusManager`] traits ship concrete reference
+//! implementations — [`HitTesterImpl`] and [`FocusManagerImpl`] — backed
+//! by a flat CPU bounding-volume mirror and a single-slot focus owner.
+//! [`GrabHandle`] and [`GestureState`] likewise ship concrete reference
+//! implementations — [`SimpleGrabHandle`] and [`SimpleGestureState`] —
+//! with real fields and behaviour. The full render-object-tree
+//! integration (ADR 007, Wave 4) is layered on top in a later wave; no
+//! `todo!()` skeletons remain in this crate.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -406,39 +407,81 @@ impl HitTester for HitTesterImpl {
 /// the most recently issued explicit grab wins; the loser receives a
 /// synthetic `Cancel`.
 ///
-/// Wave 7: all methods are `todo!()` skeletons. A concrete `GrabHandle`
-/// needs the render-object tree (ADR 007) to resolve the owning object
-/// and arbitrate overlapping grabs, so implementation is deferred.
+/// Wave 7: all methods are **required** (no default body). The reference
+/// implementation [`SimpleGrabHandle`] stores the owning render object,
+/// captured device class / id, and an `active` flag flipped to `false`
+/// by [`GrabHandle::release`]. Real grab arbitration against the
+/// render-object tree (ADR 007) is layered on in a later wave, but the
+/// field-backed behaviour here is enough for routed-event tests and
+/// downstream crates that need a concrete [`GrabHandle`].
 pub trait GrabHandle {
     /// Owning render object.
-    ///
-    /// Wave 7: `todo!()` — needs the render-object tree (ADR 007).
-    fn owner(&self) -> Handle<RenderObject> {
-        todo!()
-    }
+    fn owner(&self) -> Handle<RenderObject>;
     /// Captured device class.
-    ///
-    /// Wave 7: `todo!()` — needs the grab-arbitration state machine.
-    fn device(&self) -> DeviceKind {
-        todo!()
-    }
+    fn device(&self) -> DeviceKind;
     /// Captured device id.
-    ///
-    /// Wave 7: `todo!()` — needs the grab-arbitration state machine.
-    fn device_id(&self) -> u32 {
-        todo!()
-    }
+    fn device_id(&self) -> u32;
     /// Release the grab; subsequent events route via hit-test again.
-    ///
-    /// Wave 7: `todo!()` — needs the grab-arbitration state machine.
-    fn release(&mut self) {
-        todo!()
-    }
+    fn release(&mut self);
     /// Whether the grab is still active.
-    ///
-    /// Wave 7: `todo!()` — needs the grab-arbitration state machine.
+    fn is_active(&self) -> bool;
+}
+
+/// Concrete Wave 7 [`GrabHandle`] with real fields.
+///
+/// Stores the owning [`Handle<RenderObject>`], captured [`DeviceKind`]
+/// and `device_id`, and an `active` flag. [`GrabHandle::release`] flips
+/// `active` to `false`; [`GrabHandle::is_active`] reads it back. The
+/// remaining accessors return their stored fields unchanged.
+///
+/// A freshly constructed [`SimpleGrabHandle`] is **active**; only an
+/// explicit [`GrabHandle::release`] deactivates it. This is the
+/// reference grab handle for Wave 7: full grab arbitration against the
+/// render-object tree (ADR 007) is layered on in a later wave.
+#[derive(Debug)]
+pub struct SimpleGrabHandle {
+    /// Owning render object.
+    owner: Handle<RenderObject>,
+    /// Captured device class.
+    device: DeviceKind,
+    /// Captured device id.
+    device_id: u32,
+    /// Whether the grab is still active; flipped to `false` by `release`.
+    active: bool,
+}
+
+impl SimpleGrabHandle {
+    /// Construct an **active** grab handle for `owner` capturing the
+    /// given `(device, device_id)` stream.
+    pub fn new(owner: Handle<RenderObject>, device: DeviceKind, device_id: u32) -> Self {
+        Self {
+            owner,
+            device,
+            device_id,
+            active: true,
+        }
+    }
+}
+
+impl GrabHandle for SimpleGrabHandle {
+    fn owner(&self) -> Handle<RenderObject> {
+        self.owner
+    }
+
+    fn device(&self) -> DeviceKind {
+        self.device
+    }
+
+    fn device_id(&self) -> u32 {
+        self.device_id
+    }
+
+    fn release(&mut self) {
+        self.active = false;
+    }
+
     fn is_active(&self) -> bool {
-        todo!()
+        self.active
     }
 }
 
@@ -479,28 +522,71 @@ pub enum GesturePhase {
 /// recogniser. Each object exposes one `GestureState` per active device
 /// stream and produces a [`GestureOutcome`] per event.
 ///
-/// Wave 7: all methods are `todo!()` skeletons. A concrete
-/// `GestureState` needs the full render-object tree (ADR 007) to feed
-/// per-object state machines from routed events, so implementation is
-/// deferred.
+/// Wave 7: all methods are **required** (no default body). The reference
+/// implementation [`SimpleGestureState`] tracks a single
+/// [`GesturePhase`] that begins at [`GesturePhase::Idle`], advances to
+/// [`GesturePhase::Changed`] on [`GestureState::on_event`] (which
+/// returns [`GestureOutcome::Continue`]), and flips to
+/// [`GesturePhase::Cancelled`] on [`GestureState::on_cancel`]. Full
+/// per-object state machines fed from the routed render-object-tree
+/// event stream (ADR 007) are layered on in a later wave.
 pub trait GestureState {
     /// Feed one input event; produce an outcome.
-    ///
-    /// Wave 7: `todo!()` — needs the render-object tree (ADR 007).
-    fn on_event(&mut self, _event: InputEvent) -> GestureOutcome {
-        todo!()
-    }
+    fn on_event(&mut self, event: InputEvent) -> GestureOutcome;
     /// Synthetic cancel on orphan (object removed mid-gesture).
-    ///
-    /// Wave 7: `todo!()` — needs the render-object tree (ADR 007).
-    fn on_cancel(&mut self) {
-        todo!()
-    }
+    fn on_cancel(&mut self);
     /// Current gesture phase.
-    ///
-    /// Wave 7: `todo!()` — needs the render-object tree (ADR 007).
+    fn current_phase(&self) -> GesturePhase;
+}
+
+/// Concrete Wave 7 [`GestureState`] with a single tracked phase.
+///
+/// Holds one [`GesturePhase`] field, initialised to [`GesturePhase::Idle`].
+/// [`GestureState::on_event`] advances the phase to
+/// [`GesturePhase::Changed`] and returns [`GestureOutcome::Continue`]
+/// (consume more events). [`GestureState::on_cancel`] flips the phase
+/// to [`GesturePhase::Cancelled`]. [`GestureState::current_phase`]
+/// returns the stored phase.
+///
+/// This is the reference gesture state for Wave 7: real per-object
+/// recognisers fed from the routed event stream (ADR 007) are layered on
+/// in a later wave, but the phase-backed behaviour here is enough for
+/// grab / dispatch tests and downstream crates that need a concrete
+/// [`GestureState`].
+#[derive(Debug)]
+pub struct SimpleGestureState {
+    /// Current gesture phase; starts at [`GesturePhase::Idle`].
+    phase: GesturePhase,
+}
+
+impl Default for SimpleGestureState {
+    /// A fresh gesture state starts in the [`GesturePhase::Idle`] phase.
+    fn default() -> Self {
+        Self {
+            phase: GesturePhase::Idle,
+        }
+    }
+}
+
+impl SimpleGestureState {
+    /// Construct a gesture state in the [`GesturePhase::Idle`] phase.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl GestureState for SimpleGestureState {
+    fn on_event(&mut self, _event: InputEvent) -> GestureOutcome {
+        self.phase = GesturePhase::Changed;
+        GestureOutcome::Continue
+    }
+
+    fn on_cancel(&mut self) {
+        self.phase = GesturePhase::Cancelled;
+    }
+
     fn current_phase(&self) -> GesturePhase {
-        todo!()
+        self.phase
     }
 }
 
@@ -853,5 +939,120 @@ mod tests {
         fm.invalidate(&LayoutScope(0));
         // Focus survives invalidate in Wave 7.
         assert_eq!(fm.current_focus(), Some(h(1)));
+    }
+
+    // --- SimpleGrabHandle -------------------------------------------------
+
+    #[test]
+    fn grab_handle_new_is_active_and_exposes_stored_fields() {
+        let owner = h(42);
+        let grab = SimpleGrabHandle::new(owner, DeviceKind::Stylus, 7);
+
+        // Freshly constructed grab is active and round-trips its fields.
+        assert!(grab.is_active());
+        assert_eq!(grab.owner(), owner);
+        assert_eq!(grab.device(), DeviceKind::Stylus);
+        assert_eq!(grab.device_id(), 7);
+    }
+
+    #[test]
+    fn grab_handle_release_deactivates_and_is_idempotent() {
+        let owner = h(3);
+        let mut grab = SimpleGrabHandle::new(owner, DeviceKind::Touch, 1);
+        assert!(grab.is_active());
+
+        // First release flips the active flag.
+        grab.release();
+        assert!(!grab.is_active());
+
+        // A second release keeps it inactive (idempotent) and the
+        // identifying fields are still intact — released, not destroyed.
+        grab.release();
+        assert!(!grab.is_active());
+        assert_eq!(grab.owner(), owner);
+        assert_eq!(grab.device(), DeviceKind::Touch);
+        assert_eq!(grab.device_id(), 1);
+    }
+
+    #[test]
+    fn grab_handle_is_usable_as_dyn_trait_object() {
+        // `GestureOutcome::Grab` holds a `Box<dyn GrabHandle>`, so the
+        // trait must remain object-safe. Exercise that path directly.
+        let owner = h(9);
+        let boxed: Box<dyn GrabHandle> = Box::new(SimpleGrabHandle::new(owner, DeviceKind::Pointer, 0));
+        assert!(boxed.is_active());
+        assert_eq!(boxed.owner(), owner);
+        assert_eq!(boxed.device(), DeviceKind::Pointer);
+        assert_eq!(boxed.device_id(), 0);
+    }
+
+    // --- SimpleGestureState -----------------------------------------------
+
+    #[test]
+    fn gesture_state_starts_idle() {
+        let gs = SimpleGestureState::new();
+        assert_eq!(gs.current_phase(), GesturePhase::Idle);
+    }
+
+    #[test]
+    fn gesture_state_default_is_idle() {
+        // `Default` must agree with `new` (both start at Idle).
+        let gs = SimpleGestureState::default();
+        assert_eq!(gs.current_phase(), GesturePhase::Idle);
+    }
+
+    #[test]
+    fn gesture_state_on_event_advances_to_changed_and_continues() {
+        let mut gs = SimpleGestureState::new();
+        let event = InputEvent::Pointer(PointerSample {
+            device: DeviceKind::Pointer,
+            device_id: 0,
+            position: Vec2(1.0, 2.0),
+            delta: Vec2(0.0, 0.0),
+            pressure: 1.0,
+            tilt: Vec2(0.0, 0.0),
+            twist: 0.0,
+            buttons: ButtonSet(0),
+            phase: PointerPhase::Move,
+        });
+        let outcome = gs.on_event(event);
+        assert!(matches!(outcome, GestureOutcome::Continue));
+        assert_eq!(gs.current_phase(), GesturePhase::Changed);
+    }
+
+    #[test]
+    fn gesture_state_on_event_continues_across_multiple_events() {
+        let mut gs = SimpleGestureState::new();
+        // Feeding more than one event keeps the phase at `Changed` and
+        // keeps returning `Continue` — the simple state never commits.
+        for _ in 0..3 {
+            let outcome = gs.on_event(InputEvent::Key(KeyEvent {
+                code: KeyCode(0),
+                modifiers: ModifierSet(0),
+                phase: KeyPhase::Press,
+                repeat_count: 0,
+            }));
+            assert!(matches!(outcome, GestureOutcome::Continue));
+            assert_eq!(gs.current_phase(), GesturePhase::Changed);
+        }
+    }
+
+    #[test]
+    fn gesture_state_on_cancel_flips_to_cancelled() {
+        let mut gs = SimpleGestureState::new();
+        // Cancel from Idle is allowed (orphan before any event).
+        gs.on_cancel();
+        assert_eq!(gs.current_phase(), GesturePhase::Cancelled);
+
+        // Cancel after activity also lands on Cancelled.
+        let mut gs2 = SimpleGestureState::new();
+        let _ = gs2.on_event(InputEvent::Gamepad(GamepadSample {
+            device_id: 0,
+            axes: vec![0.0],
+            buttons: vec![0.0],
+        }));
+        assert_eq!(gs2.current_phase(), GesturePhase::Changed);
+        gs2.on_cancel();
+        assert_eq!(gs2.current_phase(), GesturePhase::Cancelled);
     }
 }

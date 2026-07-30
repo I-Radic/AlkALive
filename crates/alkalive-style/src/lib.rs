@@ -9,18 +9,11 @@
 //! itself. Style tables are compiled into the WASM module's binary data
 //! section; runtime access is an O(1) local field read.
 //!
-//! Wave 3 trait-definition skeleton: signatures are locked against the
-//! spec; every body is `todo!()`. No implementation ships this wave.
+//! Wave 3 trait definitions: signatures are locked against the spec;
+//! concrete defaults are provided by [`DefaultStyle`] and [`DefaultTheme`].
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
-// Wave-3 skeleton: the `Style` and `Theme` trait defaults remain `todo!()`
-// (per IMPL-W10b, pending the concrete `OwnedStyle` impl), so their
-// parameters are intentionally unused. Suppressing this crate-wide keeps
-// spec-faithful parameter names without polluting CI's
-// `clippy -- -D warnings` gate. Concrete impls (`DefaultStyle`,
-// `LinearEasing`, `Animation::tick`) override the defaults with real bodies.
-#![allow(unused_variables)]
 
 use std::time::Duration;
 
@@ -187,21 +180,19 @@ pub struct Keyframe {
 ///
 /// The spec names `EasingFn` as a field of [`Animation`] without
 /// enumerating concrete variants. This trait is the type-signature lock;
-/// concrete easings are added in the implementation wave.
+/// concrete easings are added in the implementation wave. `sample` is a
+/// required method — every concrete [`EasingFn`] must provide its own
+/// implementation.
 pub trait EasingFn {
     /// Sample the easing curve at normalised time `t ∈ [0, 1]`.
-    fn sample(&self, t: f32) -> f32 {
-        todo!()
-    }
+    fn sample(&self, t: f32) -> f32;
 }
 
 /// Linear easing: `f(t) = t`.
 ///
 /// The simplest concrete [`EasingFn`]. Provided so that [`Animation`] can
 /// be constructed today; richer easings (ease-in, ease-out, cubic-bezier)
-/// land in the implementation wave alongside keyframe interpolation. The
-/// trait's default `sample` remains `todo!()` — concrete easings override
-/// it.
+/// land in the implementation wave alongside keyframe interpolation.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LinearEasing;
 
@@ -285,33 +276,19 @@ pub enum AnimationError {
 /// binary-compiled state.
 pub trait Style {
     /// Typed property accessor.
-    fn property(&self, kind: PropertyKind) -> StyleProperty {
-        todo!()
-    }
+    fn property(&self, kind: PropertyKind) -> StyleProperty;
     /// Fill/stroke colour — default: transparent black.
-    fn color(&self) -> Color {
-        todo!()
-    }
+    fn color(&self) -> Color;
     /// Alpha opacity — default: `1.0`.
-    fn opacity(&self) -> Opacity {
-        todo!()
-    }
+    fn opacity(&self) -> Opacity;
     /// Stroke line width — default: `0.0`.
-    fn line_width(&self) -> LineWidth {
-        todo!()
-    }
+    fn line_width(&self) -> LineWidth;
     /// Affine transform — default: identity.
-    fn transform(&self) -> Mat4 {
-        todo!()
-    }
+    fn transform(&self) -> Mat4;
     /// WGSL shader effect — default: passthrough.
-    fn effect(&self) -> ShaderStyle {
-        todo!()
-    }
+    fn effect(&self) -> ShaderStyle;
     /// Named animation lookup, if any.
-    fn animation(&self, name: &str) -> Option<&Animation> {
-        todo!()
-    }
+    fn animation(&self, name: &str) -> Option<&Animation>;
 }
 
 /// Concrete owned style bundle — the value type returned by [`Theme`].
@@ -345,9 +322,8 @@ pub struct OwnedStyle {
 ///   program, no uniforms, no bindings).
 /// - [`animation`](Style::animation): `None` (no named animations).
 ///
-/// The [`Style`] trait's default method bodies remain `todo!()` until the
-/// concrete [`OwnedStyle`] impl lands in a later wave; `DefaultStyle` is the
-/// usable hardcoded-defaults stub for Wave 3.
+/// The [`Style`] trait's methods are all required (no default bodies);
+/// `DefaultStyle` is the canonical hardcoded-defaults implementation.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DefaultStyle;
 
@@ -403,8 +379,7 @@ impl Style for DefaultStyle {
         }
     }
 
-    fn animation(&self, name: &str) -> Option<&Animation> {
-        let _ = name;
+    fn animation(&self, _name: &str) -> Option<&Animation> {
         None
     }
 }
@@ -421,22 +396,47 @@ impl Style for DefaultStyle {
 /// is the author's responsibility, expressed at construction rather than
 /// resolved at match time.
 ///
-/// Wave 3: trait method bodies remain `todo!()`. Concrete theme-table
-/// compilation (binary data-section preset blobs, §7.6) lands in a later
-/// wave alongside the concrete [`OwnedStyle`] impl. [`DefaultStyle`] covers
-/// the hardcoded-defaults path in the meantime.
+/// All [`Theme`] methods are required (no default bodies). [`DefaultTheme`]
+/// provides the canonical hardcoded-defaults implementation; concrete
+/// theme-table compilation (binary data-section preset blobs, §7.6) lands
+/// in a later wave.
 pub trait Theme {
     /// Look up a named preset.
-    fn preset(&self, name: &str) -> OwnedStyle {
-        todo!()
-    }
+    fn preset(&self, name: &str) -> OwnedStyle;
     /// The default preset.
-    fn default(&self) -> OwnedStyle {
-        todo!()
-    }
+    fn default(&self) -> OwnedStyle;
     /// Enumerate available preset names.
+    fn names(&self) -> &[&'static str];
+}
+
+/// Hardcoded-default [`Theme`] implementation.
+///
+/// Returns an [`OwnedStyle`] populated with [`DefaultStyle`] defaults for
+/// every preset lookup, and exposes a single preset name `"default"`.
+/// Concrete theme-table compilation (binary data-section preset blobs,
+/// §7.6) lands in a later wave.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DefaultTheme;
+
+impl Theme for DefaultTheme {
+    fn preset(&self, _name: &str) -> OwnedStyle {
+        let s = DefaultStyle;
+        OwnedStyle {
+            color: s.color(),
+            opacity: s.opacity(),
+            line_width: s.line_width(),
+            transform: s.transform(),
+            effect: s.effect(),
+            animations: Vec::new(),
+        }
+    }
+
+    fn default(&self) -> OwnedStyle {
+        self.preset("default")
+    }
+
     fn names(&self) -> &[&'static str] {
-        todo!()
+        &["default"]
     }
 }
 
@@ -500,6 +500,38 @@ mod tests {
             s.property(PropertyKind::Custom(7)),
             StyleProperty::Scalar(ScalarValue::Color(Color(0)))
         ));
+    }
+
+    #[test]
+    fn default_theme_returns_default_style_defaults() {
+        let theme = DefaultTheme;
+        let style = theme.default();
+        let s = DefaultStyle;
+        assert_eq!(style.color, s.color());
+        assert_eq!(style.opacity, s.opacity());
+        assert_eq!(style.line_width, s.line_width());
+        assert_eq!(style.transform, s.transform());
+        assert_eq!(style.effect.program.source_hash, 0);
+        assert_eq!(style.effect.program.pipeline_handle, 0);
+        assert_eq!(style.effect.entry_point, "main");
+        assert!(style.effect.uniforms.bytes.is_empty());
+        assert!(style.effect.bindings.is_empty());
+        assert!(style.animations.is_empty());
+    }
+
+    #[test]
+    fn default_theme_preset_ignores_unknown_name() {
+        let theme = DefaultTheme;
+        let preset = theme.preset("nonexistent");
+        // Presets resolve to DefaultStyle defaults regardless of name.
+        assert_eq!(preset.color, Color(0));
+        assert_eq!(preset.opacity, Opacity(1.0));
+    }
+
+    #[test]
+    fn default_theme_names_exposes_default() {
+        let theme = DefaultTheme;
+        assert_eq!(theme.names(), &["default"]);
     }
 
     fn make_animation(duration: Duration) -> Animation {

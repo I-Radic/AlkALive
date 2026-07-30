@@ -9,10 +9,11 @@
 //! implementations. [`ErrorBoundary`], [`TraceRecorder`], and
 //! [`ModuleIsolator`] now carry default method bodies plus concrete
 //! reference implementors ([`TrappingBoundary`], [`AuthorTraceRecorder`],
-//! [`BoundaryIsolator`]). [`RecoveryStrategy`] remains a `todo!()` stub
-//! pending concrete strategy implementations. No cross-crate dependencies;
-//! types referenced from other sections (e.g. [`FrameBudgetEvent`],
-//! [`ModuleId`]) are local placeholders.
+//! [`BoundaryIsolator`]). Wave 5 makes [`RecoveryStrategy`]'s `category`
+//! and `recover` methods required (no `todo!()` defaults) and ships
+//! [`LastKnownGoodRecovery`] as the first concrete strategy implementor.
+//! No cross-crate dependencies; types referenced from other sections
+//! (e.g. [`FrameBudgetEvent`], [`ModuleId`]) are local placeholders.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -421,23 +422,22 @@ pub trait ModuleIsolator {
 
 /// Enumerated recovery strategy for a category of [`AlkALiveError`]
 /// (§13.4 / §13.5).
+///
+/// Wave 5 makes both `category` and `recover` required methods (no
+/// `todo!()` defaults); concrete strategy implementors supply the bodies.
+/// [`LastKnownGoodRecovery`] is provided as the first reference implementor
+/// (retains the last-known-good layout / frame). The remaining strategies
+/// from §13.4 (shader passthrough, font fallback, worker retry, full reload)
+/// land alongside the recovery-strategy registry in a later wave.
 pub trait RecoveryStrategy {
     /// The error category this strategy recovers.
     ///
-    /// **Wave 10 stub.** Panics via `todo!()`; concrete strategy
-    /// implementations (layout-recovery, shader-passthrough, font-fallback,
-    /// worker-retry — §13.4) are scheduled for a later wave once the
-    /// recovery-strategy registry is wired into the runtime.
-    fn category(&self) -> AlkALiveError {
-        todo!("RecoveryStrategy::category — concrete strategy impls pending (§13.4)")
-    }
+    /// Returned as a placeholder variant of [`AlkALiveError`] identifying
+    /// the strategy's category; concrete strategies pick the subtype they
+    /// recover.
+    fn category(&self) -> AlkALiveError;
     /// Recover from the failure described by `ctx`; returns the outcome.
-    ///
-    /// **Wave 10 stub.** Panics via `todo!()`; concrete strategy
-    /// implementations are scheduled for a later wave.
-    fn recover(&mut self, _ctx: RecoveryContext) -> RecoveryOutcome {
-        todo!("RecoveryStrategy::recover — concrete strategy impls pending (§13.4)")
-    }
+    fn recover(&mut self, ctx: RecoveryContext) -> RecoveryOutcome;
 }
 
 // ============================================================================
@@ -509,6 +509,26 @@ impl BoundaryIsolator {
 impl ModuleIsolator for BoundaryIsolator {
     fn quarantine(&mut self, module: ModuleId, rect: DirtyRect) {
         self.quarantined.push((module, rect));
+    }
+}
+
+/// Reference [`RecoveryStrategy`] that retains the last-known-good layout /
+/// frame and emits a placeholder in the dirty rect (§13.4).
+///
+/// Provided as a test seam and a reference for production implementors.
+/// `category` returns a generic [`AlkALiveError::Rendering`] placeholder
+/// (a [`RenderError::DeviceLost`] with an empty detail string); `recover`
+/// always returns [`RecoveryOutcome::RetainedLastKnownGood`].
+#[derive(Debug, Default, Clone, Copy)]
+pub struct LastKnownGoodRecovery;
+
+impl RecoveryStrategy for LastKnownGoodRecovery {
+    fn category(&self) -> AlkALiveError {
+        AlkALiveError::Rendering(RenderError::DeviceLost(String::new()))
+    }
+
+    fn recover(&mut self, _ctx: RecoveryContext) -> RecoveryOutcome {
+        RecoveryOutcome::RetainedLastKnownGood
     }
 }
 
@@ -664,5 +684,37 @@ mod tests {
         assert_eq!(report.quarantined_rect, DirtyRect::default());
         assert!(report.released_slots.is_empty());
         assert_eq!(report.span, SpanId(0));
+    }
+
+    // ---- RecoveryStrategy::LastKnownGoodRecovery -------------------------
+
+    #[test]
+    fn last_known_good_recovery_category_is_rendering_device_lost() {
+        let strategy = LastKnownGoodRecovery;
+        let cat = strategy.category();
+        match cat {
+            AlkALiveError::Rendering(RenderError::DeviceLost(detail)) => {
+                assert!(detail.is_empty(), "expected empty detail, got {detail:?}");
+            }
+            other => panic!(
+                "expected Rendering(DeviceLost(_)), got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn last_known_good_recovery_recover_retains_last_known_good() {
+        let mut strategy = LastKnownGoodRecovery;
+        let ctx = RecoveryContext {
+            error: AlkALiveError::Rendering(RenderError::DeviceLost("gpu".into())),
+            slot: SlotId(1),
+            rect: DirtyRect::default(),
+            span: SpanId(0),
+        };
+        let outcome = strategy.recover(ctx);
+        assert!(
+            matches!(outcome, RecoveryOutcome::RetainedLastKnownGood),
+            "expected RetainedLastKnownGood, got {outcome:?}",
+        );
     }
 }

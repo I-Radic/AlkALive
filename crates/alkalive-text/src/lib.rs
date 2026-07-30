@@ -1,8 +1,11 @@
 //! Text rendering stack — forked in-WASM HarfRust (ADR 022).
 //!
-//! Wave-3 trait skeletons: every method body is `todo!()`. Implementations
-//! land in Wave 6 (font registry, shaper, LRU glyph atlas, editing ops,
-//! `TextStack` measure/rasterize/a11y/ime adapters per §6.2–6.9).
+//! Trait surface with **required** methods (no `todo!()` defaults). The real
+//! HarfRust integration lands in Wave 6 (font registry, shaper, LRU glyph
+//! atlas, editing ops, `TextStack` measure/rasterize/a11y/ime adapters
+//! per §6.2–6.9). Until then, [`MockFontRegistry`], [`MockGlyphAtlas`], and
+//! [`MockTextStack`] provide non-panicking stub implementations so downstream
+//! crates can compile against the trait surface today.
 //!
 //! # Cross-crate forward declarations
 //!
@@ -26,10 +29,6 @@
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
-// Wave-3 skeleton: every method body is `todo!()`, so parameters are
-// intentionally unused. Suppressing this crate-wide keeps spec-faithful
-// parameter names without polluting CI's `clippy -- -D warnings` gate.
-#![allow(unused_variables)]
 
 // ============================================================================
 // Forward-declared cross-crate placeholders
@@ -169,27 +168,23 @@ pub enum FontLoadError {
 /// Font registry — resolves family/weight/style to a decoded face and
 /// caches parsed OpenType tables for HarfRust (§6.2). Serves HarfRust
 /// directly from WASM-heap memory.
+///
+/// Every method is required (no default body); the real HarfRust-backed
+/// implementation lands in Wave 6. [`MockFontRegistry`] provides a
+/// non-panicking stub for downstream consumers today.
 pub trait FontRegistry {
     /// Resolve a [`FontRequest`] to a [`FontId`], following the fallback
     /// chain (requested → generic alias → bundled default).
-    fn resolve(&mut self, req: &FontRequest) -> Result<FontId, FontLoadError> {
-        todo!()
-    }
+    fn resolve(&mut self, req: &FontRequest) -> Result<FontId, FontLoadError>;
 
     /// Look up the cached [`DecodedFace`] for `id`.
-    fn face(&self, id: FontId) -> &DecodedFace {
-        todo!()
-    }
+    fn face(&self, id: FontId) -> &DecodedFace;
 
     /// Load a font bundle from raw bytes (WASM-heap).
-    fn load_bundle(&mut self, bytes: &[u8]) -> Result<FontId, FontLoadError> {
-        todo!()
-    }
+    fn load_bundle(&mut self, bytes: &[u8]) -> Result<FontId, FontLoadError>;
 
     /// Return the fallback chain beginning at `id`.
-    fn fallback_chain(&self, id: FontId) -> &[FontId] {
-        todo!()
-    }
+    fn fallback_chain(&self, id: FontId) -> &[FontId];
 }
 
 // ============================================================================
@@ -283,16 +278,16 @@ pub enum ShapeError {
 /// HarfRust-backed shaper — accepts a Unicode run plus resolved font/style/
 /// language, performs BiDi segmentation and reordering in-WASM, and emits
 /// an immutable [`ShapedRun`] (§6.3).
+///
+/// Every method is required (no default body); the real HarfRust-backed
+/// implementation lands in Wave 6. [`MockTextStack`] provides a
+/// non-panicking stub for downstream consumers today.
 pub trait TextShaper {
     /// Shape `run` under the given context.
-    fn shape(&self, run: &str, ctx: &ShapeContext) -> Result<ShapedRun, ShapeError> {
-        todo!()
-    }
+    fn shape(&self, run: &str, ctx: &ShapeContext) -> Result<ShapedRun, ShapeError>;
 
     /// Re-shape an existing run against a different font (fallback path).
-    fn reshape_with_font(&self, run: &str, font: FontId) -> Result<ShapedRun, ShapeError> {
-        todo!()
-    }
+    fn reshape_with_font(&self, run: &str, font: FontId) -> Result<ShapedRun, ShapeError>;
 }
 
 // ============================================================================
@@ -352,26 +347,22 @@ pub struct EvictionStats {
 /// render-graph IR (§4). Invalidation follows per-module dirty-rect locality
 /// (ADR 002): a re-shaped run only dirties its own atlas footprint, never
 /// the whole atlas.
+///
+/// Every method is required (no default body); the real GPU-backed
+/// implementation lands in Wave 6. [`MockGlyphAtlas`] provides a
+/// non-panicking stub for downstream consumers today.
 pub trait GlyphAtlas {
     /// Rasterize-on-demand: ensure `key` is resident and return its slot.
-    fn ensure(&mut self, key: GlyphKey) -> AtlasSlot {
-        todo!()
-    }
+    fn ensure(&mut self, key: GlyphKey) -> AtlasSlot;
 
     /// Cached-only lookup; `None` if not resident.
-    fn slot(&self, key: GlyphKey) -> Option<AtlasSlot> {
-        todo!()
-    }
+    fn slot(&self, key: GlyphKey) -> Option<AtlasSlot>;
 
     /// Invalidate the atlas footprint of `rect` in `module_id` (ADR 002).
-    fn invalidate(&mut self, module_id: ModuleId, rect: DirtyRect) {
-        todo!()
-    }
+    fn invalidate(&mut self, module_id: ModuleId, rect: DirtyRect);
 
     /// LRU eviction, keeping every key in `keep`. Returns eviction stats.
-    fn evict_lru(&mut self, keep: &PinSet) -> EvictionStats {
-        todo!()
-    }
+    fn evict_lru(&mut self, keep: &PinSet) -> EvictionStats;
 }
 
 // ============================================================================
@@ -431,21 +422,19 @@ pub struct CaretSelection {
 /// Built atop HarfRust output (ADR 022 negative consequence: no DOM
 /// contracts inherited). `hit_test` maps a point to the nearest caret via
 /// the run's `caret_map`, honoring directional affinity.
+///
+/// Every method is required (no default body); the real HarfRust-backed
+/// implementation lands in Wave 6. [`MockTextStack`] provides a
+/// non-panicking stub for downstream consumers today.
 pub trait EditingOps {
     /// Map a screen-space point to the nearest caret offset.
-    fn hit_test(&self, run: &ShapedRun, point: (f32, f32)) -> CaretOffset {
-        todo!()
-    }
+    fn hit_test(&self, run: &ShapedRun, point: (f32, f32)) -> CaretOffset;
 
     /// Map a caret offset to its screen-space (x, y) position.
-    fn caret_position(&self, run: &ShapedRun, offset: CaretOffset) -> (f32, f32) {
-        todo!()
-    }
+    fn caret_position(&self, run: &ShapedRun, offset: CaretOffset) -> (f32, f32);
 
     /// Build selection-highlight quads for `sel` over `run`.
-    fn selection_quads(&self, run: &ShapedRun, sel: CaretSelection) -> Box<[Quad]> {
-        todo!()
-    }
+    fn selection_quads(&self, run: &ShapedRun, sel: CaretSelection) -> Box<[Quad]>;
 }
 
 // ============================================================================
@@ -546,37 +535,33 @@ pub struct MeasuredLines {
 /// [`TextStack::measure`]. The two interfaces are semantically identical
 /// (synchronous, HarfRust-backed, no DOM) and the rendering-ABI ADR (§4.7)
 /// will unify their type signatures precisely.
+///
+/// Every method is required (no default body); the real HarfRust-backed
+/// implementation lands in Wave 6. [`MockTextStack`] provides a
+/// non-panicking stub for downstream consumers today.
 pub trait TextStack: TextShaper + EditingOps {
     /// Implements the `MeasuredRun` contract consumed by §5's
     /// `LayoutSolver`. Adapts [`ShapedRun`] output to `GlyphMetrics`/
     /// `LineBreak` types (ADR 004).
-    fn measure(&self, run: &ShapedRun, max_width: f32) -> MeasuredLines {
-        todo!()
-    }
+    fn measure(&self, run: &ShapedRun, max_width: f32) -> MeasuredLines;
 
     /// Walk `run`, query the atlas for each [`GlyphKey`], and emit a
     /// [`GlyphQuadBatch`] referencing atlas UVs (§6.5). No pixel work
     /// happens on the hot path beyond the first-seen upload.
-    fn rasterize(&self, run: &ShapedRun, atlas: &mut dyn GlyphAtlas) -> GlyphQuadBatch {
-        todo!()
-    }
+    fn rasterize(&self, run: &ShapedRun, atlas: &mut dyn GlyphAtlas) -> GlyphQuadBatch;
 
     /// Deferred-a11y placeholder (§6.8): returns source text, caret/selection,
     /// and run metrics so any future derivation layer can consume it without
     /// reshaping.
-    fn expose_a11y_text(&self, run: &ShapedRun) -> A11yTextPlaceholder {
-        todo!()
-    }
+    fn expose_a11y_text(&self, run: &ShapedRun) -> A11yTextPlaceholder;
 
     /// IME composition hook (§6.7); acquisition mechanism is pluggable behind
     /// this stable interface.
-    fn ime_compose(&mut self, ev: CompositionEvent) -> ImeState {
-        todo!()
-    }
+    fn ime_compose(&mut self, ev: CompositionEvent) -> ImeState;
 }
 
 // ============================================================================
-// Wave-3 mock implementation
+// Wave-3 mock implementations
 // ============================================================================
 
 /// Construct a minimal empty [`ShapedRun`] for the mock text stack.
@@ -599,14 +584,101 @@ fn empty_shaped_run() -> ShapedRun {
     }
 }
 
+/// Wave-3 mock [`FontRegistry`] with stub implementations of every method.
+///
+/// Returns neutral/empty outputs for every operation — sufficient to compile
+/// downstream consumers against the trait surface today. The real HarfRust
+/// integration (font registry backed by parsed OpenType tables) lands in
+/// Wave 6 per §6.2; until then, calling any [`FontRegistry`] method on this
+/// mock never panics.
+///
+/// - [`resolve`](FontRegistry::resolve) always returns `Ok(FontId(0))`.
+/// - [`face`](FontRegistry::face) always returns a default [`DecodedFace`].
+/// - [`load_bundle`](FontRegistry::load_bundle) always returns `Ok(FontId(0))`.
+/// - [`fallback_chain`](FontRegistry::fallback_chain) always returns `&[]`.
+///
+/// The mock holds a single default [`DecodedFace`] so `face` can return a
+/// stable reference; it is otherwise stateless.
+#[derive(Debug, Default, Clone)]
+pub struct MockFontRegistry {
+    /// Default face returned by [`FontRegistry::face`].
+    default_face: DecodedFace,
+}
+
+impl FontRegistry for MockFontRegistry {
+    fn resolve(&mut self, req: &FontRequest) -> Result<FontId, FontLoadError> {
+        let _ = req;
+        Ok(FontId(0))
+    }
+
+    fn face(&self, id: FontId) -> &DecodedFace {
+        let _ = id;
+        &self.default_face
+    }
+
+    fn load_bundle(&mut self, bytes: &[u8]) -> Result<FontId, FontLoadError> {
+        let _ = bytes;
+        Ok(FontId(0))
+    }
+
+    fn fallback_chain(&self, id: FontId) -> &[FontId] {
+        let _ = id;
+        &[]
+    }
+}
+
+/// Wave-3 mock [`GlyphAtlas`] with stub implementations of every method.
+///
+/// Returns neutral/empty outputs for every operation — sufficient to compile
+/// downstream consumers against the trait surface today. The real GPU-backed
+/// LRU atlas lands in Wave 6 per §6.4; until then, calling any
+/// [`GlyphAtlas`] method on this mock never panics.
+///
+/// - [`ensure`](GlyphAtlas::ensure) returns a zeroed [`AtlasSlot`] (page `0`,
+///   default UV, zero bearing/size).
+/// - [`slot`](GlyphAtlas::slot) always returns `None` (nothing resident).
+/// - [`invalidate`](GlyphAtlas::invalidate) is a no-op.
+/// - [`evict_lru`](GlyphAtlas::evict_lru) returns
+///   [`EvictionStats::default()`] (nothing evicted).
+///
+/// The mock holds no state: every call returns the same constant output.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct MockGlyphAtlas;
+
+impl GlyphAtlas for MockGlyphAtlas {
+    fn ensure(&mut self, key: GlyphKey) -> AtlasSlot {
+        let _ = key;
+        AtlasSlot {
+            page: 0,
+            uv: Rect::default(),
+            bearing: (0.0, 0.0),
+            size: (0.0, 0.0),
+        }
+    }
+
+    fn slot(&self, key: GlyphKey) -> Option<AtlasSlot> {
+        let _ = key;
+        None
+    }
+
+    fn invalidate(&mut self, module_id: ModuleId, rect: DirtyRect) {
+        let _ = (module_id, rect);
+    }
+
+    fn evict_lru(&mut self, keep: &PinSet) -> EvictionStats {
+        let _ = keep;
+        EvictionStats::default()
+    }
+}
+
 /// Wave-3 mock [`TextStack`] with stub implementations of every method.
 ///
 /// Returns empty/minimal outputs for every operation — sufficient to compile
 /// downstream consumers against the trait surface today. The real HarfRust
 /// integration (font registry, shaper, LRU glyph atlas, editing ops, IME,
-/// a11y) lands in Wave 6 per §6.2–6.9; the trait defaults remain `todo!()`
-/// and are overridden here with deterministic stubs so that calling any
-/// [`TextStack`] method never panics.
+/// a11y) lands in Wave 6 per §6.2–6.9; this mock overrides every required
+/// trait method with deterministic stubs so that calling any [`TextStack`]
+/// method never panics.
 ///
 /// The mock holds no state: every call returns the same constant output.
 /// `ime_compose` always reports [`ImeState::Cancelled`].
@@ -714,9 +786,9 @@ mod tests {
     fn mock_rasterize_returns_default_batch() {
         let stack = MockTextStack;
         let shaped = stack.shape("", &ShapeContext::default()).unwrap();
-        // A no-op atlas stub: every method body is `todo!()`, but
-        // `rasterize` must not call into it (the mock emits zero quads).
-        let mut atlas = NoopAtlas;
+        // The mock atlas has non-panicking stubs, but `rasterize` emits zero
+        // quads without ever querying it.
+        let mut atlas = MockGlyphAtlas;
         let batch = stack.rasterize(&shaped, &mut atlas);
         assert!(batch.quads.is_empty());
         assert!(batch.font_ids.is_empty());
@@ -761,27 +833,31 @@ mod tests {
             .is_empty());
     }
 
-    /// A no-op [`GlyphAtlas`] used only to prove `MockTextStack::rasterize`
-    /// never calls into the atlas (its method bodies are `todo!()` and would
-    /// panic if invoked).
-    struct NoopAtlas;
+    #[test]
+    fn mock_font_registry_returns_neutral_defaults() {
+        let mut reg = MockFontRegistry::default();
+        let req = FontRequest::default();
+        assert_eq!(reg.resolve(&req).unwrap(), FontId(0));
+        assert_eq!(reg.load_bundle(&[]).unwrap(), FontId(0));
+        let face = reg.face(FontId(0));
+        assert_eq!(face.id, FontId(0));
+        assert_eq!(face.units_per_em, 0);
+        assert!(reg.fallback_chain(FontId(0)).is_empty());
+    }
 
-    impl GlyphAtlas for NoopAtlas {
-        fn ensure(&mut self, key: GlyphKey) -> AtlasSlot {
-            let _ = key;
-            todo!()
-        }
-        fn slot(&self, key: GlyphKey) -> Option<AtlasSlot> {
-            let _ = key;
-            todo!()
-        }
-        fn invalidate(&mut self, module_id: ModuleId, rect: DirtyRect) {
-            let _ = (module_id, rect);
-            todo!()
-        }
-        fn evict_lru(&mut self, keep: &PinSet) -> EvictionStats {
-            let _ = keep;
-            todo!()
-        }
+    #[test]
+    fn mock_glyph_atlas_returns_non_panicking_defaults() {
+        let mut atlas = MockGlyphAtlas;
+        let slot = atlas.ensure(GlyphKey::default());
+        assert_eq!(slot.page, 0);
+        assert_eq!(slot.uv, Rect::default());
+        assert_eq!(slot.bearing, (0.0, 0.0));
+        assert_eq!(slot.size, (0.0, 0.0));
+        assert_eq!(atlas.slot(GlyphKey::default()), None);
+        atlas.invalidate(ModuleId::default(), DirtyRect);
+        assert_eq!(
+            atlas.evict_lru(&PinSet::default()),
+            EvictionStats::default()
+        );
     }
 }

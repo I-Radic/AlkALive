@@ -4,13 +4,15 @@
 //! slots, signals, and the error surface defined in `docs/SPECIFICATION.md`
 //! §2.7–2.9. Wave 4 implements the runtime-free semantics: module lifecycle
 //! state machine, encapsulation access checks, slot mounting, type soundness
-//! queries, and interface slot lookup. Methods that require runtime
-//! infrastructure (signal emit/subscribe) remain `todo!()` stubs and are
-//! tagged with the Wave that will implement them.
+//! queries, and interface slot lookup. Wave 5 replaces the `Signal::emit` /
+//! `Signal::subscribe` `todo!()` stubs with a last-known-good value buffer
+//! and a unique subscription-id minter; dispatch to subscribers remains
+//! deferred to the Wave 6 runtime integration (observer registry, ADR 014).
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+use core::cell::RefCell;
 use core::marker::PhantomData;
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -346,32 +348,81 @@ impl Slot {
 static NEXT_MOUNT_HANDLE: AtomicU64 = AtomicU64::new(1);
 
 /// A typed output signal emitter (ADR 014).
-#[derive(Debug, Clone)]
+///
+/// Wave 5 replaces the prior `todo!()` stubs with a real last-known-good
+/// buffer and a unique subscription-id minter. [`Signal::emit`] stores the
+/// emitted value in an internal [`RefCell<Option<T>>`] (interior mutability
+/// lets `emit` take `&self`, matching the module-internal writer contract).
+/// [`Signal::subscribe`] mints a unique [`Subscription`] from an internal
+/// [`AtomicU64`] counter. Dispatch to registered subscribers — the runtime's
+/// observer registry (ADR 014 / §2.6) and capability-grant verification
+/// (ADR 018) — remains a TODO pending the Wave 6 runtime integration.
+///
+/// `Clone` is implemented manually (not derived) because [`AtomicU64`] does
+/// not implement `Clone`; the cloned signal loads the current counter value
+/// and the last-known-good value (the latter requires `T: Clone`).
+#[derive(Debug)]
 pub struct Signal<T> {
-    _marker: PhantomData<T>,
+    /// Last value emitted via [`Signal::emit`]; `None` until the first emit.
+    last_value: RefCell<Option<T>>,
+    /// Monotonic counter backing [`Signal::subscribe`]; starts at `1` so
+    /// `Subscription(0)` remains a sentinel "no subscription" value (mirrors
+    /// the [`NEXT_MOUNT_HANDLE`] mount-handle counter).
+    next_subscription_id: AtomicU64,
+}
+
+impl<T: Clone> Clone for Signal<T> {
+    fn clone(&self) -> Self {
+        Self {
+            last_value: RefCell::new(self.last_value.borrow().clone()),
+            next_subscription_id: AtomicU64::new(self.next_subscription_id.load(Ordering::Relaxed)),
+        }
+    }
 }
 
 impl<T> Signal<T> {
+    /// Create a new signal with no last value and the subscription counter
+    /// starting at `1`.
+    pub fn new() -> Self {
+        Self {
+            last_value: RefCell::new(None),
+            next_subscription_id: AtomicU64::new(1),
+        }
+    }
+
     /// Emit `value` to all subscribers (module-internal writer).
     ///
-    /// **Wave 4 stub.** This method is intentionally `todo!()`. The real
-    /// implementation requires the runtime's observer registry and the
-    /// per-module emission queue (ADR 014 / §2.6) and is scheduled for
-    /// Wave 6 (runtime integration). Calling this method panics.
+    /// Wave 5 stores `value` as the last-known-good emission in the
+    /// internal buffer. Dispatch to registered subscribers is deferred —
+    /// the runtime's observer registry (ADR 014 / §2.6) is not yet wired.
     pub fn emit(&self, value: T) {
-        let _ = value;
-        todo!("Signal::emit — implemented in Wave 6 (runtime observer registry, ADR 014)");
+        *self.last_value.borrow_mut() = Some(value);
+        // TODO(observer registry, Wave 6 runtime integration): dispatch
+        // `value` to every registered subscriber via the runtime's observer
+        // registry (ADR 014 / §2.6). Until then we only retain the
+        // last-known-good value.
     }
 
     /// Subscribe `listener`; a capability-gated reader.
     ///
-    /// **Wave 4 stub.** This method is intentionally `todo!()`. The real
-    /// implementation requires the runtime's subscriber table, capability
-    /// grant verification (ADR 018), and emission-graph wiring (ADR 014),
-    /// all scheduled for Wave 6. Calling this method panics.
+    /// Wave 5 mints a unique [`Subscription`] id from an internal
+    /// [`AtomicU64`] counter. Capability-grant verification (ADR 018) and
+    /// registration in the runtime's subscriber table are deferred — the
+    /// runtime's observer registry (ADR 014 / §2.6) is not yet wired.
     pub fn subscribe(&self, listener: Listener<T>) -> Subscription {
         let _ = listener;
-        todo!("Signal::subscribe — implemented in Wave 6 (runtime subscriber table, ADR 014/018)");
+        // TODO(observer registry, Wave 6 runtime integration): register
+        // `listener` in the runtime's observer registry and verify the
+        // caller's capability grant (ADR 018 / ADR 014). Until then we only
+        // mint a unique subscription id.
+        let id = self.next_subscription_id.fetch_add(1, Ordering::Relaxed);
+        Subscription(id)
+    }
+}
+
+impl<T> Default for Signal<T> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -649,5 +700,33 @@ mod tests {
         let m = module_in(ModuleState::Active);
         let h = m.mount(Symbol(5), ModuleId(9)).unwrap();
         assert!(h.0 > 0);
+    }
+
+    // ---- Signal::emit / Signal::subscribe --------------------------------
+
+    #[test]
+    fn signal_emit_stores_last_value() {
+        let signal: Signal<i32> = Signal::new();
+        // No value until the first emit.
+        assert!(signal.last_value.borrow().is_none());
+        signal.emit(42);
+        assert_eq!(*signal.last_value.borrow(), Some(42));
+        // A second emit overwrites the last-known-good value.
+        signal.emit(7);
+        assert_eq!(*signal.last_value.borrow(), Some(7));
+    }
+
+    #[test]
+    fn signal_subscribe_returns_unique_nonzero_ids() {
+        let signal: Signal<i32> = Signal::new();
+        let s1 = signal.subscribe(Listener { id: 1, _marker: PhantomData });
+        let s2 = signal.subscribe(Listener { id: 2, _marker: PhantomData });
+        let s3 = signal.subscribe(Listener { id: 3, _marker: PhantomData });
+        // Counter starts at 1; Subscription(0) is the sentinel.
+        assert!(s1.0 > 0);
+        assert!(s2.0 > s1.0);
+        assert!(s3.0 > s2.0);
+        assert_ne!(s1, s2);
+        assert_ne!(s2, s3);
     }
 }
