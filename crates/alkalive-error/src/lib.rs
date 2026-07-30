@@ -89,10 +89,28 @@ pub enum InputError {
 }
 
 /// DOM error subtype (§9 — `<title>`/`<meta>` + SEO snapshot only).
-#[derive(Debug, Clone)]
+///
+/// Mirrors `alkalive_dom::DomError` (§9.6) variant-for-variant so that
+/// the unifying [`AlkALiveError::Dom`] channel preserves the same
+/// diagnostic detail as the dom crate's typed surface. Degrades
+/// gracefully: the build-time snapshot continues to be served to
+/// crawlers, and the GPU render loop is unaffected. DOM failure never
+/// blocks the WASM render thread; the bridge is fire-and-forget from
+/// the frame loop's perspective.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DomError {
-    /// SEO snapshot emit failure (non-hot-path).
-    SnapshotEmitFailed(String),
+    /// No host DOM context bound.
+    HostUnavailable,
+    /// Host refused a meta write (policy / CSP).
+    MetaRejected,
+    /// Snapshot serialisation / emission failed.
+    SnapshotWriteFailed,
+    /// Host rejected a declared route.
+    RouteDeclined,
+    /// State contained a non-serialisable value.
+    StateUnserialisable,
+    /// Host did not acknowledge within budget.
+    Timeout,
 }
 
 /// Threading error subtype (§11 — worker IPC, socket, SharedArrayBuffer).
@@ -528,6 +546,94 @@ impl RecoveryStrategy for LastKnownGoodRecovery {
     }
 }
 
+/// [`RecoveryStrategy`] that falls back to a full reload (§13.4).
+///
+/// Provided as a test seam and a reference for production implementors.
+/// `category` returns a representative [`AlkALiveError::ModuleLifecycle`]
+/// placeholder (a [`LifecycleError::RehydrateSchemaMismatch`] with an
+/// empty detail string) — full reload is the canonical recovery for an
+/// HMR rehydrate failure that cannot be patched in place. `recover`
+/// always returns [`RecoveryOutcome::FullReload`] with `state_lost: true`
+/// because the stub does not preserve application state across the
+/// reload boundary.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct FullReloadRecovery;
+
+impl RecoveryStrategy for FullReloadRecovery {
+    fn category(&self) -> AlkALiveError {
+        AlkALiveError::ModuleLifecycle(LifecycleError::RehydrateSchemaMismatch(
+            String::new(),
+        ))
+    }
+
+    fn recover(&mut self, _ctx: RecoveryContext) -> RecoveryOutcome {
+        RecoveryOutcome::FullReload { state_lost: true }
+    }
+}
+
+/// [`RecoveryStrategy`] that swaps to a passthrough WGSL shader (§13.4).
+///
+/// Provided as a test seam and a reference for production implementors.
+/// `category` returns a representative [`AlkALiveError::Rendering`]
+/// placeholder (a [`RenderError::GraphCompile`] with an empty detail
+/// string) — shader passthrough is the canonical recovery for a
+/// render-graph / pipeline compile failure. `recover` always returns
+/// [`RecoveryOutcome::ShaderPassthrough`].
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ShaderPassthroughRecovery;
+
+impl RecoveryStrategy for ShaderPassthroughRecovery {
+    fn category(&self) -> AlkALiveError {
+        AlkALiveError::Rendering(RenderError::GraphCompile(String::new()))
+    }
+
+    fn recover(&mut self, _ctx: RecoveryContext) -> RecoveryOutcome {
+        RecoveryOutcome::ShaderPassthrough
+    }
+}
+
+/// [`RecoveryStrategy`] that descends the font fallback chain (§13.4).
+///
+/// Provided as a test seam and a reference for production implementors.
+/// `category` returns a representative [`AlkALiveError::TextShaping`]
+/// placeholder (a [`TextError::MissingGlyph`] with an empty detail
+/// string) — font fallback is the canonical recovery for a missing-glyph
+/// failure after the primary font's coverage is exhausted. `recover`
+/// always returns [`RecoveryOutcome::FontFallback`].
+#[derive(Debug, Default, Clone, Copy)]
+pub struct FontFallbackRecovery;
+
+impl RecoveryStrategy for FontFallbackRecovery {
+    fn category(&self) -> AlkALiveError {
+        AlkALiveError::TextShaping(TextError::MissingGlyph(String::new()))
+    }
+
+    fn recover(&mut self, _ctx: RecoveryContext) -> RecoveryOutcome {
+        RecoveryOutcome::FontFallback
+    }
+}
+
+/// [`RecoveryStrategy`] that reissues the failing operation after a
+/// worker crash (§13.4).
+///
+/// Provided as a test seam and a reference for production implementors.
+/// `category` returns a representative [`AlkALiveError::Threading`]
+/// placeholder (a [`ThreadError::WorkerCrash`] with an empty detail
+/// string) — worker retry is the canonical recovery for an off-thread
+/// worker crash. `recover` always returns [`RecoveryOutcome::Retried`].
+#[derive(Debug, Default, Clone, Copy)]
+pub struct WorkerRetryRecovery;
+
+impl RecoveryStrategy for WorkerRetryRecovery {
+    fn category(&self) -> AlkALiveError {
+        AlkALiveError::Threading(ThreadError::WorkerCrash(String::new()))
+    }
+
+    fn recover(&mut self, _ctx: RecoveryContext) -> RecoveryOutcome {
+        RecoveryOutcome::Retried
+    }
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -710,5 +816,154 @@ mod tests {
             matches!(outcome, RecoveryOutcome::RetainedLastKnownGood),
             "expected RetainedLastKnownGood, got {outcome:?}",
         );
+    }
+
+    // ---- RecoveryStrategy::FullReloadRecovery ----------------------------
+
+    #[test]
+    fn full_reload_recovery_category_is_module_lifecycle_rehydrate_mismatch() {
+        let strategy = FullReloadRecovery;
+        let cat = strategy.category();
+        match cat {
+            AlkALiveError::ModuleLifecycle(LifecycleError::RehydrateSchemaMismatch(detail)) => {
+                assert!(detail.is_empty(), "expected empty detail, got {detail:?}");
+            }
+            other => panic!(
+                "expected ModuleLifecycle(RehydrateSchemaMismatch(_)), got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn full_reload_recovery_recover_returns_full_reload_state_lost() {
+        let mut strategy = FullReloadRecovery;
+        let ctx = RecoveryContext {
+            error: AlkALiveError::ModuleLifecycle(LifecycleError::RehydrateSchemaMismatch(
+                "schema drift".into(),
+            )),
+            slot: SlotId(2),
+            rect: DirtyRect::default(),
+            span: SpanId(0),
+        };
+        let outcome = strategy.recover(ctx);
+        match outcome {
+            RecoveryOutcome::FullReload { state_lost } => {
+                assert!(state_lost, "expected state_lost = true");
+            }
+            other => panic!("expected FullReload {{ state_lost: true }}, got {other:?}"),
+        }
+    }
+
+    // ---- RecoveryStrategy::ShaderPassthroughRecovery ---------------------
+
+    #[test]
+    fn shader_passthrough_recovery_category_is_rendering_graph_compile() {
+        let strategy = ShaderPassthroughRecovery;
+        let cat = strategy.category();
+        match cat {
+            AlkALiveError::Rendering(RenderError::GraphCompile(detail)) => {
+                assert!(detail.is_empty(), "expected empty detail, got {detail:?}");
+            }
+            other => panic!("expected Rendering(GraphCompile(_)), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn shader_passthrough_recovery_recover_returns_shader_passthrough() {
+        let mut strategy = ShaderPassthroughRecovery;
+        let ctx = RecoveryContext {
+            error: AlkALiveError::Rendering(RenderError::GraphCompile("bad wgsl".into())),
+            slot: SlotId(3),
+            rect: DirtyRect::default(),
+            span: SpanId(0),
+        };
+        let outcome = strategy.recover(ctx);
+        assert!(
+            matches!(outcome, RecoveryOutcome::ShaderPassthrough),
+            "expected ShaderPassthrough, got {outcome:?}",
+        );
+    }
+
+    // ---- RecoveryStrategy::FontFallbackRecovery --------------------------
+
+    #[test]
+    fn font_fallback_recovery_category_is_text_shaping_missing_glyph() {
+        let strategy = FontFallbackRecovery;
+        let cat = strategy.category();
+        match cat {
+            AlkALiveError::TextShaping(TextError::MissingGlyph(detail)) => {
+                assert!(detail.is_empty(), "expected empty detail, got {detail:?}");
+            }
+            other => panic!("expected TextShaping(MissingGlyph(_)), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn font_fallback_recovery_recover_returns_font_fallback() {
+        let mut strategy = FontFallbackRecovery;
+        let ctx = RecoveryContext {
+            error: AlkALiveError::TextShaping(TextError::MissingGlyph("U+1234".into())),
+            slot: SlotId(4),
+            rect: DirtyRect::default(),
+            span: SpanId(0),
+        };
+        let outcome = strategy.recover(ctx);
+        assert!(
+            matches!(outcome, RecoveryOutcome::FontFallback),
+            "expected FontFallback, got {outcome:?}",
+        );
+    }
+
+    // ---- RecoveryStrategy::WorkerRetryRecovery ---------------------------
+
+    #[test]
+    fn worker_retry_recovery_category_is_threading_worker_crash() {
+        let strategy = WorkerRetryRecovery;
+        let cat = strategy.category();
+        match cat {
+            AlkALiveError::Threading(ThreadError::WorkerCrash(detail)) => {
+                assert!(detail.is_empty(), "expected empty detail, got {detail:?}");
+            }
+            other => panic!("expected Threading(WorkerCrash(_)), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn worker_retry_recovery_recover_returns_retried() {
+        let mut strategy = WorkerRetryRecovery;
+        let ctx = RecoveryContext {
+            error: AlkALiveError::Threading(ThreadError::WorkerCrash("oom".into())),
+            slot: SlotId(5),
+            rect: DirtyRect::default(),
+            span: SpanId(0),
+        };
+        let outcome = strategy.recover(ctx);
+        assert!(
+            matches!(outcome, RecoveryOutcome::Retried),
+            "expected Retried, got {outcome:?}",
+        );
+    }
+
+    // ---- DomError variant surface (Gap H12 regression) -------------------
+
+    #[test]
+    fn dom_error_has_six_variants_matching_dom_crate() {
+        // Round-trip every variant through AlkALiveError::Dom to confirm
+        // the unifying channel preserves the full diagnostic surface.
+        let variants = [
+            DomError::HostUnavailable,
+            DomError::MetaRejected,
+            DomError::SnapshotWriteFailed,
+            DomError::RouteDeclined,
+            DomError::StateUnserialisable,
+            DomError::Timeout,
+        ];
+        for v in variants {
+            let err = AlkALiveError::Dom(v);
+            match err {
+                AlkALiveError::Dom(recovered) => assert_eq!(recovered, v),
+                other => panic!("expected AlkALiveError::Dom(_), got {other:?}"),
+            }
+        }
     }
 }

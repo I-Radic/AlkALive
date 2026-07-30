@@ -452,6 +452,517 @@ impl MemoryPool for LinearMemoryPool {
 }
 
 // ============================================================================
+// Concrete implementations (Wave F — Gap H11)
+// ============================================================================
+//
+// The §12.7 budget table mandates five more pools besides WASM linear memory:
+//
+// | Pool                | Cap    | Enforcement  | Breach on overflow        |
+// |---------------------|--------|--------------|---------------------------|
+// | SABPool             | 64 MB  | Backpressure | SABExhausted              |
+// | GlyphAtlasPool      | 32 MB  | LRU          | GlyphAtlasEvict           |
+// | PipelineCachePool   | 64 MB  | LRU          | PipelineCacheFull         |
+// | AttachmentPool      | 256 MB | Reject       | AttachmentPoolEmpty       |
+// | InstanceBufferPool  | 128 MB | Reject       | InstanceBufferFull        |
+//
+// `reserve` rejects growth past the cap with the pool's designated
+// [`BudgetBreach`]. LRU pools additionally track reserved regions in a `Vec`
+// (front = oldest, back = newest) so that `evict_lru` actually evicts entries;
+// the non-LRU pools' `evict_lru` is a no-op. `release` returns a region to the
+// pool (and, for LRU pools, removes the matching entry from the tracking Vec).
+
+/// 64 MB cap, `Backpressure` enforcement → [`BudgetBreach::SABExhausted`].
+///
+/// Backpressure pools are not LRU-evictable: `evict_lru` is a no-op and the
+/// caller is expected to yield and retry on `Err(SABExhausted)`.
+#[derive(Debug, Clone)]
+pub struct SABPool {
+    /// Hard cap in bytes (default 64 MB per §12.7).
+    cap_bytes: u64,
+    /// Currently used bytes.
+    used_bytes: u64,
+    /// High-water mark in bytes (peak `used_bytes` observed).
+    high_water_bytes: u64,
+}
+
+impl SABPool {
+    /// 64 MB cap, the §12.7 default for the SAB scene-graph budget.
+    const DEFAULT_CAP: u64 = 64 * 1024 * 1024;
+
+    /// Create a pool with the §12.7 default 64 MB cap.
+    pub fn new() -> Self {
+        Self::with_cap(Self::DEFAULT_CAP)
+    }
+
+    /// Create a pool with a custom cap in bytes (primarily for tests).
+    pub fn with_cap(cap_bytes: u64) -> Self {
+        Self {
+            cap_bytes,
+            used_bytes: 0,
+            high_water_bytes: 0,
+        }
+    }
+}
+
+impl Default for SABPool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MemoryPool for SABPool {
+    fn kind(&self) -> PoolKind {
+        PoolKind::SAB
+    }
+
+    fn cap_bytes(&self) -> u64 {
+        self.cap_bytes
+    }
+
+    fn used_bytes(&self) -> u64 {
+        self.used_bytes
+    }
+
+    fn high_water_bytes(&self) -> u64 {
+        self.high_water_bytes
+    }
+
+    fn reserve(&mut self, n: u64) -> Result<Region, BudgetBreach> {
+        match self.used_bytes.checked_add(n) {
+            Some(new_used) if new_used <= self.cap_bytes => {
+                let offset = self.used_bytes;
+                self.used_bytes = new_used;
+                if new_used > self.high_water_bytes {
+                    self.high_water_bytes = new_used;
+                }
+                Ok(Region {
+                    offset,
+                    len: n,
+                    kind: PoolKind::SAB,
+                })
+            }
+            _ => Err(BudgetBreach::SABExhausted),
+        }
+    }
+
+    fn release(&mut self, region: Region) {
+        self.used_bytes = self.used_bytes.saturating_sub(region.len);
+    }
+
+    fn evict_lru(&mut self, _target_bytes: u64) -> EvictionStats {
+        // Backpressure pools are not LRU-evictable: eviction is a no-op.
+        EvictionStats {
+            evicted_bytes: 0,
+            evicted_entries: 0,
+            kind: PoolKind::SAB,
+        }
+    }
+}
+
+/// 32 MB cap, `LRU` enforcement → [`BudgetBreach::GlyphAtlasEvict`] on
+/// overflow.
+///
+/// Reserved regions are tracked in a `Vec<(offset, len)>` (front = oldest,
+/// back = newest). `evict_lru` pops from the front until `target_bytes` are
+/// free; `release` removes the matching entry so the tracking Vec stays
+/// consistent with `used_bytes`.
+#[derive(Debug, Clone)]
+pub struct GlyphAtlasPool {
+    /// Hard cap in bytes (default 32 MB per §12.7).
+    cap_bytes: u64,
+    /// Currently used bytes.
+    used_bytes: u64,
+    /// High-water mark in bytes (peak `used_bytes` observed).
+    high_water_bytes: u64,
+    /// LRU entries: front = oldest (next to evict), back = newest.
+    entries: Vec<(u64, u64)>,
+}
+
+impl GlyphAtlasPool {
+    /// 32 MB cap, the §12.7 default for the glyph atlas.
+    const DEFAULT_CAP: u64 = 32 * 1024 * 1024;
+
+    /// Create a pool with the §12.7 default 32 MB cap.
+    pub fn new() -> Self {
+        Self::with_cap(Self::DEFAULT_CAP)
+    }
+
+    /// Create a pool with a custom cap in bytes (primarily for tests).
+    pub fn with_cap(cap_bytes: u64) -> Self {
+        Self {
+            cap_bytes,
+            used_bytes: 0,
+            high_water_bytes: 0,
+            entries: Vec::new(),
+        }
+    }
+}
+
+impl Default for GlyphAtlasPool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MemoryPool for GlyphAtlasPool {
+    fn kind(&self) -> PoolKind {
+        PoolKind::Atlas
+    }
+
+    fn cap_bytes(&self) -> u64 {
+        self.cap_bytes
+    }
+
+    fn used_bytes(&self) -> u64 {
+        self.used_bytes
+    }
+
+    fn high_water_bytes(&self) -> u64 {
+        self.high_water_bytes
+    }
+
+    fn reserve(&mut self, n: u64) -> Result<Region, BudgetBreach> {
+        match self.used_bytes.checked_add(n) {
+            Some(new_used) if new_used <= self.cap_bytes => {
+                let offset = self.used_bytes;
+                self.used_bytes = new_used;
+                if new_used > self.high_water_bytes {
+                    self.high_water_bytes = new_used;
+                }
+                // Track the new entry at the back (newest).
+                self.entries.push((offset, n));
+                Ok(Region {
+                    offset,
+                    len: n,
+                    kind: PoolKind::Atlas,
+                })
+            }
+            _ => Err(BudgetBreach::GlyphAtlasEvict),
+        }
+    }
+
+    fn release(&mut self, region: Region) {
+        // Remove the matching entry (by offset) so the tracking Vec stays
+        // consistent with `used_bytes`. A missing entry is a no-op for the
+        // Vec; the used-byte counter is always decremented.
+        if let Some(pos) = self.entries.iter().position(|(o, _)| *o == region.offset) {
+            self.entries.remove(pos);
+        }
+        self.used_bytes = self.used_bytes.saturating_sub(region.len);
+    }
+
+    fn evict_lru(&mut self, target_bytes: u64) -> EvictionStats {
+        let mut freed = 0u64;
+        let mut count = 0u64;
+        // Pop oldest entries (front of the Vec) until `target_bytes` are free
+        // or the pool is empty.
+        while freed < target_bytes {
+            match self.entries.first() {
+                Some(&(_offset, len)) => {
+                    self.entries.remove(0);
+                    self.used_bytes = self.used_bytes.saturating_sub(len);
+                    freed += len;
+                    count += 1;
+                }
+                None => break,
+            }
+        }
+        EvictionStats {
+            evicted_bytes: freed,
+            evicted_entries: count,
+            kind: PoolKind::Atlas,
+        }
+    }
+}
+
+/// 64 MB cap, `LRU` enforcement → [`BudgetBreach::PipelineCacheFull`] on
+/// overflow.
+///
+/// Structurally identical to [`GlyphAtlasPool`]; only the cap, the
+/// [`PoolKind`] (`GPU`), and the breach variant differ.
+#[derive(Debug, Clone)]
+pub struct PipelineCachePool {
+    /// Hard cap in bytes (default 64 MB per §12.7).
+    cap_bytes: u64,
+    /// Currently used bytes.
+    used_bytes: u64,
+    /// High-water mark in bytes (peak `used_bytes` observed).
+    high_water_bytes: u64,
+    /// LRU entries: front = oldest (next to evict), back = newest.
+    entries: Vec<(u64, u64)>,
+}
+
+impl PipelineCachePool {
+    /// 64 MB cap, the §12.7 default for the pipeline cache.
+    const DEFAULT_CAP: u64 = 64 * 1024 * 1024;
+
+    /// Create a pool with the §12.7 default 64 MB cap.
+    pub fn new() -> Self {
+        Self::with_cap(Self::DEFAULT_CAP)
+    }
+
+    /// Create a pool with a custom cap in bytes (primarily for tests).
+    pub fn with_cap(cap_bytes: u64) -> Self {
+        Self {
+            cap_bytes,
+            used_bytes: 0,
+            high_water_bytes: 0,
+            entries: Vec::new(),
+        }
+    }
+}
+
+impl Default for PipelineCachePool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MemoryPool for PipelineCachePool {
+    fn kind(&self) -> PoolKind {
+        // The `PoolKind` enum lumps pipeline/attachment/instance pools under
+        // `GPU` (§12.6); there is no dedicated `Pipeline` variant.
+        PoolKind::GPU
+    }
+
+    fn cap_bytes(&self) -> u64 {
+        self.cap_bytes
+    }
+
+    fn used_bytes(&self) -> u64 {
+        self.used_bytes
+    }
+
+    fn high_water_bytes(&self) -> u64 {
+        self.high_water_bytes
+    }
+
+    fn reserve(&mut self, n: u64) -> Result<Region, BudgetBreach> {
+        match self.used_bytes.checked_add(n) {
+            Some(new_used) if new_used <= self.cap_bytes => {
+                let offset = self.used_bytes;
+                self.used_bytes = new_used;
+                if new_used > self.high_water_bytes {
+                    self.high_water_bytes = new_used;
+                }
+                self.entries.push((offset, n));
+                Ok(Region {
+                    offset,
+                    len: n,
+                    kind: PoolKind::GPU,
+                })
+            }
+            _ => Err(BudgetBreach::PipelineCacheFull),
+        }
+    }
+
+    fn release(&mut self, region: Region) {
+        if let Some(pos) = self.entries.iter().position(|(o, _)| *o == region.offset) {
+            self.entries.remove(pos);
+        }
+        self.used_bytes = self.used_bytes.saturating_sub(region.len);
+    }
+
+    fn evict_lru(&mut self, target_bytes: u64) -> EvictionStats {
+        let mut freed = 0u64;
+        let mut count = 0u64;
+        while freed < target_bytes {
+            match self.entries.first() {
+                Some(&(_offset, len)) => {
+                    self.entries.remove(0);
+                    self.used_bytes = self.used_bytes.saturating_sub(len);
+                    freed += len;
+                    count += 1;
+                }
+                None => break,
+            }
+        }
+        EvictionStats {
+            evicted_bytes: freed,
+            evicted_entries: count,
+            kind: PoolKind::GPU,
+        }
+    }
+}
+
+/// 256 MB cap, `Reject` enforcement → [`BudgetBreach::AttachmentPoolEmpty`]
+/// on overflow.
+///
+/// Reject pools are not LRU-evictable: `evict_lru` is a no-op and the caller
+/// is expected to fail the requesting `begin_pass` on
+/// `Err(AttachmentPoolEmpty)`.
+#[derive(Debug, Clone)]
+pub struct AttachmentPool {
+    /// Hard cap in bytes (default 256 MB per §12.7).
+    cap_bytes: u64,
+    /// Currently used bytes.
+    used_bytes: u64,
+    /// High-water mark in bytes (peak `used_bytes` observed).
+    high_water_bytes: u64,
+}
+
+impl AttachmentPool {
+    /// 256 MB cap, the §12.7 default for the GPU attachment pool.
+    const DEFAULT_CAP: u64 = 256 * 1024 * 1024;
+
+    /// Create a pool with the §12.7 default 256 MB cap.
+    pub fn new() -> Self {
+        Self::with_cap(Self::DEFAULT_CAP)
+    }
+
+    /// Create a pool with a custom cap in bytes (primarily for tests).
+    pub fn with_cap(cap_bytes: u64) -> Self {
+        Self {
+            cap_bytes,
+            used_bytes: 0,
+            high_water_bytes: 0,
+        }
+    }
+}
+
+impl Default for AttachmentPool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MemoryPool for AttachmentPool {
+    fn kind(&self) -> PoolKind {
+        PoolKind::GPU
+    }
+
+    fn cap_bytes(&self) -> u64 {
+        self.cap_bytes
+    }
+
+    fn used_bytes(&self) -> u64 {
+        self.used_bytes
+    }
+
+    fn high_water_bytes(&self) -> u64 {
+        self.high_water_bytes
+    }
+
+    fn reserve(&mut self, n: u64) -> Result<Region, BudgetBreach> {
+        match self.used_bytes.checked_add(n) {
+            Some(new_used) if new_used <= self.cap_bytes => {
+                let offset = self.used_bytes;
+                self.used_bytes = new_used;
+                if new_used > self.high_water_bytes {
+                    self.high_water_bytes = new_used;
+                }
+                Ok(Region {
+                    offset,
+                    len: n,
+                    kind: PoolKind::GPU,
+                })
+            }
+            _ => Err(BudgetBreach::AttachmentPoolEmpty),
+        }
+    }
+
+    fn release(&mut self, region: Region) {
+        self.used_bytes = self.used_bytes.saturating_sub(region.len);
+    }
+
+    fn evict_lru(&mut self, _target_bytes: u64) -> EvictionStats {
+        EvictionStats {
+            evicted_bytes: 0,
+            evicted_entries: 0,
+            kind: PoolKind::GPU,
+        }
+    }
+}
+
+/// 128 MB cap, `Reject` enforcement → [`BudgetBreach::InstanceBufferFull`]
+/// on overflow.
+///
+/// Structurally identical to [`AttachmentPool`]; only the cap and the breach
+/// variant differ.
+#[derive(Debug, Clone)]
+pub struct InstanceBufferPool {
+    /// Hard cap in bytes (default 128 MB per §12.7).
+    cap_bytes: u64,
+    /// Currently used bytes.
+    used_bytes: u64,
+    /// High-water mark in bytes (peak `used_bytes` observed).
+    high_water_bytes: u64,
+}
+
+impl InstanceBufferPool {
+    /// 128 MB cap, the §12.7 default for the per-stage instance buffer.
+    const DEFAULT_CAP: u64 = 128 * 1024 * 1024;
+
+    /// Create a pool with the §12.7 default 128 MB cap.
+    pub fn new() -> Self {
+        Self::with_cap(Self::DEFAULT_CAP)
+    }
+
+    /// Create a pool with a custom cap in bytes (primarily for tests).
+    pub fn with_cap(cap_bytes: u64) -> Self {
+        Self {
+            cap_bytes,
+            used_bytes: 0,
+            high_water_bytes: 0,
+        }
+    }
+}
+
+impl Default for InstanceBufferPool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MemoryPool for InstanceBufferPool {
+    fn kind(&self) -> PoolKind {
+        PoolKind::GPU
+    }
+
+    fn cap_bytes(&self) -> u64 {
+        self.cap_bytes
+    }
+
+    fn used_bytes(&self) -> u64 {
+        self.used_bytes
+    }
+
+    fn high_water_bytes(&self) -> u64 {
+        self.high_water_bytes
+    }
+
+    fn reserve(&mut self, n: u64) -> Result<Region, BudgetBreach> {
+        match self.used_bytes.checked_add(n) {
+            Some(new_used) if new_used <= self.cap_bytes => {
+                let offset = self.used_bytes;
+                self.used_bytes = new_used;
+                if new_used > self.high_water_bytes {
+                    self.high_water_bytes = new_used;
+                }
+                Ok(Region {
+                    offset,
+                    len: n,
+                    kind: PoolKind::GPU,
+                })
+            }
+            _ => Err(BudgetBreach::InstanceBufferFull),
+        }
+    }
+
+    fn release(&mut self, region: Region) {
+        self.used_bytes = self.used_bytes.saturating_sub(region.len);
+    }
+
+    fn evict_lru(&mut self, _target_bytes: u64) -> EvictionStats {
+        EvictionStats {
+            evicted_bytes: 0,
+            evicted_entries: 0,
+            kind: PoolKind::GPU,
+        }
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -561,5 +1072,298 @@ mod tests {
         assert_eq!(pool.cap_bytes(), 2048);
         assert_eq!(pool.used_bytes(), 0);
         assert_eq!(pool.high_water_bytes(), 0);
+    }
+
+    // ====================================================================
+    // Wave F — Gap H11: SAB / GlyphAtlas / PipelineCache / Attachment /
+    // InstanceBuffer pools
+    // ====================================================================
+
+    // ---- default caps per §12.7 -----------------------------------------
+
+    #[test]
+    fn sab_pool_default_cap_is_64mb() {
+        let pool = SABPool::new();
+        assert_eq!(pool.kind(), PoolKind::SAB);
+        assert_eq!(pool.cap_bytes(), 64 * 1024 * 1024);
+        assert_eq!(pool.used_bytes(), 0);
+        assert_eq!(pool.high_water_bytes(), 0);
+    }
+
+    #[test]
+    fn glyph_atlas_pool_default_cap_is_32mb() {
+        let pool = GlyphAtlasPool::new();
+        assert_eq!(pool.kind(), PoolKind::Atlas);
+        assert_eq!(pool.cap_bytes(), 32 * 1024 * 1024);
+    }
+
+    #[test]
+    fn pipeline_cache_pool_default_cap_is_64mb() {
+        let pool = PipelineCachePool::new();
+        assert_eq!(pool.kind(), PoolKind::GPU);
+        assert_eq!(pool.cap_bytes(), 64 * 1024 * 1024);
+    }
+
+    #[test]
+    fn attachment_pool_default_cap_is_256mb() {
+        let pool = AttachmentPool::new();
+        assert_eq!(pool.kind(), PoolKind::GPU);
+        assert_eq!(pool.cap_bytes(), 256 * 1024 * 1024);
+    }
+
+    #[test]
+    fn instance_buffer_pool_default_cap_is_128mb() {
+        let pool = InstanceBufferPool::new();
+        assert_eq!(pool.kind(), PoolKind::GPU);
+        assert_eq!(pool.cap_bytes(), 128 * 1024 * 1024);
+    }
+
+    // ---- SABPool: rejects at cap (Backpressure → SABExhausted) ----------
+
+    #[test]
+    fn sab_pool_reserve_under_cap_succeeds() {
+        let mut pool = SABPool::with_cap(1024);
+        let region = pool.reserve(512).expect("reserve under cap should succeed");
+        assert_eq!(region.len, 512);
+        assert_eq!(region.kind, PoolKind::SAB);
+        assert_eq!(pool.used_bytes(), 512);
+        assert_eq!(pool.high_water_bytes(), 512);
+    }
+
+    #[test]
+    fn sab_pool_rejects_at_cap() {
+        let mut pool = SABPool::with_cap(1024);
+        let _ = pool.reserve(1024).unwrap();
+        let err = pool.reserve(1).unwrap_err();
+        assert_eq!(err, BudgetBreach::SABExhausted);
+        // used_bytes unchanged after a failed reserve.
+        assert_eq!(pool.used_bytes(), 1024);
+    }
+
+    #[test]
+    fn sab_pool_release_frees_space() {
+        let mut pool = SABPool::with_cap(1024);
+        let r = pool.reserve(1024).unwrap();
+        pool.release(r);
+        assert_eq!(pool.used_bytes(), 0);
+        // After release, the full cap is available again.
+        let _ = pool.reserve(1024).unwrap();
+    }
+
+    #[test]
+    fn sab_pool_evict_lru_is_noop() {
+        let mut pool = SABPool::with_cap(1024);
+        let _ = pool.reserve(512).unwrap();
+        let stats = pool.evict_lru(256);
+        assert_eq!(stats.evicted_bytes, 0);
+        assert_eq!(stats.evicted_entries, 0);
+        assert_eq!(stats.kind, PoolKind::SAB);
+        // used_bytes unchanged.
+        assert_eq!(pool.used_bytes(), 512);
+    }
+
+    // ---- GlyphAtlasPool: rejects at cap + LRU eviction ------------------
+
+    #[test]
+    fn glyph_atlas_pool_reserve_under_cap_succeeds() {
+        let mut pool = GlyphAtlasPool::with_cap(1024);
+        let region = pool.reserve(256).expect("reserve under cap should succeed");
+        assert_eq!(region.kind, PoolKind::Atlas);
+        assert_eq!(pool.used_bytes(), 256);
+        assert_eq!(pool.high_water_bytes(), 256);
+    }
+
+    #[test]
+    fn glyph_atlas_pool_rejects_at_cap() {
+        let mut pool = GlyphAtlasPool::with_cap(1024);
+        let _ = pool.reserve(1024).unwrap();
+        let err = pool.reserve(1).unwrap_err();
+        assert_eq!(err, BudgetBreach::GlyphAtlasEvict);
+        assert_eq!(pool.used_bytes(), 1024);
+    }
+
+    #[test]
+    fn glyph_atlas_pool_evict_lru_removes_oldest_first() {
+        let mut pool = GlyphAtlasPool::with_cap(1024);
+        let _r0 = pool.reserve(256).unwrap(); // oldest
+        let _r1 = pool.reserve(256).unwrap();
+        let _r2 = pool.reserve(256).unwrap(); // newest
+        assert_eq!(pool.used_bytes(), 768);
+
+        let stats = pool.evict_lru(256);
+        assert_eq!(stats.evicted_bytes, 256);
+        assert_eq!(stats.evicted_entries, 1);
+        assert_eq!(stats.kind, PoolKind::Atlas);
+        // The oldest entry was evicted; used_bytes drops by 256.
+        assert_eq!(pool.used_bytes(), 512);
+
+        // Evicting again removes the next-oldest entry.
+        let stats2 = pool.evict_lru(256);
+        assert_eq!(stats2.evicted_bytes, 256);
+        assert_eq!(stats2.evicted_entries, 1);
+        assert_eq!(pool.used_bytes(), 256);
+    }
+
+    #[test]
+    fn glyph_atlas_pool_evict_lru_evicts_multiple_until_target_met() {
+        let mut pool = GlyphAtlasPool::with_cap(1024);
+        let _ = pool.reserve(128).unwrap();
+        let _ = pool.reserve(128).unwrap();
+        let _ = pool.reserve(128).unwrap();
+        let _ = pool.reserve(128).unwrap(); // 512 used
+        // Request 384 bytes freed: needs 3 × 128-byte entries.
+        let stats = pool.evict_lru(384);
+        assert_eq!(stats.evicted_bytes, 384);
+        assert_eq!(stats.evicted_entries, 3);
+        assert_eq!(pool.used_bytes(), 128);
+    }
+
+    #[test]
+    fn glyph_atlas_pool_evict_lru_on_empty_pool_is_noop() {
+        let mut pool = GlyphAtlasPool::with_cap(1024);
+        let stats = pool.evict_lru(512);
+        assert_eq!(stats.evicted_bytes, 0);
+        assert_eq!(stats.evicted_entries, 0);
+    }
+
+    #[test]
+    fn glyph_atlas_pool_evict_lru_frees_space_for_new_reserve() {
+        let mut pool = GlyphAtlasPool::with_cap(1024);
+        // Fill the pool with two 512-byte entries so eviction can hit an
+        // exact target (a single 1024-byte entry would overshoot).
+        let _ = pool.reserve(512).unwrap();
+        let _ = pool.reserve(512).unwrap();
+        assert_eq!(pool.used_bytes(), 1024);
+        // Pool is full → reserve fails with GlyphAtlasEvict.
+        assert_eq!(pool.reserve(1).unwrap_err(), BudgetBreach::GlyphAtlasEvict);
+        // Evict 512 bytes (one entry); a 512-byte reserve should now succeed.
+        let stats = pool.evict_lru(512);
+        assert_eq!(stats.evicted_bytes, 512);
+        assert_eq!(stats.evicted_entries, 1);
+        let r = pool.reserve(512).expect("reserve should succeed after eviction");
+        assert_eq!(r.len, 512);
+        assert_eq!(pool.used_bytes(), 1024);
+    }
+
+    #[test]
+    fn glyph_atlas_pool_release_removes_entry_and_frees_space() {
+        let mut pool = GlyphAtlasPool::with_cap(1024);
+        let r0 = pool.reserve(256).unwrap();
+        let _r1 = pool.reserve(256).unwrap();
+        assert_eq!(pool.used_bytes(), 512);
+        pool.release(r0);
+        assert_eq!(pool.used_bytes(), 256);
+        // The released entry is no longer tracked, so evict_lru should only
+        // find the one remaining entry.
+        let stats = pool.evict_lru(1024);
+        assert_eq!(stats.evicted_bytes, 256);
+        assert_eq!(stats.evicted_entries, 1);
+        assert_eq!(pool.used_bytes(), 0);
+    }
+
+    // ---- PipelineCachePool: rejects at cap + LRU eviction ---------------
+
+    #[test]
+    fn pipeline_cache_pool_reserve_under_cap_succeeds() {
+        let mut pool = PipelineCachePool::with_cap(1024);
+        let region = pool.reserve(512).expect("reserve under cap should succeed");
+        assert_eq!(region.kind, PoolKind::GPU);
+        assert_eq!(pool.used_bytes(), 512);
+    }
+
+    #[test]
+    fn pipeline_cache_pool_rejects_at_cap() {
+        let mut pool = PipelineCachePool::with_cap(1024);
+        let _ = pool.reserve(1024).unwrap();
+        let err = pool.reserve(1).unwrap_err();
+        assert_eq!(err, BudgetBreach::PipelineCacheFull);
+        assert_eq!(pool.used_bytes(), 1024);
+    }
+
+    #[test]
+    fn pipeline_cache_pool_evict_lru_removes_oldest_first() {
+        let mut pool = PipelineCachePool::with_cap(1024);
+        let _ = pool.reserve(512).unwrap(); // oldest
+        let _ = pool.reserve(256).unwrap(); // newest
+        assert_eq!(pool.used_bytes(), 768);
+
+        let stats = pool.evict_lru(512);
+        assert_eq!(stats.evicted_bytes, 512);
+        assert_eq!(stats.evicted_entries, 1);
+        assert_eq!(stats.kind, PoolKind::GPU);
+        assert_eq!(pool.used_bytes(), 256);
+    }
+
+    #[test]
+    fn pipeline_cache_pool_evict_lru_frees_space_for_new_reserve() {
+        let mut pool = PipelineCachePool::with_cap(1024);
+        // Fill the pool with two 512-byte entries so eviction can hit an
+        // exact target (a single 1024-byte entry would overshoot).
+        let _ = pool.reserve(512).unwrap();
+        let _ = pool.reserve(512).unwrap();
+        assert_eq!(pool.used_bytes(), 1024);
+        assert_eq!(pool.reserve(1).unwrap_err(), BudgetBreach::PipelineCacheFull);
+        let stats = pool.evict_lru(512);
+        assert_eq!(stats.evicted_bytes, 512);
+        assert_eq!(stats.evicted_entries, 1);
+        let _ = pool.reserve(512).expect("reserve should succeed after eviction");
+    }
+
+    // ---- AttachmentPool: rejects at cap (Reject → AttachmentPoolEmpty) --
+
+    #[test]
+    fn attachment_pool_reserve_under_cap_succeeds() {
+        let mut pool = AttachmentPool::with_cap(1024);
+        let region = pool.reserve(512).expect("reserve under cap should succeed");
+        assert_eq!(region.kind, PoolKind::GPU);
+        assert_eq!(pool.used_bytes(), 512);
+    }
+
+    #[test]
+    fn attachment_pool_rejects_at_cap() {
+        let mut pool = AttachmentPool::with_cap(1024);
+        let _ = pool.reserve(1024).unwrap();
+        let err = pool.reserve(1).unwrap_err();
+        assert_eq!(err, BudgetBreach::AttachmentPoolEmpty);
+        assert_eq!(pool.used_bytes(), 1024);
+    }
+
+    #[test]
+    fn attachment_pool_evict_lru_is_noop() {
+        let mut pool = AttachmentPool::with_cap(1024);
+        let _ = pool.reserve(512).unwrap();
+        let stats = pool.evict_lru(256);
+        assert_eq!(stats.evicted_bytes, 0);
+        assert_eq!(stats.evicted_entries, 0);
+        assert_eq!(pool.used_bytes(), 512);
+    }
+
+    // ---- InstanceBufferPool: rejects at cap (Reject → InstanceBufferFull)
+
+    #[test]
+    fn instance_buffer_pool_reserve_under_cap_succeeds() {
+        let mut pool = InstanceBufferPool::with_cap(1024);
+        let region = pool.reserve(512).expect("reserve under cap should succeed");
+        assert_eq!(region.kind, PoolKind::GPU);
+        assert_eq!(pool.used_bytes(), 512);
+    }
+
+    #[test]
+    fn instance_buffer_pool_rejects_at_cap() {
+        let mut pool = InstanceBufferPool::with_cap(1024);
+        let _ = pool.reserve(1024).unwrap();
+        let err = pool.reserve(1).unwrap_err();
+        assert_eq!(err, BudgetBreach::InstanceBufferFull);
+        assert_eq!(pool.used_bytes(), 1024);
+    }
+
+    #[test]
+    fn instance_buffer_pool_evict_lru_is_noop() {
+        let mut pool = InstanceBufferPool::with_cap(1024);
+        let _ = pool.reserve(512).unwrap();
+        let stats = pool.evict_lru(256);
+        assert_eq!(stats.evicted_bytes, 0);
+        assert_eq!(stats.evicted_entries, 0);
+        assert_eq!(pool.used_bytes(), 512);
     }
 }

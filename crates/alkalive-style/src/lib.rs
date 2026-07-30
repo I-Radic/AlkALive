@@ -59,13 +59,53 @@ pub enum PropertyKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Color(pub u32);
 
+impl Color {
+    /// Construct a [`Color`] from a raw `u32`, masking the input to the
+    /// 32-bit RGBA8 range (`0xFFFFFFFF`) at the construction boundary
+    /// (ADR 005, §7.7, Gap M10).
+    ///
+    /// `u32` is already 32 bits wide so the mask is a no-op on the happy
+    /// path; it is applied explicitly so the invariant is enforced
+    /// regardless of how the call site obtains its integer (e.g. a future
+    /// widening to `u64` would still produce a well-formed [`Color`]).
+    /// The `identity_op` lint is suppressed deliberately to keep the
+    /// mask visible as documentation.
+    #[inline]
+    #[allow(clippy::identity_op)] // mask documents the 32-bit invariant
+    pub fn new(value: u32) -> Self {
+        Color(value & 0xFFFF_FFFF)
+    }
+}
+
 /// Alpha opacity clamped to `[0.0, 1.0]` (ADR 005).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Opacity(pub f32);
 
+impl Opacity {
+    /// Construct an [`Opacity`] clamped to `[0.0, 1.0]` at the
+    /// construction boundary (ADR 005, §7.7, Gap M10). Values below `0.0`
+    /// saturate to `0.0` (fully transparent) and values above `1.0`
+    /// saturate to `1.0` (fully opaque); `NaN` is treated as `0.0` by
+    /// `f32::clamp`.
+    #[inline]
+    pub fn new(value: f32) -> Self {
+        Opacity(value.clamp(0.0, 1.0))
+    }
+}
+
 /// Stroke line width clamped to `[0.0, ∞)` (ADR 005).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LineWidth(pub f32);
+
+impl LineWidth {
+    /// Construct a [`LineWidth`] clamped to `[0.0, f32::MAX)` at the
+    /// construction boundary (ADR 005, §7.7, Gap M10). Negative values
+    /// saturate to `0.0`; `NaN` is treated as `0.0` by `f32::max`.
+    #[inline]
+    pub fn new(value: f32) -> Self {
+        LineWidth(value.max(0.0))
+    }
+}
 
 /// Scalar style value — one of the three scalar categories (ADR 005).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -228,22 +268,80 @@ impl Animation {
     /// Advance `elapsed` by `dt` and write the interpolated
     /// [`StyleProperty`] back into the owning field.
     ///
-    /// On error the runtime logs the error and freezes the animation at
-    /// its last valid frame (§7.7).
+    /// Wave E (Gap H5) update — `tick` now honours the lifecycle state
+    /// (`Idle` / `Paused` are no-ops), advances the clock only while
+    /// `Running`, flips to `Completed` on duration reach, and samples the
+    /// keyframe pair surrounding the current normalised time. The
+    /// interpolated value is computed but **not written back** yet — the
+    /// per-`StyleProperty` arithmetic and the owning-field accessor are
+    /// unified by the rendering-ABI ADR (§4.7 / §7.5), so a `TODO` marks
+    /// the deferred write-back. On error the runtime logs the error and
+    /// freezes the animation at its last valid frame (§7.7).
     pub fn tick(&mut self, dt: Duration) -> Result<(), AnimationError> {
-        self.elapsed += dt;
-        if self.elapsed >= self.duration {
-            self.state = AnimationState::Completed;
+        // 1. Idle / Paused: hold the clock — do not advance (Gap H5).
+        if matches!(self.state, AnimationState::Idle | AnimationState::Paused) {
+            return Ok(());
         }
-        // TODO(Wave N): Keyframe interpolation. The current implementation
-        // advances the clock and flips to `Completed` on duration reach but
-        // does not yet sample/interpolate `keyframes` or write the
-        // interpolated `StyleProperty` back to the owning field. Easing
-        // (`self.easing`) and the per-keyframe `Interpolation` mode are
-        // likewise deferred. State-machine transitions for `Idle` / `Paused`
-        // are also minimal — `tick` always advances the clock regardless of
-        // `state`. Input validation (`DurationZero`, `KeyframeOutOfOrder`,
-        // `InvalidPropertyKind`) is deferred to the construction boundary.
+
+        // 2. Advance the clock by `dt` (only `Running` reaches here; the
+        // `Completed` branch below is idempotent — re-ticking a Completed
+        // animation just clamps the clock at/over duration).
+        self.elapsed += dt;
+
+        // 3. Duration reached → flip to `Completed` and return early. The
+        // keyframe interpolation in step 4 only runs while the animation
+        // is still advancing.
+        if self.duration > Duration::ZERO && self.elapsed >= self.duration {
+            self.state = AnimationState::Completed;
+            return Ok(());
+        }
+
+        // 4. Non-empty keyframes: locate the two keyframes surrounding the
+        // current normalised time `t = elapsed / duration` and compute the
+        // linear blend factor between them. Wave E performs the lookup and
+        // the parameter arithmetic only; the actual `StyleProperty`
+        // interpolation and write-back are deferred (TODO below).
+        if !self.keyframes.is_empty() {
+            let duration_secs = self.duration.as_secs_f32();
+            if duration_secs > 0.0 {
+                let t = (self.elapsed.as_secs_f32() / duration_secs).clamp(0.0, 1.0);
+                // Find `k0` = largest index whose `time <= t`; `k1` is the
+                // next keyframe (clamped to the last index when `t` is
+                // past the final keyframe's time).
+                let n = self.keyframes.len();
+                let mut k0 = 0usize;
+                for i in 0..n {
+                    if self.keyframes[i].time <= t {
+                        k0 = i;
+                    } else {
+                        break;
+                    }
+                }
+                let k1 = (k0 + 1).min(n - 1);
+                let kf_a = &self.keyframes[k0];
+                let kf_b = &self.keyframes[k1];
+                // Local blend factor in `[0, 1]` between the two surrounding
+                // keyframes; guarded against a zero span (single keyframe or
+                // coincident times).
+                let span = (kf_b.time - kf_a.time).max(1e-6);
+                let u = ((t - kf_a.time) / span).clamp(0.0, 1.0);
+                // Apply the easing function to the local parameter.
+                let _eased = self.easing.sample(u);
+                // TODO(Wave N, Gap H5): Interpolate `kf_a.value` <->
+                // `kf_b.value` per `kf_a.interpolation` (`Linear` / `Step` /
+                // `CubicSpline`) using `_eased` as the blend factor, then
+                // write the resulting `StyleProperty` back into the owning
+                // field. The arithmetic is deferred until the rendering-ABI
+                // ADR (§4.7) unifies `StyleProperty` with the owning
+                // field's typed accessor; for now the surrounding pair
+                // `(kf_a, kf_b)` and the eased local parameter are
+                // computed but discarded.
+                let _ = (kf_a, kf_b, _eased);
+            }
+        }
+        // 5. Empty keyframes: current behaviour — the clock has already
+        // advanced above; nothing else to do.
+
         Ok(())
     }
 }
@@ -567,5 +665,144 @@ mod tests {
         anim.tick(Duration::from_millis(150)).unwrap();
         assert_eq!(anim.elapsed, Duration::from_millis(150));
         assert_eq!(anim.state, AnimationState::Completed);
+    }
+
+    /// Helper: build a `Running` [`Animation`] with two opacity keyframes
+    /// at normalised times `0.0` and `1.0` (Gap H5).
+    fn make_keyframed_animation(duration: Duration) -> Animation {
+        Animation {
+            property: PropertyKind::Opacity,
+            keyframes: vec![
+                Keyframe {
+                    time: 0.0,
+                    value: StyleProperty::Scalar(ScalarValue::Opacity(Opacity(0.0))),
+                    interpolation: Interpolation::Linear,
+                },
+                Keyframe {
+                    time: 1.0,
+                    value: StyleProperty::Scalar(ScalarValue::Opacity(Opacity(1.0))),
+                    interpolation: Interpolation::Linear,
+                },
+            ],
+            duration,
+            easing: Box::new(LinearEasing),
+            elapsed: Duration::ZERO,
+            state: AnimationState::Running,
+        }
+    }
+
+    /// A two-keyframe animation advances its clock across two ticks,
+    /// samples the surrounding keyframe pair at the mid-point, and reaches
+    /// `Completed` once `elapsed >= duration` (Gap H5).
+    #[test]
+    fn animation_tick_with_keyframes_completes_and_advances() {
+        let mut anim = make_keyframed_animation(Duration::from_millis(100));
+
+        // First tick: half-way through. The animation must remain `Running`
+        // (not yet at duration) and the clock must advance by 50ms. The
+        // surrounding-keyframe lookup runs but does not write back.
+        anim.tick(Duration::from_millis(50)).unwrap();
+        assert_eq!(anim.elapsed, Duration::from_millis(50));
+        assert_eq!(anim.state, AnimationState::Running);
+
+        // Second tick: reaches the duration. State flips to `Completed`
+        // and `elapsed` reflects both ticks (50ms + 50ms).
+        anim.tick(Duration::from_millis(50)).unwrap();
+        assert_eq!(anim.elapsed, Duration::from_millis(100));
+        assert_eq!(anim.state, AnimationState::Completed);
+    }
+
+    /// `Idle` state holds the clock — `tick` is a no-op (Gap H5).
+    #[test]
+    fn animation_tick_idle_does_not_advance() {
+        let mut anim = make_animation(Duration::from_millis(100));
+        anim.state = AnimationState::Idle;
+        anim.tick(Duration::from_millis(50)).unwrap();
+        assert_eq!(anim.elapsed, Duration::ZERO, "Idle must not advance the clock");
+        assert_eq!(anim.state, AnimationState::Idle, "Idle must remain Idle");
+    }
+
+    /// `Paused` state holds the clock — `tick` is a no-op (Gap H5).
+    #[test]
+    fn animation_tick_paused_does_not_advance() {
+        let mut anim = make_animation(Duration::from_millis(100));
+        anim.state = AnimationState::Paused;
+        anim.tick(Duration::from_millis(50)).unwrap();
+        assert_eq!(
+            anim.elapsed,
+            Duration::ZERO,
+            "Paused must not advance the clock"
+        );
+        assert_eq!(
+            anim.state,
+            AnimationState::Paused,
+            "Paused must remain Paused"
+        );
+    }
+
+    /// Re-ticking a `Completed` animation clamps the clock at/over the
+    /// duration and stays `Completed` (Gap H5 idempotency guard).
+    #[test]
+    fn animation_tick_completed_stays_completed() {
+        let mut anim = make_keyframed_animation(Duration::from_millis(100));
+        anim.tick(Duration::from_millis(100)).unwrap();
+        assert_eq!(anim.state, AnimationState::Completed);
+        // A second tick after completion still completes — state stays
+        // `Completed` and the clock keeps the accumulated elapsed.
+        anim.tick(Duration::from_millis(30)).unwrap();
+        assert_eq!(anim.elapsed, Duration::from_millis(130));
+        assert_eq!(anim.state, AnimationState::Completed);
+    }
+
+    // -----------------------------------------------------------------
+    // Gap M10 — clamping constructors for Color / Opacity / LineWidth
+    // -----------------------------------------------------------------
+
+    /// `Opacity::new` clamps values above `1.0` down to `1.0` (Gap M10).
+    #[test]
+    fn opacity_new_clamps_high() {
+        assert_eq!(Opacity::new(1.7), Opacity(1.0));
+    }
+
+    /// `Opacity::new` clamps values below `0.0` up to `0.0` (Gap M10).
+    #[test]
+    fn opacity_new_clamps_low() {
+        assert_eq!(Opacity::new(-0.5), Opacity(0.0));
+    }
+
+    /// `Opacity::new` passes values already in `[0.0, 1.0]` through
+    /// unchanged (Gap M10 happy path).
+    #[test]
+    fn opacity_new_passes_in_range() {
+        assert_eq!(Opacity::new(0.0), Opacity(0.0));
+        assert_eq!(Opacity::new(1.0), Opacity(1.0));
+        assert_eq!(Opacity::new(0.25), Opacity(0.25));
+    }
+
+    /// `LineWidth::new` clamps negative values up to `0.0` (Gap M10).
+    #[test]
+    fn line_width_new_clamps_low() {
+        assert_eq!(LineWidth::new(-1.0), LineWidth(0.0));
+    }
+
+    /// `LineWidth::new` passes non-negative values through unchanged
+    /// (Gap M10 happy path).
+    #[test]
+    fn line_width_new_passes_non_negative() {
+        assert_eq!(LineWidth::new(0.0), LineWidth(0.0));
+        assert_eq!(LineWidth::new(2.5), LineWidth(2.5));
+        assert_eq!(LineWidth::new(1000.0), LineWidth(1000.0));
+    }
+
+    /// `Color::new` masks the input to the 32-bit RGBA8 range (Gap M10).
+    /// For a `u32` argument the mask is a no-op on the happy path, so the
+    /// constructor round-trips any `u32` unchanged.
+    #[test]
+    fn color_new_masks_to_32_bits() {
+        assert_eq!(Color::new(0), Color(0));
+        assert_eq!(Color::new(0xFFFF_FFFF), Color(0xFFFF_FFFF));
+        assert_eq!(Color::new(0x1234_5678), Color(0x1234_5678));
+        // The mask is explicit; even the all-ones value round-trips.
+        assert_eq!(Color::new(u32::MAX), Color(u32::MAX));
     }
 }

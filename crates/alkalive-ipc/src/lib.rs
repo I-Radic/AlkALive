@@ -12,6 +12,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+use core::cell::{Cell, RefCell};
 use core::fmt;
 use std::collections::VecDeque;
 
@@ -93,22 +94,26 @@ pub enum Poll<T> {
 // ============================================================================
 
 /// Opaque, owned byte payload used as a panic snapshot in [`TaskError::Panic`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Blob(());
 
 /// Monotonically increasing worker identifier issued by [`WorkerPool::spawn`].
+///
+/// The inner `u64` is exposed so in-process implementations (e.g.
+/// [`LocalWorkerPool`]) can mint fresh identifiers without going through the
+/// SAB-backed IPC shim.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TaskId(());
+pub struct TaskId(pub u64);
 
 /// Snapshot of host GPU capabilities handed to workers.
 ///
 /// Immutable snapshot only — never the `GPUDevice` itself (ADR 003 / ADR 021).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct DeviceCaps(());
 
 /// Monotonic clock shared between main thread and workers for ADR 016
 /// trace correlation on the unified author-owned timeline.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct MonotonicClock(());
 
 /// A point in time read from a [`MonotonicClock`]; used as a deadline
@@ -117,12 +122,16 @@ pub struct MonotonicClock(());
 pub struct Instant(());
 
 /// Per-frame identifier issued by [`Scheduler::begin_frame`].
+///
+/// The inner `u64` is exposed so in-process implementations (e.g.
+/// [`LocalScheduler`]) can return monotonically increasing frame ids from a
+/// local counter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct FrameId(());
+pub struct FrameId(pub u64);
 
 /// Outcome of [`Scheduler::commit`] — the main thread drains pending worker
 /// IR at the frame-budget deadline and never blocks on a channel.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct FrameResult(());
 
 /// Asset decode error subtype of [`TaskError::Decode`].
@@ -137,7 +146,7 @@ pub struct SerialError(());
 ///
 /// Crate-local stand-in pending the IPC shim (ADR 021). The real type will
 /// back the `IPCSocket` ring buffer and IR staging area.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SharedArrayBuffer(());
 
 /// Cross-thread state handed to a spawned worker.
@@ -145,7 +154,12 @@ pub struct SharedArrayBuffer(());
 /// Workers receive `SharedState` and never the `GPUDevice`. The SAB is the
 /// IPC + IR staging area; `device_caps` is an immutable capability snapshot;
 /// `clock` is the ADR 016 trace-correlation clock.
-#[derive(Debug, Clone)]
+///
+/// A [`Default`] implementation is provided so in-process worker pools (e.g.
+/// [`LocalWorkerPool`]) can construct a stand-in `SharedState` without the
+/// SAB-backed IPC shim. Real workers receive a populated `SharedState` from
+/// the host once the ADR 021 IPC shim lands.
+#[derive(Debug, Clone, Default)]
 pub struct SharedState {
     /// IPC + IR staging ring buffer.
     pub sab: SharedArrayBuffer,
@@ -153,6 +167,27 @@ pub struct SharedState {
     pub device_caps: DeviceCaps,
     /// ADR 016 trace-correlation clock.
     pub clock: MonotonicClock,
+}
+
+// ----------------------------------------------------------------------------
+// Wave-F: constructors for the opaque host placeholders
+// ----------------------------------------------------------------------------
+//
+// The opaque host types (`Blob`, `DeviceCaps`, `MonotonicClock`,
+// `SharedArrayBuffer`, `FrameResult`) wrap a private `()` pending the ADR 021
+// IPC shim. In-process implementations (LocalWorkerPool / LocalScheduler) and
+// their tests need to mint default values, so each derives `Default` (the
+// private `()` stays private — only the derive, which is in-module, can
+// construct it).
+
+impl SharedState {
+    /// Construct a default [`SharedState`] for in-process workers.
+    ///
+    /// Equivalent to [`SharedState::default`]; provided for call-site
+    /// readability.
+    pub fn new() -> Self {
+        Self::default()
+    }
 }
 
 // ============================================================================
@@ -347,6 +382,209 @@ impl<T: Serial> IPCSocket<T> for LocalIPCSocket<T> {
 }
 
 // ============================================================================
+// Wave-F in-process worker pool + scheduler
+// ============================================================================
+//
+// Real WASM worker threads (ADR 021) cannot run inside a host unit test or a
+// single-threaded dev host. The types below provide a synchronous, in-process
+// implementation of [`WorkerPool`] / [`Scheduler`] / [`TaskHandle`] so that
+// the rest of the stack can exercise the spawn → poll → commit surface before
+// the SAB-backed IPC shim lands.
+//
+// Semantics (Gap H1):
+// - `LocalWorkerPool::spawn` runs the task **synchronously** on the calling
+//   thread, hands the worker a default [`SharedState`], and returns a
+//   [`LocalTaskHandle`] preloaded with the result.
+// - `LocalTaskHandle::poll` returns `Ready(result)` on the first call and
+//   `Pending` thereafter (the result is consumed via `Option::take`).
+// - `LocalTaskHandle::cancel` flips a flag and returns `Ok(())`; since the
+//   task already ran synchronously, cancellation cannot preempt it — the
+//   flag is recorded for observability but the stored result is still
+//   returned on the next poll. Real preemption arrives with the SAB-backed
+//   workers.
+// - `LocalWorkerPool::reap` / `shutdown` are no-ops (no worker threads to
+//   recycle or drain) and `pool_size_hint` returns `1`.
+// - `LocalScheduler::begin_frame` returns monotonically increasing
+//   [`FrameId`]s from an internal counter; `commit` returns the default
+//   [`FrameResult`]; `spawn` delegates to an internal [`LocalWorkerPool`].
+
+/// In-process [`TaskHandle`] backed by a precomputed result.
+///
+/// Created by [`LocalWorkerPool::spawn`] after running the task synchronously.
+/// The first [`TaskHandle::poll`] consumes the stored result via `Option::take`
+/// and returns [`Poll::Ready`]; subsequent polls return [`Poll::Pending`].
+/// `cancel` flips an internal flag (visible to debug formatters) but cannot
+/// preempt a task that already ran synchronously.
+///
+/// Interior mutability (`RefCell` / `Cell`) lets the trait's `&self` methods
+/// mutate state. The handle is therefore `!Sync` — it is meant to be polled
+/// from a single (main) thread, matching the ADR 021 main-thread ownership
+/// model.
+pub struct LocalTaskHandle<T> {
+    /// Identifier minted by the pool at spawn time.
+    id: TaskId,
+    /// Precomputed task result; consumed by the first `poll`.
+    result: RefCell<Option<Result<T, TaskError>>>,
+    /// Set by `cancel`; observability-only (synchronous tasks cannot be
+    /// preempted).
+    cancelled: Cell<bool>,
+}
+
+impl<T> LocalTaskHandle<T> {
+    /// Construct a handle preloaded with `result` and the given `id`.
+    ///
+    /// Normally only called by [`LocalWorkerPool::spawn`]; exposed `pub` so
+    /// host-side test harnesses can mint handles directly.
+    pub fn new(id: TaskId, result: Result<T, TaskError>) -> Self {
+        Self {
+            id,
+            result: RefCell::new(Some(result)),
+            cancelled: Cell::new(false),
+        }
+    }
+
+    /// `true` once [`TaskHandle::cancel`] has been called.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.get()
+    }
+}
+
+impl<T> fmt::Debug for LocalTaskHandle<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Do not require `T: Debug`; surface only whether a result is pending.
+        f.debug_struct("LocalTaskHandle")
+            .field("id", &self.id)
+            .field("has_result", &self.result.borrow().is_some())
+            .field("cancelled", &self.cancelled.get())
+            .finish()
+    }
+}
+
+impl<T: 'static> TaskHandle<T> for LocalTaskHandle<T> {
+    fn id(&self) -> TaskId {
+        self.id
+    }
+
+    fn poll(&self, _deadline: Instant) -> Poll<Result<T, TaskError>> {
+        match self.result.borrow_mut().take() {
+            Some(r) => Poll::Ready(r),
+            None => Poll::Pending,
+        }
+    }
+
+    fn cancel(&self) -> Result<(), ChannelError> {
+        self.cancelled.set(true);
+        Ok(())
+    }
+}
+
+/// Synchronous, in-process [`WorkerPool`] (Gap H1).
+///
+/// `spawn` runs the task **immediately** on the calling thread, hands the
+/// worker a default [`SharedState`], and returns a [`LocalTaskHandle`]
+/// preloaded with the result. `reap` and `shutdown` are no-ops (there are no
+/// worker threads to recycle or drain); `pool_size_hint` returns `1`.
+///
+/// Suitable for unit tests, single-threaded dev hosts, and any caller that
+/// needs the spawn → poll surface before the ADR 021 WASM-thread IPC shim
+/// lands. The `next_id` counter is a `Cell<u64>`, so the pool is `!Sync`.
+#[derive(Debug)]
+pub struct LocalWorkerPool {
+    /// Next task identifier to mint; monotonically increasing.
+    next_id: Cell<u64>,
+}
+
+impl LocalWorkerPool {
+    /// Create a new pool with the task-id counter at zero.
+    pub fn new() -> Self {
+        Self {
+            next_id: Cell::new(0),
+        }
+    }
+}
+
+impl Default for LocalWorkerPool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl WorkerPool for LocalWorkerPool {
+    fn spawn<T, F>(&self, _kind: TaskKind, task: F) -> Box<dyn TaskHandle<T>>
+    where
+        F: FnOnce(SharedState) -> Result<T, TaskError> + 'static,
+        T: 'static,
+    {
+        let id = TaskId(self.next_id.get());
+        self.next_id.set(id.0.wrapping_add(1));
+        // Synchronous execution: run the task inline on the calling thread
+        // with a default SharedState. The result is preloaded into the
+        // handle, so the first poll resolves immediately.
+        let result = task(SharedState::default());
+        Box::new(LocalTaskHandle::new(id, result))
+    }
+
+    fn reap(&self, _id: TaskId) {
+        // No worker threads to reap; synchronous execution recycles the slot
+        // implicitly when the handle drops.
+    }
+
+    fn pool_size_hint(&self) -> usize {
+        1
+    }
+
+    fn shutdown(&self) -> Result<(), ChannelError> {
+        // Nothing to drain: tasks run inline and the pool owns no threads.
+        Ok(())
+    }
+}
+
+/// Synchronous, in-process [`Scheduler`] (Gap H1).
+///
+/// `begin_frame` returns monotonically increasing [`FrameId`]s from an
+/// internal counter; `commit` returns the default [`FrameResult`]; `spawn`
+/// delegates to an internal [`LocalWorkerPool`]. Like the pool, the frame
+/// counter is a `Cell<u64>`, so the scheduler is `!Sync`.
+#[derive(Debug, Default)]
+pub struct LocalScheduler {
+    /// Next frame identifier to mint; monotonically increasing.
+    next_frame: Cell<u64>,
+    /// Backing worker pool for `spawn` delegation.
+    pool: LocalWorkerPool,
+}
+
+impl LocalScheduler {
+    /// Create a new scheduler with both the frame counter and the backing
+    /// pool at their defaults.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Scheduler for LocalScheduler {
+    fn begin_frame(&self, _now: Instant) -> FrameId {
+        let id = FrameId(self.next_frame.get());
+        self.next_frame.set(id.0.wrapping_add(1));
+        id
+    }
+
+    fn commit(&self, _frame: FrameId) -> FrameResult {
+        // Synchronous execution drains no channels; return the default
+        // FrameResult. Real deadline-bounded IR draining arrives with the
+        // SAB-backed scheduler.
+        FrameResult::default()
+    }
+
+    fn spawn<T, F>(&self, kind: TaskKind, task: F) -> Box<dyn TaskHandle<T>>
+    where
+        F: FnOnce(SharedState) -> Result<T, TaskError> + 'static,
+        T: 'static,
+    {
+        self.pool.spawn(kind, task)
+    }
+}
+
+// ============================================================================
 // Wave 3 tests
 // ============================================================================
 
@@ -435,5 +673,132 @@ mod tests {
         assert!(sock.is_empty());
         assert!(!sock.is_closed());
         assert_eq!(sock.capacity(), 1024);
+    }
+
+    // ---- Wave-F: LocalWorkerPool / LocalTaskHandle -----------------------
+
+    #[test]
+    fn local_worker_pool_spawn_returns_ok_result() {
+        let pool = LocalWorkerPool::new();
+        let handle = pool.spawn(TaskKind::Compute, |_state: SharedState| Ok(42));
+        // The id is minted from the pool's counter, starting at 0.
+        assert_eq!(handle.id(), TaskId(0));
+        match handle.poll(Instant(())) {
+            Poll::Ready(Ok(v)) => assert_eq!(v, 42),
+            other => panic!("expected Poll::Ready(Ok(42)), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn local_worker_pool_spawn_returns_err_panic() {
+        let pool = LocalWorkerPool::new();
+        // Annotate the task type so the closure's `Err(...)` arm fixes `T`.
+        let handle: Box<dyn TaskHandle<()>> =
+            pool.spawn(TaskKind::AssetDecode, |_state: SharedState| {
+                Err(TaskError::Panic(Blob::default()))
+            });
+        match handle.poll(Instant(())) {
+            Poll::Ready(Err(TaskError::Panic(_))) => {}
+            other => panic!("expected Poll::Ready(Err(Panic(_))), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn local_task_handle_poll_twice_returns_pending() {
+        let pool = LocalWorkerPool::new();
+        let handle = pool.spawn(TaskKind::IO, |_state: SharedState| Ok(7));
+        // First poll consumes the result.
+        assert!(matches!(handle.poll(Instant(())), Poll::Ready(Ok(7))));
+        // Second poll finds no result left → Pending.
+        assert!(matches!(handle.poll(Instant(())), Poll::Pending));
+    }
+
+    #[test]
+    fn local_task_handle_cancel_sets_flag_and_returns_ok() {
+        // Construct the handle directly so we can inspect `is_cancelled`
+        // (the trait object returned by `spawn` does not expose it).
+        let handle = LocalTaskHandle::new(TaskId(0), Ok::<u32, TaskError>(1));
+        assert!(!handle.is_cancelled());
+        handle.cancel().expect("cancel should return Ok(())");
+        assert!(handle.is_cancelled());
+        // The synchronous result is still delivered: cancel cannot preempt a
+        // task that already ran inline.
+        assert!(matches!(handle.poll(Instant(())), Poll::Ready(Ok(1))));
+    }
+
+    #[test]
+    fn local_worker_pool_mints_monotonic_task_ids() {
+        let pool = LocalWorkerPool::new();
+        let h0 = pool.spawn(TaskKind::Compute, |_s: SharedState| Ok(0));
+        let h1 = pool.spawn(TaskKind::Compute, |_s: SharedState| Ok(1));
+        let h2 = pool.spawn(TaskKind::Compute, |_s: SharedState| Ok(2));
+        assert_eq!(h0.id(), TaskId(0));
+        assert_eq!(h1.id(), TaskId(1));
+        assert_eq!(h2.id(), TaskId(2));
+    }
+
+    #[test]
+    fn local_worker_pool_pool_size_hint_is_one() {
+        let pool = LocalWorkerPool::new();
+        assert_eq!(pool.pool_size_hint(), 1);
+    }
+
+    #[test]
+    fn local_worker_pool_reap_and_shutdown_are_noops() {
+        let pool = LocalWorkerPool::new();
+        let h = pool.spawn(TaskKind::Compute, |_s: SharedState| Ok(5));
+        // reap must not panic on a known id.
+        pool.reap(h.id());
+        // shutdown returns Ok(()).
+        pool.shutdown().expect("shutdown should return Ok(())");
+    }
+
+    #[test]
+    fn shared_state_default_is_constructable() {
+        // The whole point of the Wave-F constructors: an in-process worker
+        // can receive a SharedState without the SAB shim.
+        let state = SharedState::default();
+        let _ = state.sab;
+        let _ = state.device_caps;
+        let _ = state.clock;
+        // new() is equivalent to default().
+        let _ = SharedState::new();
+    }
+
+    // ---- Wave-F: LocalScheduler ------------------------------------------
+
+    #[test]
+    fn local_scheduler_begin_frame_mints_monotonic_ids() {
+        let sched = LocalScheduler::new();
+        let f0 = sched.begin_frame(Instant(()));
+        let f1 = sched.begin_frame(Instant(()));
+        let f2 = sched.begin_frame(Instant(()));
+        assert_eq!(f0, FrameId(0));
+        assert_eq!(f1, FrameId(1));
+        assert_eq!(f2, FrameId(2));
+        assert_ne!(f0, f1);
+    }
+
+    #[test]
+    fn local_scheduler_commit_returns_default_frame_result() {
+        let sched = LocalScheduler::new();
+        let frame = sched.begin_frame(Instant(()));
+        let _result = sched.commit(frame);
+    }
+
+    #[test]
+    fn local_scheduler_spawn_delegates_to_pool() {
+        let sched = LocalScheduler::new();
+        let handle = sched.spawn(TaskKind::Compute, |_s: SharedState| Ok(99));
+        match handle.poll(Instant(())) {
+            Poll::Ready(Ok(v)) => assert_eq!(v, 99),
+            other => panic!("expected Poll::Ready(Ok(99)), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn local_scheduler_default_is_constructable() {
+        let sched = LocalScheduler::default();
+        let _ = sched.begin_frame(Instant(()));
     }
 }

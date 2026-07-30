@@ -430,15 +430,19 @@ pub trait GrabHandle {
 /// Concrete Wave 7 [`GrabHandle`] with real fields.
 ///
 /// Stores the owning [`Handle<RenderObject>`], captured [`DeviceKind`]
-/// and `device_id`, and an `active` flag. [`GrabHandle::release`] flips
-/// `active` to `false`; [`GrabHandle::is_active`] reads it back. The
-/// remaining accessors return their stored fields unchanged.
+/// and `device_id`, an `active` flag, **and** an embedded
+/// [`SimpleGestureState`] so the registry can issue a synthetic `Cancel`
+/// (`on_cancel`) when the grab is displaced or orphaned (§8.4).
+/// [`GrabHandle::release`] flips `active` to `false`;
+/// [`GrabHandle::is_active`] reads it back. The remaining accessors
+/// return their stored fields unchanged.
 ///
-/// A freshly constructed [`SimpleGrabHandle`] is **active**; only an
-/// explicit [`GrabHandle::release`] deactivates it. This is the
-/// reference grab handle for Wave 7: full grab arbitration against the
-/// render-object tree (ADR 007) is layered on in a later wave.
-#[derive(Debug)]
+/// A freshly constructed [`SimpleGrabHandle`] is **active** with a
+/// gesture state in [`GesturePhase::Idle`]; only an explicit
+/// [`GrabHandle::release`] deactivates it. This is the reference grab
+/// handle for Wave 7: full grab arbitration against the render-object
+/// tree (ADR 007) is layered on in a later wave.
+#[derive(Debug, Clone, PartialEq)]
 pub struct SimpleGrabHandle {
     /// Owning render object.
     owner: Handle<RenderObject>,
@@ -448,18 +452,48 @@ pub struct SimpleGrabHandle {
     device_id: u32,
     /// Whether the grab is still active; flipped to `false` by `release`.
     active: bool,
+    /// Embedded gesture state; cancelled via `on_cancel` when the grab
+    /// is displaced (registry arbitration) or orphaned (object removed
+    /// mid-gesture) — the synthetic `Cancel` of §8.4.
+    gesture: SimpleGestureState,
 }
 
 impl SimpleGrabHandle {
     /// Construct an **active** grab handle for `owner` capturing the
-    /// given `(device, device_id)` stream.
+    /// given `(device, device_id)` stream, with a fresh
+    /// [`SimpleGestureState`] in [`GesturePhase::Idle`].
     pub fn new(owner: Handle<RenderObject>, device: DeviceKind, device_id: u32) -> Self {
+        Self::with_gesture(owner, device, device_id, SimpleGestureState::new())
+    }
+
+    /// Construct an **active** grab handle carrying the supplied initial
+    /// [`SimpleGestureState`]. Used by callers that need to pre-seed the
+    /// gesture phase (e.g. resuming a grab mid-gesture).
+    pub fn with_gesture(
+        owner: Handle<RenderObject>,
+        device: DeviceKind,
+        device_id: u32,
+        gesture: SimpleGestureState,
+    ) -> Self {
         Self {
             owner,
             device,
             device_id,
             active: true,
+            gesture,
         }
+    }
+
+    /// Shared reference to the embedded gesture state.
+    pub fn gesture(&self) -> &SimpleGestureState {
+        &self.gesture
+    }
+
+    /// Mutable reference to the embedded gesture state. The
+    /// [`GrabRegistry`] uses this to invoke [`GestureState::on_cancel`]
+    /// on displaced / orphaned grabs (§8.4 synthetic `Cancel`).
+    pub fn gesture_mut(&mut self) -> &mut SimpleGestureState {
+        &mut self.gesture
     }
 }
 
@@ -486,10 +520,121 @@ impl GrabHandle for SimpleGrabHandle {
 }
 
 // ---------------------------------------------------------------------------
+// §8.3a Grab arbitration — GrabRegistry
+// ---------------------------------------------------------------------------
+
+/// Grab arbitration table keyed by `(DeviceKind, device_id)` (ADR 013).
+///
+/// Stores [`SimpleGrabHandle`]s in a flat `Vec` — at most one grab per
+/// `(device, device_id)` pair. When a new grab is registered for a pair
+/// that already has a grab, the most-recently-issued grab wins: the old
+/// grab's [`SimpleGestureState::on_cancel`] is invoked (the synthetic
+/// `Cancel` of §8.4) and the displaced grab is returned to the caller.
+/// This is the Wave 7 reference arbitrator; real arbitration against the
+/// render-object tree (ADR 007) is layered on in a later wave, but the
+/// field-backed behaviour here is enough for grab-queue / dispatch
+/// tests and for downstream crates that need a concrete registry.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct GrabRegistry {
+    /// Registered grabs, at most one per `(device, device_id)`.
+    grabs: Vec<SimpleGrabHandle>,
+}
+
+impl GrabRegistry {
+    /// Construct an empty registry.
+    pub fn new() -> Self {
+        Self { grabs: Vec::new() }
+    }
+
+    /// Number of grabs currently registered.
+    pub fn len(&self) -> usize {
+        self.grabs.len()
+    }
+
+    /// Whether the registry is empty.
+    pub fn is_empty(&self) -> bool {
+        self.grabs.is_empty()
+    }
+
+    /// Register a grab. If a grab already exists for the same
+    /// `(device, device_id)`, the old grab's [`SimpleGestureState`] is
+    /// cancelled (synthetic `Cancel` per §8.4) and the displaced grab is
+    /// returned. Otherwise returns `None`.
+    pub fn register(&mut self, grab: SimpleGrabHandle) -> Option<SimpleGrabHandle> {
+        let key_device = grab.device();
+        let key_device_id = grab.device_id();
+        if let Some(pos) = self
+            .grabs
+            .iter()
+            .position(|g| g.device() == key_device && g.device_id() == key_device_id)
+        {
+            let mut old = self.grabs.remove(pos);
+            // Synthetic Cancel on the displaced grab's gesture state.
+            old.gesture_mut().on_cancel();
+            self.grabs.push(grab);
+            Some(old)
+        } else {
+            self.grabs.push(grab);
+            None
+        }
+    }
+
+    /// Return the active grab for `(device, device_id)`, if any.
+    pub fn active_grab(&self, device: DeviceKind, device_id: u32) -> Option<&SimpleGrabHandle> {
+        self.grabs
+            .iter()
+            .find(|g| g.device() == device && g.device_id() == device_id && g.is_active())
+    }
+
+    /// Return a mutable reference to the active grab for
+    /// `(device, device_id)`, if any.
+    pub fn active_grab_mut(
+        &mut self,
+        device: DeviceKind,
+        device_id: u32,
+    ) -> Option<&mut SimpleGrabHandle> {
+        self.grabs
+            .iter_mut()
+            .find(|g| g.device() == device && g.device_id() == device_id && g.is_active())
+    }
+
+    /// Remove and deactivate the grab for `(device, device_id)`.
+    ///
+    /// The removed grab's [`GrabHandle::release`] is invoked (flipping
+    /// `active` to `false`) and the grab is returned to the caller so
+    /// that the dispatch layer can apply any additional tear-down (e.g.
+    /// invoking [`GestureState::on_cancel`] for the orphaned-grab path
+    /// of §8.6).
+    pub fn release(&mut self, device: DeviceKind, device_id: u32) -> Option<SimpleGrabHandle> {
+        if let Some(pos) = self
+            .grabs
+            .iter()
+            .position(|g| g.device() == device && g.device_id() == device_id)
+        {
+            let mut grab = self.grabs.remove(pos);
+            grab.release();
+            Some(grab)
+        } else {
+            None
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // §8.4 Gesture recognition
 // ---------------------------------------------------------------------------
 
 /// Outcome of feeding one event to a [`GestureState`].
+///
+/// `Clone + PartialEq + Debug` are derived so that gesture recognisers
+/// can be unit-tested by asserting on the produced outcome sequence.
+/// The `Grab` variant carries a concrete [`SimpleGrabHandle`] rather
+/// than a `Box<dyn GrabHandle>` so that the derives remain sound:
+/// `dyn GrabHandle` cannot be `Clone` (the `Clone` trait requires
+/// `Self: Sized`), and the Wave 7 reference implementation has a single
+/// concrete grab handle type anyway. The [`GrabHandle`] trait stays
+/// object-safe for downstream code that wants to type-erase grabs.
+#[derive(Debug, Clone, PartialEq)]
 pub enum GestureOutcome {
     /// Gesture continues; consume more events.
     Continue,
@@ -498,7 +643,7 @@ pub enum GestureOutcome {
     /// Gesture was cancelled.
     Cancel,
     /// Capture the stream via a grab handle.
-    Grab(Box<dyn GrabHandle>),
+    Grab(SimpleGrabHandle),
 }
 
 /// Gesture recogniser phase.
@@ -525,11 +670,13 @@ pub enum GesturePhase {
 /// Wave 7: all methods are **required** (no default body). The reference
 /// implementation [`SimpleGestureState`] tracks a single
 /// [`GesturePhase`] that begins at [`GesturePhase::Idle`], advances to
-/// [`GesturePhase::Changed`] on [`GestureState::on_event`] (which
-/// returns [`GestureOutcome::Continue`]), and flips to
-/// [`GesturePhase::Cancelled`] on [`GestureState::on_cancel`]. Full
-/// per-object state machines fed from the routed render-object-tree
-/// event stream (ADR 007) are layered on in a later wave.
+/// [`GesturePhase::Began`] on the first [`GestureState::on_event`], to
+/// [`GesturePhase::Changed`] on the second, and to [`GesturePhase::Ended`]
+/// on the third (where it returns [`GestureOutcome::Commit`]).
+/// [`GestureState::on_cancel`] flips the phase to
+/// [`GesturePhase::Cancelled`]. Full per-object state machines fed from
+/// the routed render-object-tree event stream (ADR 007) are layered on
+/// in a later wave.
 pub trait GestureState {
     /// Feed one input event; produce an outcome.
     fn on_event(&mut self, event: InputEvent) -> GestureOutcome;
@@ -539,21 +686,31 @@ pub trait GestureState {
     fn current_phase(&self) -> GesturePhase;
 }
 
-/// Concrete Wave 7 [`GestureState`] with a single tracked phase.
+/// Concrete Wave 7 [`GestureState`] with a phase-driven state machine.
 ///
 /// Holds one [`GesturePhase`] field, initialised to [`GesturePhase::Idle`].
-/// [`GestureState::on_event`] advances the phase to
-/// [`GesturePhase::Changed`] and returns [`GestureOutcome::Continue`]
-/// (consume more events). [`GestureState::on_cancel`] flips the phase
-/// to [`GesturePhase::Cancelled`]. [`GestureState::current_phase`]
-/// returns the stored phase.
+/// [`GestureState::on_event`] drives the phase forward through the
+/// `Idle → Began → Changed → Ended` progression (§8.4):
+///
+/// - First event (phase == `Idle`): phase → `Began`, returns
+///   [`GestureOutcome::Continue`].
+/// - Second event (phase == `Began`): phase → `Changed`, returns
+///   [`GestureOutcome::Continue`].
+/// - Third and subsequent events (phase == `Changed` or `Ended`):
+///   phase → `Ended`, returns [`GestureOutcome::Commit`].
+/// - A subsequent event after [`GesturePhase::Cancelled`] returns
+///   [`GestureOutcome::Cancel`] without leaving the `Cancelled` phase.
+///
+/// [`GestureState::on_cancel`] flips the phase to
+/// [`GesturePhase::Cancelled`]. [`GestureState::current_phase`] returns
+/// the stored phase.
 ///
 /// This is the reference gesture state for Wave 7: real per-object
 /// recognisers fed from the routed event stream (ADR 007) are layered on
 /// in a later wave, but the phase-backed behaviour here is enough for
 /// grab / dispatch tests and downstream crates that need a concrete
 /// [`GestureState`].
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SimpleGestureState {
     /// Current gesture phase; starts at [`GesturePhase::Idle`].
     phase: GesturePhase,
@@ -577,8 +734,27 @@ impl SimpleGestureState {
 
 impl GestureState for SimpleGestureState {
     fn on_event(&mut self, _event: InputEvent) -> GestureOutcome {
-        self.phase = GesturePhase::Changed;
-        GestureOutcome::Continue
+        match self.phase {
+            // First event: Idle → Began.
+            GesturePhase::Idle => {
+                self.phase = GesturePhase::Began;
+                GestureOutcome::Continue
+            }
+            // Subsequent event: Began → Changed.
+            GesturePhase::Began => {
+                self.phase = GesturePhase::Changed;
+                GestureOutcome::Continue
+            }
+            // After three events: Changed → Ended, commit.
+            GesturePhase::Changed => {
+                self.phase = GesturePhase::Ended;
+                GestureOutcome::Commit
+            }
+            // Terminal: an already-ended gesture keeps committing.
+            GesturePhase::Ended => GestureOutcome::Commit,
+            // Terminal: a cancelled gesture stays cancelled.
+            GesturePhase::Cancelled => GestureOutcome::Cancel,
+        }
     }
 
     fn on_cancel(&mut self) {
@@ -641,11 +817,15 @@ pub trait FocusManager {
 /// [`FocusManagerImpl::set_focus`]. The queue is drained by
 /// [`FocusManagerImpl::emit_focus_events`] for the focus-ring renderer.
 ///
-/// `dispatch`, `tab_next`, `tab_prev`, and `invalidate` are Wave 7
-/// no-ops / empty: real dispatch needs the render-object tree (ADR 007)
-/// to route owned events to hit objects and grab handles, and real tab
-/// order needs the cached focus-ring view. They are implemented once the
-/// tree is wired in.
+/// `dispatch` is the Wave 7 reference event-routing path: it consults
+/// the embedded [`GrabRegistry`] (ADR 013) for each `Pointer` event,
+/// routes to the active grab owner when one exists (or to the first hit
+/// result otherwise), normalises orphaned-grab and out-of-range-device
+/// failures into [`InputError`] variants (§8.6), and records the routed
+/// targets for test observability via [`FocusManagerImpl::take_routed_targets`].
+/// `tab_next`, `tab_prev`, and `invalidate` remain Wave 7 no-ops: real
+/// tab order needs the cached focus-ring view, and real invalidation
+/// needs the render-object tree (ADR 007) — both arrive in a later wave.
 #[derive(Debug, Default)]
 pub struct FocusManagerImpl {
     /// The object currently owning the focus annotation
@@ -655,25 +835,125 @@ pub struct FocusManagerImpl {
     /// Interior mutability lets `emit_focus_events(&self)` drain the
     /// queue despite the `&self` receiver mandated by the trait.
     pending_events: std::cell::RefCell<Vec<FocusEvent>>,
+    /// Grab arbitration table consulted by `dispatch` (ADR 013 / §8.3).
+    grab_registry: GrabRegistry,
+    /// Objects marked as removed since the last dispatch; grabs whose
+    /// owners appear here are orphaned and yield
+    /// [`InputError::OrphanedGrab`] on the next dispatch (§8.6).
+    removed_objects: std::collections::HashSet<Handle<RenderObject>>,
+    /// Targets to which `dispatch` routed events this frame, in order.
+    /// Populated for test observability until the render-object tree
+    /// (ADR 007) is wired in and routing becomes a real tree traversal.
+    routed_targets: Vec<Handle<RenderObject>>,
 }
 
 impl FocusManagerImpl {
-    /// Construct a focus manager with no current focus and an empty
-    /// pending-event queue.
+    /// Construct a focus manager with no current focus, an empty
+    /// pending-event queue, an empty grab registry, and no removed
+    /// objects.
     pub fn new() -> Self {
-        Self {
-            current_focus: None,
-            pending_events: std::cell::RefCell::new(Vec::new()),
-        }
+        Self::default()
+    }
+
+    /// Register a grab with the focus manager's arbitration table.
+    /// Returns the displaced grab if one already existed for the same
+    /// `(device, device_id)` (the displaced grab's gesture state has
+    /// been cancelled via `on_cancel` per §8.4).
+    pub fn register_grab(&mut self, grab: SimpleGrabHandle) -> Option<SimpleGrabHandle> {
+        self.grab_registry.register(grab)
+    }
+
+    /// Return the active grab for `(device, device_id)`, if any.
+    pub fn active_grab(&self, device: DeviceKind, device_id: u32) -> Option<&SimpleGrabHandle> {
+        self.grab_registry.active_grab(device, device_id)
+    }
+
+    /// Remove and deactivate the grab for `(device, device_id)`.
+    /// Convenience wrapper around [`GrabRegistry::release`].
+    pub fn release_grab(&mut self, device: DeviceKind, device_id: u32) {
+        let _ = self.grab_registry.release(device, device_id);
+    }
+
+    /// Mark a render object as removed from the render-object tree.
+    /// Subsequent dispatches that find an active grab whose owner is
+    /// removed produce [`InputError::OrphanedGrab`] and cancel the grab
+    /// (§8.6 synthetic `Cancel`).
+    pub fn mark_object_removed(&mut self, handle: Handle<RenderObject>) {
+        self.removed_objects.insert(handle);
+    }
+
+    /// Drain the per-frame routed-target queue. Tests use this to
+    /// verify that `dispatch` routed events to grab owners (vs. first
+    /// hit) until the render-object tree is wired in. The queue is
+    /// emptied by the call.
+    pub fn take_routed_targets(&mut self) -> Vec<Handle<RenderObject>> {
+        std::mem::take(&mut self.routed_targets)
     }
 }
 
+/// Threshold above which a device id is considered out of range (§8.6).
+///
+/// Device ids `> 10_000` are dropped and logged as
+/// [`InputError::OutOfRangeDeviceId`]. The constant is kept `pub` so
+/// downstream crates and tests can reference the exact boundary.
+pub const OUT_OF_RANGE_DEVICE_ID_THRESHOLD: u32 = 10_000;
+
 impl FocusManager for FocusManagerImpl {
-    fn dispatch(&mut self, _batch: InputBatch, _hits: &[HitResult]) -> Vec<InputError> {
-        // Wave 7: real dispatch routes owned events to hit objects / grab
-        // handles via the render-object tree (ADR 007). Without the tree
-        // there is nothing to route; return no errors.
-        Vec::new()
+    fn dispatch(&mut self, batch: InputBatch, hits: &[HitResult]) -> Vec<InputError> {
+        let mut errors: Vec<InputError> = Vec::new();
+        for event in batch.events {
+            match event {
+                InputEvent::Pointer(sample) => {
+                    let device = sample.device;
+                    let device_id = sample.device_id;
+
+                    // §8.6: out-of-range device ids are dropped + logged.
+                    if device_id > OUT_OF_RANGE_DEVICE_ID_THRESHOLD {
+                        errors.push(InputError::OutOfRangeDeviceId);
+                        continue;
+                    }
+
+                    // Consult the grab registry first (ADR 013). Only
+                    // borrow it immutably here so the `orphaned` flag is
+                    // computed without holding the registry borrow when
+                    // we later mutate it (cancel + release).
+                    let grab_info = self
+                        .grab_registry
+                        .active_grab(device, device_id)
+                        .map(|grab| {
+                            let owner = grab.owner();
+                            let orphaned = self.removed_objects.contains(&owner);
+                            (owner, orphaned)
+                        });
+
+                    if let Some((owner, orphaned)) = grab_info {
+                        if orphaned {
+                            // §8.6: orphaned grabs are cancelled with a
+                            // synthetic `Cancel` (gesture `on_cancel`)
+                            // and released.
+                            if let Some(removed) = self.grab_registry.release(device, device_id) {
+                                let mut removed = removed;
+                                removed.gesture_mut().on_cancel();
+                            }
+                            errors.push(InputError::OrphanedGrab);
+                        } else {
+                            // Route to the grab owner.
+                            self.routed_targets.push(owner);
+                        }
+                    } else if let Some(hit) = hits.first() {
+                        // No active grab: route to the first (topmost) hit.
+                        self.routed_targets.push(hit.object);
+                    }
+                }
+                InputEvent::Key(_) | InputEvent::Gamepad(_) => {
+                    // Wave 7: non-pointer routing needs the render-object
+                    // tree (ADR 007); skip until then. Key events go to
+                    // the focus owner and gamepad events go to the
+                    // active gamepad grab once both are wired in.
+                }
+            }
+        }
+        errors
     }
 
     fn set_focus(&mut self, target: Handle<RenderObject>) {
@@ -972,8 +1252,10 @@ mod tests {
 
     #[test]
     fn grab_handle_is_usable_as_dyn_trait_object() {
-        // `GestureOutcome::Grab` holds a `Box<dyn GrabHandle>`, so the
-        // trait must remain object-safe. Exercise that path directly.
+        // `GrabHandle` remains object-safe — exercise the trait-object
+        // path directly. (`GestureOutcome::Grab` now carries a concrete
+        // `SimpleGrabHandle` so the enum can derive `Clone + PartialEq`,
+        // but the trait is still usable as `dyn GrabHandle`.)
         let owner = h(9);
         let boxed: Box<dyn GrabHandle> =
             Box::new(SimpleGrabHandle::new(owner, DeviceKind::Pointer, 0));
@@ -999,7 +1281,7 @@ mod tests {
     }
 
     #[test]
-    fn gesture_state_on_event_advances_to_changed_and_continues() {
+    fn gesture_state_on_event_advances_to_began_and_continues() {
         let mut gs = SimpleGestureState::new();
         let event = InputEvent::Pointer(PointerSample {
             device: DeviceKind::Pointer,
@@ -1013,25 +1295,44 @@ mod tests {
             phase: PointerPhase::Move,
         });
         let outcome = gs.on_event(event);
+        // First event: Idle → Began, Continue.
         assert!(matches!(outcome, GestureOutcome::Continue));
-        assert_eq!(gs.current_phase(), GesturePhase::Changed);
+        assert_eq!(gs.current_phase(), GesturePhase::Began);
     }
 
     #[test]
-    fn gesture_state_on_event_continues_across_multiple_events() {
+    fn gesture_state_progresses_idle_began_changed_ended_and_commits_on_third() {
         let mut gs = SimpleGestureState::new();
-        // Feeding more than one event keeps the phase at `Changed` and
-        // keeps returning `Continue` — the simple state never commits.
-        for _ in 0..3 {
-            let outcome = gs.on_event(InputEvent::Key(KeyEvent {
+        assert_eq!(gs.current_phase(), GesturePhase::Idle);
+
+        let mk = || {
+            InputEvent::Key(KeyEvent {
                 code: KeyCode(0),
                 modifiers: ModifierSet(0),
                 phase: KeyPhase::Press,
                 repeat_count: 0,
-            }));
-            assert!(matches!(outcome, GestureOutcome::Continue));
-            assert_eq!(gs.current_phase(), GesturePhase::Changed);
-        }
+            })
+        };
+
+        // Event 1: Idle → Began, Continue.
+        let outcome = gs.on_event(mk());
+        assert!(matches!(outcome, GestureOutcome::Continue));
+        assert_eq!(gs.current_phase(), GesturePhase::Began);
+
+        // Event 2: Began → Changed, Continue.
+        let outcome = gs.on_event(mk());
+        assert!(matches!(outcome, GestureOutcome::Continue));
+        assert_eq!(gs.current_phase(), GesturePhase::Changed);
+
+        // Event 3: Changed → Ended, Commit.
+        let outcome = gs.on_event(mk());
+        assert!(matches!(outcome, GestureOutcome::Commit));
+        assert_eq!(gs.current_phase(), GesturePhase::Ended);
+
+        // Event 4: terminal Ended keeps producing Commit.
+        let outcome = gs.on_event(mk());
+        assert!(matches!(outcome, GestureOutcome::Commit));
+        assert_eq!(gs.current_phase(), GesturePhase::Ended);
     }
 
     #[test]
@@ -1048,8 +1349,255 @@ mod tests {
             axes: vec![0.0],
             buttons: vec![0.0],
         }));
-        assert_eq!(gs2.current_phase(), GesturePhase::Changed);
+        // First event advances Idle → Began.
+        assert_eq!(gs2.current_phase(), GesturePhase::Began);
         gs2.on_cancel();
         assert_eq!(gs2.current_phase(), GesturePhase::Cancelled);
+    }
+
+    // --- GrabRegistry (Gap H7) -------------------------------------------
+
+    #[test]
+    fn grab_registry_register_displaces_existing_grab_for_same_device() {
+        let mut registry = GrabRegistry::new();
+        let owner_a = h(1);
+        let owner_b = h(2);
+        let grab_a = SimpleGrabHandle::new(owner_a, DeviceKind::Pointer, 0);
+        let grab_b = SimpleGrabHandle::new(owner_b, DeviceKind::Pointer, 0);
+
+        // First registration: no displacement, registry holds 1 grab.
+        let displaced = registry.register(grab_a);
+        assert!(displaced.is_none());
+        assert_eq!(registry.len(), 1);
+        assert_eq!(
+            registry
+                .active_grab(DeviceKind::Pointer, 0)
+                .unwrap()
+                .owner(),
+            owner_a
+        );
+
+        // Second registration for the same (Pointer, 0): the first grab
+        // is displaced (last-grab-wins, §8.4) and returned to the caller.
+        let displaced = registry.register(grab_b);
+        assert!(displaced.is_some());
+        let old = displaced.unwrap();
+        assert_eq!(old.owner(), owner_a);
+        // The displaced grab's gesture state received a synthetic Cancel.
+        assert_eq!(old.gesture().current_phase(), GesturePhase::Cancelled);
+        // The displaced grab is no longer the active grab for the device.
+        assert_eq!(
+            registry
+                .active_grab(DeviceKind::Pointer, 0)
+                .unwrap()
+                .owner(),
+            owner_b
+        );
+        assert_eq!(registry.len(), 1);
+    }
+
+    #[test]
+    fn grab_registry_register_for_distinct_devices_does_not_displace() {
+        let mut registry = GrabRegistry::new();
+        let owner_a = h(1);
+        let owner_b = h(2);
+        // Same device class but different device_id — distinct streams.
+        let grab_a = SimpleGrabHandle::new(owner_a, DeviceKind::Pointer, 0);
+        let grab_b = SimpleGrabHandle::new(owner_b, DeviceKind::Pointer, 1);
+
+        assert!(registry.register(grab_a).is_none());
+        assert!(registry.register(grab_b).is_none());
+        assert_eq!(registry.len(), 2);
+        assert_eq!(
+            registry
+                .active_grab(DeviceKind::Pointer, 0)
+                .unwrap()
+                .owner(),
+            owner_a
+        );
+        assert_eq!(
+            registry
+                .active_grab(DeviceKind::Pointer, 1)
+                .unwrap()
+                .owner(),
+            owner_b
+        );
+    }
+
+    #[test]
+    fn grab_registry_release_removes_and_deactivates_the_grab() {
+        let mut registry = GrabRegistry::new();
+        let owner = h(7);
+        registry.register(SimpleGrabHandle::new(owner, DeviceKind::Stylus, 3));
+        assert!(registry.active_grab(DeviceKind::Stylus, 3).is_some());
+
+        let removed = registry.release(DeviceKind::Stylus, 3);
+        assert!(removed.is_some());
+        // The removed grab is deactivated (active flag flipped to false).
+        assert!(!removed.unwrap().is_active());
+        // No active grab for the device after release.
+        assert!(registry.active_grab(DeviceKind::Stylus, 3).is_none());
+        assert!(registry.is_empty());
+        // Releasing a missing grab is a no-op (returns None).
+        assert!(registry.release(DeviceKind::Stylus, 3).is_none());
+    }
+
+    // --- FocusManagerImpl::dispatch (Gap H8 + H9) ------------------------
+
+    /// Test helper: a minimal Pointer `Move` event for the given device id.
+    fn pointer_event(device_id: u32) -> InputEvent {
+        InputEvent::Pointer(PointerSample {
+            device: DeviceKind::Pointer,
+            device_id,
+            position: Vec2(0.0, 0.0),
+            delta: Vec2(0.0, 0.0),
+            pressure: 1.0,
+            tilt: Vec2(0.0, 0.0),
+            twist: 0.0,
+            buttons: ButtonSet(0),
+            phase: PointerPhase::Move,
+        })
+    }
+
+    /// Test helper: an `InputBatch` carrying the supplied events.
+    fn batch(events: Vec<InputEvent>) -> InputBatch {
+        InputBatch {
+            events,
+            device_mask: DeviceKindSet(1),
+            timestamp: MonotonicNs(0),
+        }
+    }
+
+    #[test]
+    fn dispatch_with_active_grab_routes_to_grab_owner() {
+        let mut fm = FocusManagerImpl::new();
+        let owner = h(42);
+        fm.register_grab(SimpleGrabHandle::new(owner, DeviceKind::Pointer, 0));
+
+        // Hit results contain a *different* object — the grab must win.
+        let hits = vec![HitResult {
+            object: h(99),
+            point: Vec2(0.0, 0.0),
+            depth: 0.0,
+            precise: false,
+        }];
+
+        let errors = fm.dispatch(batch(vec![pointer_event(0)]), &hits);
+        // No errors: the grab is healthy and the event routed cleanly.
+        assert!(errors.is_empty());
+        // Routed to the grab owner, not the first hit (h(99)).
+        let targets = fm.take_routed_targets();
+        assert_eq!(targets, vec![owner]);
+        // Grab is still active after dispatch.
+        assert!(fm.active_grab(DeviceKind::Pointer, 0).is_some());
+    }
+
+    #[test]
+    fn dispatch_with_no_grab_routes_to_first_hit() {
+        let mut fm = FocusManagerImpl::new();
+        let topmost = h(7);
+        let hits = vec![
+            HitResult {
+                object: topmost,
+                point: Vec2(0.0, 0.0),
+                depth: 5.0,
+                precise: false,
+            },
+            HitResult {
+                object: h(8),
+                point: Vec2(0.0, 0.0),
+                depth: 1.0,
+                precise: false,
+            },
+        ];
+
+        let errors = fm.dispatch(batch(vec![pointer_event(0)]), &hits);
+        assert!(errors.is_empty());
+        // Routed to the first (topmost) hit only.
+        let targets = fm.take_routed_targets();
+        assert_eq!(targets, vec![topmost]);
+    }
+
+    #[test]
+    fn dispatch_with_orphaned_grab_produces_orphaned_grab_error() {
+        let mut fm = FocusManagerImpl::new();
+        let owner = h(42);
+        fm.register_grab(SimpleGrabHandle::new(owner, DeviceKind::Pointer, 0));
+        // Simulate the owner being removed from the render-object tree.
+        fm.mark_object_removed(owner);
+
+        let errors = fm.dispatch(batch(vec![pointer_event(0)]), &[]);
+        assert_eq!(errors, vec![InputError::OrphanedGrab]);
+        // The orphaned grab was cancelled and removed from the registry.
+        assert!(fm.active_grab(DeviceKind::Pointer, 0).is_none());
+        // No routing happened — the event was swallowed by the cancel.
+        assert!(fm.take_routed_targets().is_empty());
+    }
+
+    #[test]
+    fn dispatch_with_out_of_range_device_id_produces_error() {
+        let mut fm = FocusManagerImpl::new();
+        // device_id > 10_000 is out of range per §8.6.
+        let bad_id = OUT_OF_RANGE_DEVICE_ID_THRESHOLD + 1;
+        let errors = fm.dispatch(batch(vec![pointer_event(bad_id)]), &[]);
+        assert_eq!(errors, vec![InputError::OutOfRangeDeviceId]);
+        // Boundary: device_id == threshold is still in range and routes
+        // to the first hit (no grab registered).
+        let target = h(5);
+        let hits = vec![HitResult {
+            object: target,
+            point: Vec2(0.0, 0.0),
+            depth: 0.0,
+            precise: false,
+        }];
+        let errors = fm.dispatch(
+            batch(vec![pointer_event(OUT_OF_RANGE_DEVICE_ID_THRESHOLD)]),
+            &hits,
+        );
+        assert!(errors.is_empty());
+        assert_eq!(fm.take_routed_targets(), vec![target]);
+    }
+
+    #[test]
+    fn dispatch_routes_multiple_events_independently() {
+        let mut fm = FocusManagerImpl::new();
+        let owner = h(1);
+        fm.register_grab(SimpleGrabHandle::new(owner, DeviceKind::Pointer, 0));
+        let first_hit = h(2);
+        let hits = vec![HitResult {
+            object: first_hit,
+            point: Vec2(0.0, 0.0),
+            depth: 0.0,
+            precise: false,
+        }];
+        // Two pointer events: one for the grabbed device, one for an
+        // ungrabbed device id — the first routes to the grab owner, the
+        // second to the first hit.
+        let errors = fm.dispatch(batch(vec![pointer_event(0), pointer_event(1)]), &hits);
+        assert!(errors.is_empty());
+        assert_eq!(fm.take_routed_targets(), vec![owner, first_hit]);
+    }
+
+    #[test]
+    fn dispatch_ignores_non_pointer_events_in_wave7() {
+        let mut fm = FocusManagerImpl::new();
+        let errors = fm.dispatch(
+            batch(vec![
+                InputEvent::Key(KeyEvent {
+                    code: KeyCode(0),
+                    modifiers: ModifierSet(0),
+                    phase: KeyPhase::Press,
+                    repeat_count: 0,
+                }),
+                InputEvent::Gamepad(GamepadSample {
+                    device_id: 0,
+                    axes: vec![0.0],
+                    buttons: vec![0.0],
+                }),
+            ]),
+            &[],
+        );
+        assert!(errors.is_empty());
+        assert!(fm.take_routed_targets().is_empty());
     }
 }

@@ -502,12 +502,21 @@ pub trait LayoutSolver {
 /// 3. **Transform emission** — one [`Mat4::translated`] instance transform
 ///    is emitted per live node from its resolved `x`/`y` facets (§5.6).
 ///
-/// The `dirty`, `measured`, and `dt` parameters of
-/// [`LayoutSolver::solve`] are intentionally ignored in Wave 6; the real
-/// Cassowary simplex, dirty-subset scoping, and text-measurement
-/// integration land in a later wave. The trait surface is stable so a
-/// production solver can drop in behind [`LayoutSolver`] without breaking
-/// downstream paint stages.
+/// **Wave E (Gap H2) update** — [`LayoutSolver::solve`] now honours its
+/// `dirty` and `measured` parameters:
+/// - A non-empty `dirty.modules` scopes the solve to constraints whose
+///   `module` is in that set; an empty set solves every live constraint
+///   (backward compatible).
+/// - [`MeasureKind::Text`] nodes invoke [`MeasuredRun::shape_and_measure`]
+///   with a dummy [`TextRun`] and forward `advances.len()` into
+///   [`LayoutSolution::glyph_runs`] (§5.4 / §5.6).
+/// - A constraint referencing a removed (non-existent) node surfaces as
+///   [`SolveError::Unsatisfiable`] carrying the offending [`ConstraintId`].
+///
+/// `dt` is still absorbed — it only matters for `ConstraintKind::Impulse`
+/// integration, which the Wave 6 simplification skips. The trait surface is
+/// stable so a production solver can drop in behind [`LayoutSolver`] without
+/// breaking downstream paint stages.
 #[derive(Default)]
 pub struct CassowarySolver {
     /// Slot-based node table; `None` marks a removed node.
@@ -535,6 +544,17 @@ impl CassowarySolver {
             .flatten()
             .find(|n| n.id == rid)
             .map(|n| n.module)
+    }
+
+    /// Returns `true` if a live node claims `rid` as its render object.
+    ///
+    /// A removed node leaves a tombstone slot (`None`), so this returns
+    /// `false` for any [`RenderObjectId`] whose owning node was deleted via
+    /// [`LayoutSolver::remove_node`]. Used by [`CassowarySolver::solve`]
+    /// to reject constraints that dangle a reference to a removed node
+    /// (§5.7, Gap H2).
+    fn is_live(&self, rid: RenderObjectId) -> bool {
+        self.nodes.iter().flatten().any(|n| n.id == rid)
     }
 }
 
@@ -617,33 +637,74 @@ impl LayoutSolver for CassowarySolver {
         measured: &dyn MeasuredRun,
         dt: f32,
     ) -> Result<LayoutSolution, SolveError> {
-        // Wave 6 simplified solver: dirty-subset scoping, text measurement,
-        // and time-step integration are deferred to the real Cassowary
-        // simplex landing in a later wave.
-        let _ = dirty;
-        let _ = measured;
+        // Wave E (Gap H2): the solver now honours `dirty` (module-subset
+        // scoping), invokes the [`MeasuredRun`] contract for
+        // [`MeasureKind::Text`] nodes, and rejects constraints that
+        // reference removed (non-existent) nodes as
+        // [`SolveError::Unsatisfiable`]. `dt` is still absorbed here — it
+        // only matters for `ConstraintKind::Impulse` integration, which the
+        // Wave 6 simplification skips. The trait surface is unchanged.
         let _ = dt;
 
-        // Pass 1 — locality gate (§5.5). The first offender aborts the solve.
+        // A non-empty `dirty.modules` scopes the solve to constraints whose
+        // `module` is in that set; an empty set solves every live
+        // constraint (backward compatible with the Wave 6 simplification).
+        let scoped = !dirty.modules.is_empty();
+        let in_scope = |c_module: ModuleId| -> bool {
+            if scoped {
+                dirty.modules.contains(&c_module)
+            } else {
+                true
+            }
+        };
+
+        // Pass 1 — locality gate (§5.5) + non-existent-node check (§5.7).
+        // The first offender aborts the solve. Only in-scope constraints
+        // are considered, so out-of-scope modules are neither solved nor
+        // rejected.
         for (idx, slot) in self.constraints.iter().enumerate() {
-            if let Some(c) = slot {
-                if let Err(violation) = self.assert_local(c) {
-                    return Err(SolveError::LocalityViolated {
-                        constraint: ConstraintId(idx as u32),
-                        boundary: violation.boundary,
+            let Some(c) = slot else { continue; };
+            if !in_scope(c.module) {
+                continue;
+            }
+            // Reject constraints that dangle a reference to a removed node
+            // (§5.7, Gap H2). The offending ConstraintId is reported so the
+            // caller can prune or relax it.
+            if let Some(rid) = c.a.object {
+                if !self.is_live(rid) {
+                    return Err(SolveError::Unsatisfiable {
+                        offenders: vec![ConstraintId(idx as u32)],
+                        suggestion: RelaxationHint::default(),
                     });
                 }
+            }
+            if let Some(rid) = c.b.object {
+                if !self.is_live(rid) {
+                    return Err(SolveError::Unsatisfiable {
+                        offenders: vec![ConstraintId(idx as u32)],
+                        suggestion: RelaxationHint::default(),
+                    });
+                }
+            }
+            if let Err(violation) = self.assert_local(c) {
+                return Err(SolveError::LocalityViolated {
+                    constraint: ConstraintId(idx as u32),
+                    boundary: violation.boundary,
+                });
             }
         }
 
         // Pass 2 — single-pass linear-equality assignment (Wave 6
-        // simplification). For each `Linear` constraint we set `a := b`:
-        // a literal RHS uses `b.value`; a facet RHS reads the previously
-        // assigned value (falling back to `b.value`). `Impulse` and
-        // `GraphLayout` kinds are accepted but skipped.
+        // simplification). For each in-scope `Linear` constraint we set
+        // `a := b`: a literal RHS uses `b.value`; a facet RHS reads the
+        // previously assigned value (falling back to `b.value`). `Impulse`
+        // and `GraphLayout` kinds are accepted but skipped.
         let mut facets: HashMap<(RenderObjectId, &'static str), f32> = HashMap::new();
         for slot in self.constraints.iter().flatten() {
             if slot.kind != ConstraintKind::Linear {
+                continue;
+            }
+            if !in_scope(slot.module) {
                 continue;
             }
             let b_val = match slot.b.object {
@@ -658,12 +719,16 @@ impl LayoutSolver for CassowarySolver {
             }
         }
 
-        // Pass 3 — emit one instance transform per live node (§5.6). The
-        // solution's `module` tag is taken from the first live node so the
-        // dirty-rect scoping downstream has a stable locality tag.
+        // Pass 3 — emit one instance transform per live node (§5.6) and run
+        // the synchronous measurement contract for [`MeasureKind::Text`]
+        // nodes (§5.4, Gap H2). The solution's `module` tag is taken from
+        // the first live node so the dirty-rect scoping downstream has a
+        // stable locality tag.
         let mut transforms = Vec::new();
+        let mut glyph_runs = Vec::new();
         let mut module = ModuleId(0);
         let mut first = true;
+        let ctx = FontContext;
         for node in self.nodes.iter().flatten() {
             if first {
                 module = node.module;
@@ -672,13 +737,31 @@ impl LayoutSolver for CassowarySolver {
             let x = facets.get(&(node.id, "x")).copied().unwrap_or(0.0);
             let y = facets.get(&(node.id, "y")).copied().unwrap_or(0.0);
             transforms.push((node.id, Mat4::translated(x, y)));
+            if node.measure == MeasureKind::Text {
+                // Dummy [`TextRun`] — the concrete text payload arrives
+                // with the HarfRust-backed [`MeasuredRun`] in Wave 7+
+                // (ADR 004/022). Wave E only proves the contract is invoked
+                // and the per-run glyph count is forwarded into the
+                // solution's `glyph_runs` (§5.4 / §5.6).
+                let run = TextRun {
+                    id: TextRunId(node.id.0),
+                    text: String::new(),
+                    module: node.module,
+                };
+                let metrics = measured.shape_and_measure(&run, &ctx);
+                let total_advance: f32 = metrics.advances.iter().copied().sum();
+                glyph_runs.push(GlyphRun {
+                    total_advance,
+                    glyph_count: metrics.advances.len() as u32,
+                });
+            }
         }
 
         Ok(LayoutSolution {
             status: SolveStatus::Solved,
             transforms,
             clips: Vec::new(),
-            glyph_runs: Vec::new(),
+            glyph_runs,
             module,
         })
     }
@@ -818,6 +901,205 @@ mod tests {
                 assert_eq!(boundary, (ModuleId(0), ModuleId(1)));
             }
             other => panic!("expected LocalityViolated, got {other:?}"),
+        }
+    }
+
+    /// A [`MeasuredRun`] mock that returns a fixed non-empty advance vector
+    /// so tests can verify the measurement contract was actually invoked
+    /// (Gap H2). The three advances sum to `6.0` and have length `3`, which
+    /// the test asserts land in [`LayoutSolution::glyph_runs`].
+    #[derive(Clone, Copy, Debug, Default)]
+    struct CountingMeasuredRun;
+
+    impl MeasuredRun for CountingMeasuredRun {
+        fn shape_and_measure(&self, _run: &TextRun, _ctx: &FontContext) -> GlyphMetrics {
+            GlyphMetrics {
+                advances: vec![1.0, 2.0, 3.0],
+                ascents: Vec::new(),
+                descents: Vec::new(),
+                clusters: Vec::new(),
+                caret_offsets: Vec::new(),
+            }
+        }
+
+        fn line_break(&self, _glyphs: &[GlyphRun], _max_width: f32) -> Vec<LineBreak> {
+            Vec::new()
+        }
+    }
+
+    /// A non-empty `dirty.modules` scopes the solve to constraints whose
+    /// `module` is in the dirty set; out-of-scope constraints are skipped
+    /// entirely (Gap H2). The in-scope module's `x := 20` resolves while the
+    /// out-of-scope module's `x := 10` does not, leaving node 0 at the
+    /// default `x = 0`.
+    #[test]
+    fn solve_scopes_to_dirty_module_subset() {
+        let mut solver = CassowarySolver::new();
+        // Node 0 in module 0, Node 1 in module 1.
+        solver.add_node(node(0, 0));
+        solver.add_node(node(1, 1));
+        // Constraint in module 0: x := 10 for node 0.
+        solver.add_constraint(Constraint {
+            kind: ConstraintKind::Linear,
+            a: facet(Some(0), "x", 0.0),
+            b: facet(None, "", 10.0),
+            weight: 1.0,
+            module: ModuleId(0),
+        });
+        // Constraint in module 1: x := 20 for node 1.
+        solver.add_constraint(Constraint {
+            kind: ConstraintKind::Linear,
+            a: facet(Some(1), "x", 0.0),
+            b: facet(None, "", 20.0),
+            weight: 1.0,
+            module: ModuleId(1),
+        });
+
+        // Dirty set contains only module 1 → only module 1's constraint solves.
+        let dirty = DirtySet {
+            modules: vec![ModuleId(1)],
+            ..Default::default()
+        };
+        let solution = solver
+            .solve(&dirty, &MockMeasuredRun, 0.016)
+            .expect("scoped solve must succeed");
+        assert_eq!(solution.status, SolveStatus::Solved);
+
+        // Node 1 (in-scope) should have x := 20 resolved into its transform.
+        let t1 = solution
+            .transforms
+            .iter()
+            .find(|(rid, _)| *rid == RenderObjectId(1))
+            .expect("node 1 transform must be present");
+        assert_eq!(t1.1.m[12], 20.0, "in-scope constraint must resolve x := 20");
+
+        // Node 0 (out-of-scope) should keep the default x := 0 because its
+        // constraint was skipped by the dirty-subset filter.
+        let t0 = solution
+            .transforms
+            .iter()
+            .find(|(rid, _)| *rid == RenderObjectId(0))
+            .expect("node 0 transform must be present");
+        assert_eq!(
+            t0.1.m[12], 0.0,
+            "out-of-scope constraint must not resolve (x stays default 0)"
+        );
+    }
+
+    /// An empty `dirty.modules` solves every live constraint (backward
+    /// compatible with the Wave 6 simplification, Gap H2). Both modules'
+    /// constraints resolve.
+    #[test]
+    fn solve_empty_dirty_solves_all_modules() {
+        let mut solver = CassowarySolver::new();
+        solver.add_node(node(0, 0));
+        solver.add_node(node(1, 1));
+        solver.add_constraint(Constraint {
+            kind: ConstraintKind::Linear,
+            a: facet(Some(0), "x", 0.0),
+            b: facet(None, "", 10.0),
+            weight: 1.0,
+            module: ModuleId(0),
+        });
+        solver.add_constraint(Constraint {
+            kind: ConstraintKind::Linear,
+            a: facet(Some(1), "x", 0.0),
+            b: facet(None, "", 20.0),
+            weight: 1.0,
+            module: ModuleId(1),
+        });
+
+        let dirty = DirtySet::default();
+        let solution = solver
+            .solve(&dirty, &MockMeasuredRun, 0.016)
+            .expect("empty-dirty solve must succeed");
+        assert_eq!(solution.status, SolveStatus::Solved);
+        let t0 = solution
+            .transforms
+            .iter()
+            .find(|(rid, _)| *rid == RenderObjectId(0))
+            .expect("node 0 transform must be present");
+        assert_eq!(t0.1.m[12], 10.0);
+        let t1 = solution
+            .transforms
+            .iter()
+            .find(|(rid, _)| *rid == RenderObjectId(1))
+            .expect("node 1 transform must be present");
+        assert_eq!(t1.1.m[12], 20.0);
+    }
+
+    /// A [`MeasureKind::Text`] node triggers
+    /// [`MeasuredRun::shape_and_measure`] and forwards the returned
+    /// `advances.len()` into [`LayoutSolution::glyph_runs`] (Gap H2).
+    #[test]
+    fn solve_invokes_measured_for_text_nodes() {
+        let mut solver = CassowarySolver::new();
+        solver.add_node(LayoutNode {
+            id: RenderObjectId(0),
+            module: ModuleId(0),
+            measure: MeasureKind::Text,
+            children: Vec::new(),
+        });
+
+        let dirty = DirtySet::default();
+        let solution = solver
+            .solve(&dirty, &CountingMeasuredRun, 0.016)
+            .expect("solve with a Text node must succeed");
+        assert_eq!(solution.status, SolveStatus::Solved);
+        // The Text node should have produced exactly one glyph run whose
+        // `glyph_count` matches the advance-vector length returned by the
+        // mock, and whose `total_advance` is the sum of the advances.
+        assert_eq!(solution.glyph_runs.len(), 1);
+        assert_eq!(solution.glyph_runs[0].glyph_count, 3);
+        assert_eq!(solution.glyph_runs[0].total_advance, 6.0);
+    }
+
+    /// Fixed-measure nodes do not invoke the measurement contract: with
+    /// only [`MeasureKind::Fixed`] nodes in the graph, `glyph_runs` stays
+    /// empty (Gap H2 regression guard).
+    #[test]
+    fn solve_skips_measured_for_fixed_nodes() {
+        let mut solver = CassowarySolver::new();
+        solver.add_node(node(0, 0));
+        let dirty = DirtySet::default();
+        let solution = solver
+            .solve(&dirty, &CountingMeasuredRun, 0.016)
+            .expect("solve with only Fixed nodes must succeed");
+        assert!(solution.glyph_runs.is_empty());
+    }
+
+    /// A constraint referencing a removed (non-existent) node surfaces from
+    /// `solve` as [`SolveError::Unsatisfiable`] carrying the offending
+    /// [`ConstraintId`] and a default [`RelaxationHint`] (Gap H2).
+    #[test]
+    fn solve_returns_unsatisfiable_for_removed_node() {
+        let mut solver = CassowarySolver::new();
+        solver.add_node(node(0, 0));
+        // Reference render object 999 (never registered) from the constraint.
+        let cid = solver.add_constraint(Constraint {
+            kind: ConstraintKind::Linear,
+            a: facet(Some(999), "x", 0.0),
+            b: facet(None, "", 10.0),
+            weight: 1.0,
+            module: ModuleId(0),
+        });
+
+        let dirty = DirtySet::default();
+        let err = solver
+            .solve(&dirty, &MockMeasuredRun, 0.016)
+            .expect_err("constraint referencing a removed node must fail");
+        match err {
+            SolveError::Unsatisfiable {
+                offenders,
+                suggestion,
+            } => {
+                assert_eq!(offenders, vec![cid]);
+                assert!(
+                    suggestion.relax.is_empty(),
+                    "default RelaxationHint must carry no relaxations"
+                );
+            }
+            other => panic!("expected Unsatisfiable, got {other:?}"),
         }
     }
 }

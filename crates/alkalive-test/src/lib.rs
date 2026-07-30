@@ -163,7 +163,11 @@ pub struct SlotMap(());
 pub struct ActiveHandle(());
 
 /// Typed output event emitted by a driven component (ADR 014).
-#[derive(Debug, Clone)]
+///
+/// Derives [`PartialEq`] / [`Eq`] so that [`ComponentTest::expect_output`]
+/// implementations can membership-test emitted events against an expected
+/// value. The inner payload remains opaque in this crate.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutputEvent(());
 
 /// Typed value read from a named child slot (ADR 014).
@@ -491,6 +495,196 @@ impl TestHarness for SimpleTestHarness {
     }
 }
 
+/// Concrete [`ComponentTest`] backed by an in-memory fixture registry
+/// (Gap H13 / ADR 014).
+///
+/// Stores `Vec<(ModuleId, Vec<OutputEvent>)>` mapping each registered
+/// module to the fixture outputs [`ComponentTest::drive`] should emit.
+/// [`ComponentTest::mount`] records the module as the currently mounted
+/// one and ensures it has a fixture entry; [`ComponentTest::drive`]
+/// looks up the current module's fixture outputs, appends them to an
+/// `emitted` log, and returns them; [`ComponentTest::slot_output`]
+/// returns a placeholder [`SlotValue`]; [`ComponentTest::expect_output`]
+/// membership-tests the `emitted` log against the expected
+/// [`OutputEvent`]; [`ComponentTest::teardown`] removes the module from
+/// the fixture registry.
+///
+/// All cross-crate types ([`TypedProps`], [`SlotMap`], [`ActiveHandle`],
+/// [`InputEvent`], [`OutputEvent`], [`SlotValue`]) are opaque
+/// placeholders in this crate, so props / slots / inputs are accepted
+/// and ignored. The handle returned by `mount` is a placeholder
+/// [`ActiveHandle`]`(())`; `drive` / `expect_output` / `slot_output`
+/// operate against the most recently mounted module.
+#[derive(Debug, Clone, Default)]
+pub struct SimpleComponentTest {
+    /// Fixture registry: module → fixture outputs to emit on `drive`.
+    fixtures: Vec<(ModuleId, Vec<OutputEvent>)>,
+    /// Currently mounted module (set by `mount`, cleared by `teardown`).
+    current_module: Option<ModuleId>,
+    /// Outputs emitted by the current module since `mount`.
+    emitted: Vec<OutputEvent>,
+}
+
+impl SimpleComponentTest {
+    /// Construct an empty `SimpleComponentTest` (no fixtures registered).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Construct a `SimpleComponentTest` pre-seeded with `fixtures`.
+    ///
+    /// Tests supply `(ModuleId, Vec<OutputEvent>)` pairs here so that
+    /// [`ComponentTest::drive`] on the corresponding module returns the
+    /// fixture outputs and [`ComponentTest::expect_output`] can match
+    /// against them.
+    pub fn with_fixtures(fixtures: Vec<(ModuleId, Vec<OutputEvent>)>) -> Self {
+        Self {
+            fixtures,
+            current_module: None,
+            emitted: Vec::new(),
+        }
+    }
+
+    /// Number of modules currently registered in the fixture registry.
+    pub fn registered_count(&self) -> usize {
+        self.fixtures.len()
+    }
+
+    /// Number of outputs emitted by the currently mounted module since
+    /// `mount` (i.e. the size of the log scanned by `expect_output`).
+    pub fn emitted_count(&self) -> usize {
+        self.emitted.len()
+    }
+}
+
+impl ComponentTest for SimpleComponentTest {
+    fn mount(&mut self, module: ModuleId, _props: TypedProps, _slots: SlotMap) -> ActiveHandle {
+        self.current_module = Some(module);
+        self.emitted.clear();
+        // Ensure the module has a fixture entry (insert empty if absent)
+        // so `drive` has a record to look up and `teardown` has a record
+        // to remove.
+        if !self.fixtures.iter().any(|(m, _)| *m == module) {
+            self.fixtures.push((module, Vec::new()));
+        }
+        ActiveHandle(())
+    }
+
+    fn drive(&mut self, _handle: &ActiveHandle, _input: InputEvent) -> Vec<OutputEvent> {
+        if let Some(module) = self.current_module {
+            if let Some((_, outputs)) = self.fixtures.iter_mut().find(|(m, _)| *m == module) {
+                self.emitted.extend_from_slice(outputs);
+                return outputs.clone();
+            }
+        }
+        Vec::new()
+    }
+
+    fn slot_output(&self, _handle: &ActiveHandle, _slot: &str) -> SlotValue {
+        SlotValue(())
+    }
+
+    fn expect_output(&self, _handle: &ActiveHandle, expected: OutputEvent) -> TestResult {
+        if self.emitted.contains(&expected) {
+            TestResult::Pass
+        } else {
+            TestResult::Fail(FailureReport {
+                summary: "expected output was not emitted".to_string(),
+                tick: None,
+                snapshot: None,
+            })
+        }
+    }
+
+    fn teardown(&mut self, _handle: ActiveHandle) {
+        if let Some(module) = self.current_module.take() {
+            self.fixtures.retain(|(m, _)| *m != module);
+        }
+        self.emitted.clear();
+    }
+}
+
+/// Concrete [`TracePlayer`] backed by an in-memory `Vec<Frame>` tick
+/// buffer (Gap H14 / §14.3 / §14.4).
+///
+/// [`TracePlayer::load`] stores an empty tick buffer — [`UnifiedTrace`]
+/// is opaque in this crate, so the stub cannot enumerate recorded ticks
+/// from it. Tests pre-populate the tick buffer via
+/// [`SimpleTracePlayer::with_ticks`] to exercise [`TracePlayer::step`].
+/// [`TracePlayer::seek`] is a no-op because [`TickId`] is opaque in this
+/// crate; [`TracePlayer::assert_replay`] is a stub that always returns
+/// [`TestResult::Pass`].
+#[derive(Debug, Clone, Default)]
+pub struct SimpleTracePlayer {
+    /// Tick buffer of recorded frames.
+    ticks: Vec<Frame>,
+    /// Current tick index (number of ticks already replayed).
+    current_tick: usize,
+}
+
+impl SimpleTracePlayer {
+    /// Construct an empty `SimpleTracePlayer` (no ticks loaded).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Construct a `SimpleTracePlayer` pre-populated with `ticks`.
+    ///
+    /// Tests supply frames here so that [`TracePlayer::step`] can return
+    /// [`StepResult::Advanced`] across the buffer until exhausted.
+    pub fn with_ticks(ticks: Vec<Frame>) -> Self {
+        Self {
+            ticks,
+            current_tick: 0,
+        }
+    }
+
+    /// Current tick index (number of ticks already replayed).
+    pub fn current_tick(&self) -> usize {
+        self.current_tick
+    }
+
+    /// Total number of ticks in the loaded buffer.
+    pub fn tick_count(&self) -> usize {
+        self.ticks.len()
+    }
+}
+
+impl TracePlayer for SimpleTracePlayer {
+    fn load(&mut self, _trace: &UnifiedTrace) -> Result<(), TraceError> {
+        // UnifiedTrace is opaque; store an empty Vec as a placeholder so
+        // `step` immediately reports `EndOfTrace` until a real unified-
+        // trace store lands.
+        self.ticks = Vec::new();
+        self.current_tick = 0;
+        Ok(())
+    }
+
+    fn step(&mut self) -> StepResult {
+        if self.current_tick < self.ticks.len() {
+            self.current_tick += 1;
+            if self.current_tick < self.ticks.len() {
+                StepResult::Advanced
+            } else {
+                StepResult::EndOfTrace
+            }
+        } else {
+            StepResult::EndOfTrace
+        }
+    }
+
+    fn seek(&mut self, _tick: TickId) {
+        // TickId is opaque in this crate; the stub leaves `current_tick`
+        // unchanged. A real implementation will derive the tick index
+        // from the TickId once the unified-trace store lands.
+    }
+
+    fn assert_replay(self, _harness: &dyn TestHarness) -> TestResult {
+        // Stub: real byte-identical frame diff lands with the render crate.
+        TestResult::Pass
+    }
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -582,5 +776,220 @@ mod tests {
         assert!(harness.backend().draw_log().is_empty());
         assert!(harness.text().shaped_runs().is_empty());
         assert_eq!(harness.raster().raster_class(), RasterClass::Software);
+    }
+
+    // ---- SimpleComponentTest (Gap H13) -----------------------------------
+
+    #[test]
+    fn simple_component_test_default_is_empty() {
+        let t = SimpleComponentTest::new();
+        assert_eq!(t.registered_count(), 0);
+        assert_eq!(t.emitted_count(), 0);
+    }
+
+    #[test]
+    fn simple_component_test_with_fixtures_seeds_registry() {
+        let module = ModuleId(7);
+        let t = SimpleComponentTest::with_fixtures(vec![(module, vec![OutputEvent(())])]);
+        assert_eq!(t.registered_count(), 1);
+    }
+
+    #[test]
+    fn simple_component_test_mount_registers_module_and_returns_handle() {
+        let mut t = SimpleComponentTest::new();
+        assert_eq!(t.registered_count(), 0);
+        let _handle = t.mount(ModuleId(1), TypedProps(()), SlotMap(()));
+        // mount registers the module in the fixture registry.
+        assert_eq!(t.registered_count(), 1);
+        assert_eq!(t.emitted_count(), 0);
+    }
+
+    #[test]
+    fn simple_component_test_mount_idempotent_for_same_module() {
+        let mut t = SimpleComponentTest::new();
+        let module = ModuleId(1);
+        let _h1 = t.mount(module, TypedProps(()), SlotMap(()));
+        let _h2 = t.mount(module, TypedProps(()), SlotMap(()));
+        // The second mount of the same module must not double-register.
+        assert_eq!(t.registered_count(), 1);
+    }
+
+    #[test]
+    fn simple_component_test_drive_returns_fixture_outputs() {
+        let module = ModuleId(42);
+        let fixtures = vec![(module, vec![OutputEvent(()), OutputEvent(())])];
+        let mut t = SimpleComponentTest::with_fixtures(fixtures);
+        let handle = t.mount(module, TypedProps(()), SlotMap(()));
+
+        let outputs = t.drive(&handle, InputEvent(()));
+        assert_eq!(outputs.len(), 2);
+        // drive appends to the emitted log.
+        assert_eq!(t.emitted_count(), 2);
+
+        // A second drive appends again (stub semantics: each drive re-emits
+        // the fixtures).
+        let _ = t.drive(&handle, InputEvent(()));
+        assert_eq!(t.emitted_count(), 4);
+    }
+
+    #[test]
+    fn simple_component_test_drive_without_mount_returns_empty() {
+        let mut t = SimpleComponentTest::new();
+        // No mount yet → current_module is None → drive returns empty.
+        let outputs = t.drive(&ActiveHandle(()), InputEvent(()));
+        assert!(outputs.is_empty());
+        assert_eq!(t.emitted_count(), 0);
+    }
+
+    #[test]
+    fn simple_component_test_slot_output_returns_placeholder() {
+        let mut t = SimpleComponentTest::new();
+        let handle = t.mount(ModuleId(1), TypedProps(()), SlotMap(()));
+        // slot_output returns a placeholder SlotValue regardless of slot.
+        let _ = t.slot_output(&handle, "header");
+    }
+
+    #[test]
+    fn simple_component_test_expect_output_pass_after_drive() {
+        let module = ModuleId(99);
+        let fixtures = vec![(module, vec![OutputEvent(())])];
+        let mut t = SimpleComponentTest::with_fixtures(fixtures);
+        let handle = t.mount(module, TypedProps(()), SlotMap(()));
+        let _ = t.drive(&handle, InputEvent(()));
+        // The fixture output matches the expected placeholder OutputEvent.
+        assert!(matches!(
+            t.expect_output(&handle, OutputEvent(())),
+            TestResult::Pass
+        ));
+    }
+
+    #[test]
+    fn simple_component_test_expect_output_fail_without_drive() {
+        let module = ModuleId(99);
+        let fixtures = vec![(module, vec![OutputEvent(())])];
+        let mut t = SimpleComponentTest::with_fixtures(fixtures);
+        let handle = t.mount(module, TypedProps(()), SlotMap(()));
+        // No drive → emitted log is empty → expect_output fails.
+        match t.expect_output(&handle, OutputEvent(())) {
+            TestResult::Fail(report) => {
+                assert!(!report.summary.is_empty());
+                assert!(report.tick.is_none());
+                assert!(report.snapshot.is_none());
+            }
+            other => panic!("expected TestResult::Fail, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn simple_component_test_teardown_removes_module_from_registry() {
+        let module = ModuleId(5);
+        let fixtures = vec![(module, vec![OutputEvent(())])];
+        let mut t = SimpleComponentTest::with_fixtures(fixtures);
+        assert_eq!(t.registered_count(), 1);
+        let handle = t.mount(module, TypedProps(()), SlotMap(()));
+        // mount of an existing module does not duplicate the entry.
+        assert_eq!(t.registered_count(), 1);
+        let _ = t.drive(&handle, InputEvent(()));
+        assert_eq!(t.emitted_count(), 1);
+
+        t.teardown(handle);
+        // teardown removes the module from the fixture registry and
+        // clears the emitted log.
+        assert_eq!(t.registered_count(), 0);
+        assert_eq!(t.emitted_count(), 0);
+    }
+
+    // ---- SimpleTracePlayer (Gap H14) -------------------------------------
+
+    #[test]
+    fn simple_trace_player_default_is_empty() {
+        let p = SimpleTracePlayer::new();
+        assert_eq!(p.tick_count(), 0);
+        assert_eq!(p.current_tick(), 0);
+    }
+
+    #[test]
+    fn simple_trace_player_with_ticks_seeds_buffer() {
+        let p = SimpleTracePlayer::with_ticks(vec![Frame(()), Frame(()), Frame(())]);
+        assert_eq!(p.tick_count(), 3);
+        assert_eq!(p.current_tick(), 0);
+    }
+
+    #[test]
+    fn simple_trace_player_step_on_empty_returns_end_of_trace() {
+        let mut p = SimpleTracePlayer::new();
+        assert!(matches!(p.step(), StepResult::EndOfTrace));
+        assert_eq!(p.current_tick(), 0);
+    }
+
+    #[test]
+    fn simple_trace_player_step_advances_then_ends() {
+        let mut p = SimpleTracePlayer::with_ticks(vec![Frame(()), Frame(()), Frame(())]);
+        // 3 ticks → step 1: Advanced (more remain).
+        assert!(matches!(p.step(), StepResult::Advanced));
+        assert_eq!(p.current_tick(), 1);
+        // step 2: Advanced (one more remains).
+        assert!(matches!(p.step(), StepResult::Advanced));
+        assert_eq!(p.current_tick(), 2);
+        // step 3: EndOfTrace (just exhausted the buffer).
+        assert!(matches!(p.step(), StepResult::EndOfTrace));
+        assert_eq!(p.current_tick(), 3);
+        // step 4: EndOfTrace (already past end).
+        assert!(matches!(p.step(), StepResult::EndOfTrace));
+        assert_eq!(p.current_tick(), 3);
+    }
+
+    #[test]
+    fn simple_trace_player_load_clears_buffer_and_resets_tick() {
+        let mut p = SimpleTracePlayer::with_ticks(vec![Frame(()), Frame(())]);
+        // Advance once so current_tick is non-zero.
+        let _ = p.step();
+        assert_eq!(p.current_tick(), 1);
+        assert_eq!(p.tick_count(), 2);
+
+        // load() stores an empty Vec (UnifiedTrace is opaque) and resets
+        // the tick cursor.
+        let result = p.load(&UnifiedTrace(()));
+        assert!(result.is_ok());
+        assert_eq!(p.tick_count(), 0);
+        assert_eq!(p.current_tick(), 0);
+        // step on the cleared buffer immediately reaches end-of-trace.
+        assert!(matches!(p.step(), StepResult::EndOfTrace));
+    }
+
+    #[test]
+    fn simple_trace_player_seek_does_not_panic() {
+        let mut p = SimpleTracePlayer::with_ticks(vec![Frame(()), Frame(())]);
+        let _ = p.step();
+        assert_eq!(p.current_tick(), 1);
+        // TickId is opaque; seek is a no-op stub that must not panic and
+        // must not regress the cursor.
+        p.seek(TickId(()));
+        assert_eq!(p.current_tick(), 1);
+    }
+
+    #[test]
+    fn simple_trace_player_assert_replay_returns_pass() {
+        let p = SimpleTracePlayer::with_ticks(vec![Frame(()), Frame(())]);
+        let harness = SimpleTestHarness::new();
+        // assert_replay consumes self and reports Pass (stub).
+        assert!(matches!(p.assert_replay(&harness), TestResult::Pass));
+    }
+
+    /// Compile-time assertion: `SimpleComponentTest` implements the full
+    /// `ComponentTest` trait. If a method is removed, renamed, or its
+    /// signature changes, this test fails to compile.
+    #[test]
+    fn simple_component_test_implements_component_test() {
+        fn _assert<T: ComponentTest>() {}
+        _assert::<SimpleComponentTest>();
+    }
+
+    /// Compile-time assertion: `SimpleTracePlayer` implements the full
+    /// `TracePlayer` trait.
+    #[test]
+    fn simple_trace_player_implements_trace_player() {
+        fn _assert<T: TracePlayer>() {}
+        _assert::<SimpleTracePlayer>();
     }
 }
