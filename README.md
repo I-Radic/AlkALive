@@ -21,7 +21,7 @@ AlkALive is an exploratory project investigating a **custom, module- and object-
 | `Cargo.toml` | **Rust workspace** — 13 crates (`alkalive-{core,runtime,render,layout,text,style,input,dom,a11y,ipc,perf,error,test}`), edition 2021, wasm-release profile. |
 | `rust-toolchain.toml` | **Toolchain pin** — Rust 1.97.1 + wasm32-unknown-unknown + clippy + rustfmt. |
 | `deny.toml` | **cargo-deny** — enforces ADR 018 (capability-scoped imports; no external registry deps by default — the 13 workspace crates are auto-allowed, every other crate is denied unless explicitly allowlisted). |
-| `crates/` | **Crate source** — real implementations (no `todo!()` remaining). 8,272 lines and 125 tests across 13 crates. |
+| `crates/` | **Crate source** — real implementations (no `todo!()` remaining). 11,321 lines and 215 tests across 13 crates. All 41 gap-analysis findings addressed (5 Critical, 14 High, 18 Medium, 4 Low). |
 
 ## The catalog
 
