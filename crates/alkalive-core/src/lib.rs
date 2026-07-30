@@ -2,13 +2,17 @@
 //!
 //! Core language model: modules, interfaces, types, encapsulation boundaries,
 //! slots, signals, and the error surface defined in `docs/SPECIFICATION.md`
-//! §2.7–2.9. This is a Wave 3 trait-definition skeleton: every domain method
-//! body is `todo!()`; no behaviour is implemented yet.
+//! §2.7–2.9. Wave 4 implements the runtime-free semantics: module lifecycle
+//! state machine, encapsulation access checks, slot mounting, type soundness
+//! queries, and interface slot lookup. Methods that require runtime
+//! infrastructure (signal emit/subscribe) remain `todo!()` stubs and are
+//! tagged with the Wave that will implement them.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
 use core::marker::PhantomData;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 /// Six-state module lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -169,18 +173,56 @@ pub struct Module {
 
 impl Module {
     /// Transition this module to `target`, validating the lifecycle edge.
+    ///
+    /// Legal edges (SPECIFICATION §2.4):
+    /// `Unloaded → Loading → Ready → Active ⇄ Suspended → Destroyed`.
+    /// Both `Active → Destroyed` and `Suspended → Destroyed` are permitted
+    /// (owner drop or HMR replacement). [`ModuleState::Destroyed`] is
+    /// terminal; any transition out of it (or any other unlisted edge)
+    /// returns [`ModuleError::IllegalTransition`].
     pub fn transition(&mut self, target: ModuleState) -> Result<(), ModuleError> {
-        let _ = target;
-        todo!()
+        let allowed = matches!(
+            (self.state, target),
+            (ModuleState::Unloaded, ModuleState::Loading)
+                | (ModuleState::Loading, ModuleState::Ready)
+                | (ModuleState::Ready, ModuleState::Active)
+                | (ModuleState::Active, ModuleState::Suspended)
+                | (ModuleState::Suspended, ModuleState::Active)
+                | (ModuleState::Active, ModuleState::Destroyed)
+                | (ModuleState::Suspended, ModuleState::Destroyed)
+        );
+        if !allowed {
+            return Err(ModuleError::IllegalTransition(self.state, target));
+        }
+        self.state = target;
+        Ok(())
     }
+
     /// Mount `child` into the named declared slot (§2.5).
+    ///
+    /// Wave 4 delegates to [`Slot::mount`] with a descriptor synthesised from
+    /// `slot` and the module's interface id. Full interface-level slot
+    /// lookup, type-checking against the mounted child, and cardinality
+    /// enforcement are compile-time / runtime concerns owned by Wave 6
+    /// (runtime integration). This method mints a unique [`MountHandle`]
+    /// without performing those checks.
     pub fn mount(&self, slot: Symbol, child: ModuleId) -> Result<MountHandle, SlotError> {
-        let _ = (slot, child);
-        todo!()
+        let descriptor = Slot {
+            name: slot,
+            child_iface: self.iface,
+            cardinality: Cardinality::Single,
+        };
+        descriptor.mount(child)
     }
+
     /// Tear down this module deterministically.
+    ///
+    /// Transitions to [`ModuleState::Destroyed`]. If the current state cannot
+    /// legally reach `Destroyed` (e.g. already destroyed, or still `Unloaded`
+    /// / `Loading` / `Ready`), returns the underlying
+    /// [`ModuleError::IllegalTransition`].
     pub fn destroy(&mut self) -> Result<(), ModuleError> {
-        todo!()
+        self.transition(ModuleState::Destroyed)
     }
 }
 
@@ -197,6 +239,16 @@ pub struct Interface {
     pub slots: Box<[(Symbol, Type, Cardinality)]>,
 }
 
+impl Interface {
+    /// Find the first declared slot whose name equals `name`.
+    ///
+    /// Returns a shared reference to the matching `(Symbol, Type, Cardinality)`
+    /// triple, or `None` if no such slot is declared on this interface.
+    pub fn find_slot(&self, name: Symbol) -> Option<&(Symbol, Type, Cardinality)> {
+        self.slots.iter().find(|(s, _, _)| *s == name)
+    }
+}
+
 /// A typed language entity (ADR 009).
 #[derive(Debug, Clone)]
 pub struct Type {
@@ -210,6 +262,14 @@ pub struct Type {
     pub wasm_shape: WasmTypeSig,
 }
 
+impl Type {
+    /// Returns `true` iff this type's source-level soundness has been proven
+    /// (ADR 009 level 1). `unsafe`-attested types are not proven.
+    pub fn is_proven(&self) -> bool {
+        self.soundness == Soundness::Proven
+    }
+}
+
 /// Encapsulation boundary for a field or declaration (ADR 008).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EncapsulationBoundary {
@@ -219,6 +279,34 @@ pub struct EncapsulationBoundary {
     pub visibility: Visibility,
     /// Required capability; `Some` iff `visibility == Capability`.
     pub capability: Option<CapabilityId>,
+}
+
+impl EncapsulationBoundary {
+    /// Decide whether `accessor` may read a declaration guarded by this
+    /// boundary, given an optional `grant` carried in the accessor's
+    /// capability set.
+    ///
+    /// Wave 4 rules (SPECIFICATION §2.3):
+    /// - The owner always passes (regardless of `visibility`).
+    /// - [`Visibility::Public`] passes for any accessor.
+    /// - [`Visibility::Module`] is satisfied iff `accessor == owner`
+    ///   (Wave 4 simplification; the full "same declaring module" rule
+    ///   requires module-graph resolution in Wave 6).
+    /// - [`Visibility::Capability`] is satisfied iff `grant` equals
+    ///   [`Self::capability`].
+    /// - [`Visibility::Owner`] passes only for the owner (covered above).
+    pub fn check_access(&self, accessor: ModuleId, grant: Option<CapabilityId>) -> bool {
+        if accessor == self.owner {
+            return true;
+        }
+        match self.visibility {
+            Visibility::Public => true,
+            // Wave 4 simplification: same-module access reduces to owner.
+            Visibility::Module => accessor == self.owner,
+            Visibility::Capability => grant == self.capability,
+            Visibility::Owner => false,
+        }
+    }
 }
 
 /// A named, typed child mount point (ADR 007 / ADR 014).
@@ -234,11 +322,28 @@ pub struct Slot {
 
 impl Slot {
     /// Mount `child` into this slot.
+    ///
+    /// Wave 4 mints a unique [`MountHandle`] drawn from a process-global
+    /// monotonically increasing counter (ADR 007). `child` is accepted but
+    /// not yet stored — full child-tracking (cardinality enforcement,
+    /// scene-graph attachment, panic trapping at the owning boundary per
+    /// §2.5) is implemented in Wave 6 alongside the runtime.
     pub fn mount(&self, child: ModuleId) -> Result<MountHandle, SlotError> {
+        // `child` will be wired into the runtime's slot occupancy table in
+        // Wave 6; until then we accept it to preserve the API.
         let _ = child;
-        todo!()
+        let id = NEXT_MOUNT_HANDLE.fetch_add(1, Ordering::Relaxed);
+        Ok(MountHandle(id))
     }
 }
+
+/// Process-global monotonically increasing counter backing [`Slot::mount`].
+///
+/// Declared as an immutable `static` of type [`AtomicU64`]; the interior
+/// mutability is provided by `&self` atomic operations, which are safe under
+/// `#![forbid(unsafe_code)]`. Starts at `1` so `MountHandle(0)` remains a
+/// sentinel "no mount" value usable by callers.
+static NEXT_MOUNT_HANDLE: AtomicU64 = AtomicU64::new(1);
 
 /// A typed output signal emitter (ADR 014).
 #[derive(Debug, Clone)]
@@ -248,14 +353,25 @@ pub struct Signal<T> {
 
 impl<T> Signal<T> {
     /// Emit `value` to all subscribers (module-internal writer).
+    ///
+    /// **Wave 4 stub.** This method is intentionally `todo!()`. The real
+    /// implementation requires the runtime's observer registry and the
+    /// per-module emission queue (ADR 014 / §2.6) and is scheduled for
+    /// Wave 6 (runtime integration). Calling this method panics.
     pub fn emit(&self, value: T) {
         let _ = value;
-        todo!()
+        todo!("Signal::emit — implemented in Wave 6 (runtime observer registry, ADR 014)");
     }
+
     /// Subscribe `listener`; a capability-gated reader.
+    ///
+    /// **Wave 4 stub.** This method is intentionally `todo!()`. The real
+    /// implementation requires the runtime's subscriber table, capability
+    /// grant verification (ADR 018), and emission-graph wiring (ADR 014),
+    /// all scheduled for Wave 6. Calling this method panics.
     pub fn subscribe(&self, listener: Listener<T>) -> Subscription {
         let _ = listener;
-        todo!()
+        todo!("Signal::subscribe — implemented in Wave 6 (runtime subscriber table, ADR 014/018)");
     }
 }
 
@@ -301,4 +417,237 @@ pub struct Failure {
     pub cause: ModuleError,
     /// Trace identifier for correlation (ADR 016).
     pub trace: TraceId,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a [`Module`] in the given state with a minimal boundary owned
+    /// by `ModuleId(1)`.
+    fn module_in(state: ModuleState) -> Module {
+        Module {
+            id: ModuleId(1),
+            iface: InterfaceId(1),
+            state,
+            boundary: EncapsulationBoundary {
+                owner: ModuleId(1),
+                visibility: Visibility::Owner,
+                capability: None,
+            },
+            scene_graph: OwnedSubtreeRef(0),
+            imports: Box::new([]),
+        }
+    }
+
+    /// Build a minimal proven [`Type`] for use in interface slot tuples.
+    fn dummy_type() -> Type {
+        Type {
+            name: Symbol(0),
+            kind: TypeKind::Primitive,
+            soundness: Soundness::Proven,
+            wasm_shape: WasmTypeSig {
+                bytes: Box::new([]),
+            },
+        }
+    }
+
+    // ---- Module lifecycle -------------------------------------------------
+
+    #[test]
+    fn lifecycle_unloaded_to_active() {
+        let mut m = module_in(ModuleState::Unloaded);
+        m.transition(ModuleState::Loading).unwrap();
+        assert_eq!(m.state, ModuleState::Loading);
+        m.transition(ModuleState::Ready).unwrap();
+        assert_eq!(m.state, ModuleState::Ready);
+        m.transition(ModuleState::Active).unwrap();
+        assert_eq!(m.state, ModuleState::Active);
+    }
+
+    #[test]
+    fn lifecycle_active_suspend_resume() {
+        let mut m = module_in(ModuleState::Active);
+        m.transition(ModuleState::Suspended).unwrap();
+        assert_eq!(m.state, ModuleState::Suspended);
+        m.transition(ModuleState::Active).unwrap();
+        assert_eq!(m.state, ModuleState::Active);
+    }
+
+    #[test]
+    fn lifecycle_active_to_destroyed() {
+        let mut m = module_in(ModuleState::Active);
+        m.transition(ModuleState::Destroyed).unwrap();
+        assert_eq!(m.state, ModuleState::Destroyed);
+    }
+
+    #[test]
+    fn lifecycle_suspended_to_destroyed() {
+        let mut m = module_in(ModuleState::Suspended);
+        m.transition(ModuleState::Destroyed).unwrap();
+        assert_eq!(m.state, ModuleState::Destroyed);
+    }
+
+    #[test]
+    fn lifecycle_destroyed_is_terminal() {
+        let mut m = module_in(ModuleState::Destroyed);
+        let err = m.transition(ModuleState::Active).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ModuleError::IllegalTransition(ModuleState::Destroyed, ModuleState::Active)
+            ),
+            "expected IllegalTransition(Destroyed, Active), got {err:?}"
+        );
+        // State must be unchanged.
+        assert_eq!(m.state, ModuleState::Destroyed);
+    }
+
+    #[test]
+    fn lifecycle_illegal_unloaded_to_active() {
+        let mut m = module_in(ModuleState::Unloaded);
+        let err = m.transition(ModuleState::Active).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ModuleError::IllegalTransition(ModuleState::Unloaded, ModuleState::Active)
+            ),
+            "expected IllegalTransition(Unloaded, Active), got {err:?}"
+        );
+        assert_eq!(m.state, ModuleState::Unloaded);
+    }
+
+    #[test]
+    fn destroy_from_active() {
+        let mut m = module_in(ModuleState::Active);
+        m.destroy().unwrap();
+        assert_eq!(m.state, ModuleState::Destroyed);
+    }
+
+    #[test]
+    fn destroy_from_destroyed_is_illegal() {
+        let mut m = module_in(ModuleState::Destroyed);
+        assert!(m.destroy().is_err());
+        assert_eq!(m.state, ModuleState::Destroyed);
+    }
+
+    // ---- EncapsulationBoundary::check_access -----------------------------
+
+    #[test]
+    fn visibility_owner_allows_only_owner() {
+        let b = EncapsulationBoundary {
+            owner: ModuleId(7),
+            visibility: Visibility::Owner,
+            capability: None,
+        };
+        assert!(b.check_access(ModuleId(7), None));
+        assert!(!b.check_access(ModuleId(8), None));
+    }
+
+    #[test]
+    fn visibility_module_simplifies_to_owner() {
+        let b = EncapsulationBoundary {
+            owner: ModuleId(7),
+            visibility: Visibility::Module,
+            capability: None,
+        };
+        // Wave 4 simplification: same-module access reduces to accessor==owner.
+        assert!(b.check_access(ModuleId(7), None));
+        assert!(!b.check_access(ModuleId(8), None));
+    }
+
+    #[test]
+    fn visibility_public_allows_everyone() {
+        let b = EncapsulationBoundary {
+            owner: ModuleId(7),
+            visibility: Visibility::Public,
+            capability: None,
+        };
+        assert!(b.check_access(ModuleId(7), None));
+        assert!(b.check_access(ModuleId(8), None));
+        assert!(b.check_access(ModuleId(999), None));
+    }
+
+    #[test]
+    fn visibility_capability_requires_matching_grant() {
+        let cap = CapabilityId(42);
+        let b = EncapsulationBoundary {
+            owner: ModuleId(7),
+            visibility: Visibility::Capability,
+            capability: Some(cap),
+        };
+        // Non-owner, no grant -> denied.
+        assert!(!b.check_access(ModuleId(8), None));
+        // Non-owner, wrong grant -> denied.
+        assert!(!b.check_access(ModuleId(8), Some(CapabilityId(1))));
+        // Non-owner, matching grant -> allowed.
+        assert!(b.check_access(ModuleId(8), Some(cap)));
+        // Owner always passes regardless of grant.
+        assert!(b.check_access(ModuleId(7), None));
+    }
+
+    // ---- Interface::find_slot --------------------------------------------
+
+    #[test]
+    fn find_slot_found_returns_first_match() {
+        let t = dummy_type();
+        let iface = Interface {
+            name: Symbol(1),
+            inputs: Box::new([]),
+            outputs: Box::new([]),
+            slots: Box::new([
+                (Symbol(10), t.clone(), Cardinality::Optional),
+                (Symbol(11), t.clone(), Cardinality::Single),
+            ]),
+        };
+        let found = iface.find_slot(Symbol(11)).expect("slot 11 should exist");
+        assert_eq!(found.0, Symbol(11));
+        assert_eq!(found.2, Cardinality::Single);
+    }
+
+    #[test]
+    fn find_slot_not_found() {
+        let t = dummy_type();
+        let iface = Interface {
+            name: Symbol(1),
+            inputs: Box::new([]),
+            outputs: Box::new([]),
+            slots: Box::new([(Symbol(10), t, Cardinality::Optional)]),
+        };
+        assert!(iface.find_slot(Symbol(999)).is_none());
+    }
+
+    // ---- Type::is_proven -------------------------------------------------
+
+    #[test]
+    fn type_is_proven_for_proven_soundness() {
+        let mut t = dummy_type();
+        assert!(t.is_proven());
+        t.soundness = Soundness::UnsafeAttested;
+        assert!(!t.is_proven());
+    }
+
+    // ---- Slot::mount / Module::mount -------------------------------------
+
+    #[test]
+    fn slot_mount_returns_unique_handles() {
+        let slot = Slot {
+            name: Symbol(1),
+            child_iface: InterfaceId(1),
+            cardinality: Cardinality::Single,
+        };
+        let h1 = slot.mount(ModuleId(2)).unwrap();
+        let h2 = slot.mount(ModuleId(3)).unwrap();
+        // Counter is monotonic and never zero (starts at 1).
+        assert_ne!(h1, h2);
+        assert!(h1.0 > 0);
+        assert!(h2.0 > h1.0);
+    }
+
+    #[test]
+    fn module_mount_delegates_to_slot_mount() {
+        let m = module_in(ModuleState::Active);
+        let h = m.mount(Symbol(5), ModuleId(9)).unwrap();
+        assert!(h.0 > 0);
+    }
 }
