@@ -1,9 +1,11 @@
 //! Layout system — geometry primitives, pluggable constraint solver, and
 //! the text-flow measurement contract (§5.2–5.7).
 //!
-//! Wave-3 trait skeletons: every method body is `todo!()`. Implementations
-//! land in Wave 6 (default Cassowary solver, locality gate, GPU-transform
-//! emission per ADR 002/004/022).
+//! Wave 6 status: the default [`CassowarySolver`] ships a simplified
+//! single-pass linear-equality solver with the ADR 002 locality gate
+//! (§5.5) and GPU-ready transform emission (§5.6). The [`MeasuredRun`]
+//! contract remains a `todo!()` stub pending the `alkalive-text` crate
+//! (Wave 7+, ADR 004/022).
 //!
 //! # Cross-crate forward declarations
 //!
@@ -14,14 +16,17 @@
 //!
 //! Both are unified by the future rendering-ABI ADR (§4.7 / §5.4
 //! shared-boundary note). The stubs exist only so the layout crate compiles
-//! standalone in Wave 3.
+//! standalone.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
-// Wave-3 skeleton: every method body is `todo!()`, so parameters are
+// The [`LayoutSolver`] and [`MeasuredRun`] trait default bodies remain
+// `todo!()` stubs (per spec skeleton); their parameters are therefore
 // intentionally unused. Suppressing this crate-wide keeps spec-faithful
 // parameter names without polluting CI's `clippy -- -D warnings` gate.
 #![allow(unused_variables)]
+
+use std::collections::HashMap;
 
 // ============================================================================
 // Opaque identifiers
@@ -89,9 +94,28 @@ pub struct Mat4 {
 impl Default for Mat4 {
     fn default() -> Self {
         // Identity transform — a safe default for solver outputs.
+        // Column-major: identity has 1.0 on the diagonal (indices 0, 5, 10, 15).
         Self {
             m: [
                 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+            ],
+        }
+    }
+}
+
+impl Mat4 {
+    /// Build a 2D translation matrix (z preserved, homogeneous w=1).
+    ///
+    /// Convenience used by [`CassowarySolver`] to emit per-node instance
+    /// transforms from resolved `x`/`y` facets (§5.6). The translation
+    /// vector occupies the fourth column of the column-major layout.
+    pub fn translated(x: f32, y: f32) -> Self {
+        Self {
+            m: [
+                1.0, 0.0, 0.0, 0.0, // column 0
+                0.0, 1.0, 0.0, 0.0, // column 1
+                0.0, 0.0, 1.0, 0.0, // column 2
+                x, y, 0.0, 1.0, // column 3 (translation)
             ],
         }
     }
@@ -315,7 +339,7 @@ pub struct GlyphMetrics {
     pub descents: Vec<f32>,
     /// Source-codepoint index per glyph.
     pub clusters: Vec<u32>,
-    /// Per-caret x-offsets, BiDi-aware.
+    /// Per caret x-offsets, BiDi-aware.
     pub caret_offsets: Vec<f32>,
 }
 
@@ -351,16 +375,30 @@ pub struct GlyphRun {
 /// (§6.9, §5.4 shared-boundary note). Box/physics/graph solvers cover none
 /// of line-breaking, BiDi, or font-metric shaping, so this contract is
 /// mandatory for every solver — including user-supplied.
+///
+/// # Wave 6 stub
+///
+/// The default method bodies remain `todo!()` stubs: the concrete
+/// HarfRust-backed implementation lands with the `alkalive-text` crate
+/// (Wave 7+). [`CassowarySolver::solve`] does not invoke the measurement
+/// contract in Wave 6, so passing any `impl MeasuredRun` (using the stub
+/// defaults) is safe.
 pub trait MeasuredRun {
     /// Shape and measure a [`TextRun`] synchronously; HarfRust-backed, no
     /// DOM crossing (§5.4, ADR 022).
+    ///
+    /// *Wave 6 stub*: body is `todo!()` until `alkalive-text` lands.
     fn shape_and_measure(&self, run: &TextRun, ctx: &FontContext) -> GlyphMetrics {
-        todo!()
+        todo!("Wave 7+: implemented by alkalive-text::TextStack (§6.9)")
     }
 
     /// Break `glyphs` into lines constrained by `max_width` (§5.4).
+    ///
+    /// *Wave 6 stub*: body is `todo!()` until `alkalive-text` lands.
     fn line_break(&self, glyphs: &[GlyphRun], max_width: f32) -> Vec<LineBreak> {
-        todo!()
+        let _ = glyphs;
+        let _ = max_width;
+        todo!("Wave 7+: implemented by alkalive-text::TextStack (§6.9)")
     }
 }
 
@@ -395,12 +433,17 @@ pub struct LayoutSolution {
 /// Pluggable constraint-solver trait — the sole layout extension surface
 /// (ADR 004, §5.3).
 ///
-/// The runtime ships a default Cassowary-class linear implementation; author
-/// backends (impulse/physics, directed-graph, GPU-compute) bind behind the
-/// same trait, so swapping solvers is internal and non-breaking to downstream
-/// paint stages. The layout-tree is solver-internal and never re-derived
-/// from styles (§5.1), eliminating the style-driven box-tree recalculation
-/// that couples style mutation to global reflow (P2.3, P2.4).
+/// The runtime ships a default Cassowary-class linear implementation
+/// ([`CassowarySolver`]); author backends (impulse/physics, directed-graph,
+/// GPU-compute) bind behind the same trait, so swapping solvers is internal
+/// and non-breaking to downstream paint stages. The layout-tree is
+/// solver-internal and never re-derived from styles (§5.1), eliminating the
+/// style-driven box-tree recalculation that couples style mutation to
+/// global reflow (P2.3, P2.4).
+///
+/// The default method bodies below remain `todo!()` stubs: every method
+/// must be overridden by a concrete implementor. [`CassowarySolver`] is the
+/// reference override.
 pub trait LayoutSolver {
     /// Register a node in the solver-internal layout graph.
     fn add_node(&mut self, node: LayoutNode) -> NodeId {
@@ -444,5 +487,349 @@ pub trait LayoutSolver {
         dt: f32,
     ) -> Result<LayoutSolution, SolveError> {
         todo!()
+    }
+}
+
+// ============================================================================
+// Default solver: CassowarySolver (§5.3, ADR 004)
+// ============================================================================
+
+/// Default linear-constraint solver shipped with the runtime (ADR 004, §5.3).
+///
+/// Wave 6 ships a **simplified single-pass linear-equality** solver rather
+/// than a full Cassowary simplex:
+///
+/// 1. **Locality gate** — every live constraint is checked via
+///    [`LayoutSolver::assert_local`]; the first cross-module offender
+///    aborts the solve with [`SolveError::LocalityViolated`] (§5.5).
+/// 2. **Equality assignment** — each `ConstraintKind::Linear` constraint
+///    assigns `a := b` (literal RHS uses [`LayoutVar::value`]; facet RHS
+///    reads the previously-assigned value, falling back to the literal).
+///    `Impulse` and `GraphLayout` kinds are accepted but skipped.
+/// 3. **Transform emission** — one [`Mat4::translated`] instance transform
+///    is emitted per live node from its resolved `x`/`y` facets (§5.6).
+///
+/// The `dirty`, `measured`, and `dt` parameters of
+/// [`LayoutSolver::solve`] are intentionally ignored in Wave 6; the real
+/// Cassowary simplex, dirty-subset scoping, and text-measurement
+/// integration land in a later wave. The trait surface is stable so a
+/// production solver can drop in behind [`LayoutSolver`] without breaking
+/// downstream paint stages.
+#[derive(Default)]
+pub struct CassowarySolver {
+    /// Slot-based node table; `None` marks a removed node.
+    nodes: Vec<Option<LayoutNode>>,
+    /// Per-node style snapshot (input only; §5.1, §5.6). Indexed by
+    /// [`NodeId`] in lockstep with `nodes`.
+    styles: Vec<OwnedStyle>,
+    /// Slot-based constraint table; `None` marks a removed constraint.
+    constraints: Vec<Option<Constraint>>,
+}
+
+impl CassowarySolver {
+    /// Construct an empty solver.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Resolve the [`ModuleId`] owning `rid`, if any live node claims it.
+    ///
+    /// Used by the locality gate to compare the modules of a constraint's
+    /// two operands. A literal operand (no `object`) yields `None`.
+    fn module_of(&self, rid: RenderObjectId) -> Option<ModuleId> {
+        self.nodes
+            .iter()
+            .flatten()
+            .find(|n| n.id == rid)
+            .map(|n| n.module)
+    }
+}
+
+impl LayoutSolver for CassowarySolver {
+    fn add_node(&mut self, node: LayoutNode) -> NodeId {
+        let id = NodeId(self.nodes.len() as u32);
+        self.nodes.push(Some(node));
+        // `OwnedStyle` is currently a unit-struct stub (§7); the concrete
+        // struct lands with `alkalive-style` and the rendering-ABI ADR.
+        self.styles.push(OwnedStyle);
+        id
+    }
+
+    fn remove_node(&mut self, id: NodeId) {
+        let idx = id.0 as usize;
+        if idx < self.nodes.len() {
+            // Slot tombstone; indices stay stable so existing NodeIds
+            // remain valid. Style slot is retained (cheap, avoids
+            // reindexing) and simply overwritten on next `add_node`
+            // reuse — though Wave 6 never reuses slots.
+            self.nodes[idx] = None;
+        }
+    }
+
+    fn bind_style(&mut self, id: NodeId, style: &OwnedStyle) {
+        let idx = id.0 as usize;
+        if idx < self.styles.len() {
+            self.styles[idx] = style.clone();
+        }
+    }
+
+    fn add_constraint(&mut self, c: Constraint) -> ConstraintId {
+        let id = ConstraintId(self.constraints.len() as u32);
+        self.constraints.push(Some(c));
+        id
+    }
+
+    fn remove_constraint(&mut self, id: ConstraintId) {
+        let idx = id.0 as usize;
+        if idx < self.constraints.len() {
+            self.constraints[idx] = None;
+        }
+    }
+
+    fn assert_local(&self, c: &Constraint) -> Result<(), LocalityViolation> {
+        let module_a = c.a.object.and_then(|rid| self.module_of(rid));
+        let module_b = c.b.object.and_then(|rid| self.module_of(rid));
+
+        // Reject cross-module edges between two referenced objects (§5.5).
+        if let (Some(ma), Some(mb)) = (module_a, module_b) {
+            if ma != mb {
+                return Err(LocalityViolation {
+                    // The trait signature carries no ConstraintId; `solve`
+                    // re-stamps this with the real handle when forwarding
+                    // the violation as a `SolveError::LocalityViolated`.
+                    constraint: ConstraintId::default(),
+                    boundary: (ma, mb),
+                });
+            }
+        }
+
+        // Reject constraints whose claimed `module` disagrees with the
+        // (now uniform) module of their referenced nodes.
+        let effective = module_a.or(module_b);
+        if let Some(m) = effective {
+            if m != c.module {
+                return Err(LocalityViolation {
+                    constraint: ConstraintId::default(),
+                    boundary: (c.module, m),
+                });
+            }
+        }
+
+        Ok(())
+    }
+
+    fn solve(
+        &mut self,
+        dirty: &DirtySet,
+        measured: &dyn MeasuredRun,
+        dt: f32,
+    ) -> Result<LayoutSolution, SolveError> {
+        // Wave 6 simplified solver: dirty-subset scoping, text measurement,
+        // and time-step integration are deferred to the real Cassowary
+        // simplex landing in a later wave.
+        let _ = dirty;
+        let _ = measured;
+        let _ = dt;
+
+        // Pass 1 — locality gate (§5.5). The first offender aborts the solve.
+        for (idx, slot) in self.constraints.iter().enumerate() {
+            if let Some(c) = slot {
+                if let Err(violation) = self.assert_local(c) {
+                    return Err(SolveError::LocalityViolated {
+                        constraint: ConstraintId(idx as u32),
+                        boundary: violation.boundary,
+                    });
+                }
+            }
+        }
+
+        // Pass 2 — single-pass linear-equality assignment (Wave 6
+        // simplification). For each `Linear` constraint we set `a := b`:
+        // a literal RHS uses `b.value`; a facet RHS reads the previously
+        // assigned value (falling back to `b.value`). `Impulse` and
+        // `GraphLayout` kinds are accepted but skipped.
+        let mut facets: HashMap<(RenderObjectId, &'static str), f32> = HashMap::new();
+        for slot in self.constraints.iter().flatten() {
+            if slot.kind != ConstraintKind::Linear {
+                continue;
+            }
+            let b_val = match slot.b.object {
+                Some(rid) => facets
+                    .get(&(rid, slot.b.axis))
+                    .copied()
+                    .unwrap_or(slot.b.value),
+                None => slot.b.value,
+            };
+            if let Some(rid) = slot.a.object {
+                facets.insert((rid, slot.a.axis), b_val);
+            }
+        }
+
+        // Pass 3 — emit one instance transform per live node (§5.6). The
+        // solution's `module` tag is taken from the first live node so the
+        // dirty-rect scoping downstream has a stable locality tag.
+        let mut transforms = Vec::new();
+        let mut module = ModuleId::default();
+        let mut first = true;
+        for node in self.nodes.iter().flatten() {
+            if first {
+                module = node.module;
+                first = false;
+            }
+            let x = facets.get(&(node.id, "x")).copied().unwrap_or(0.0);
+            let y = facets.get(&(node.id, "y")).copied().unwrap_or(0.0);
+            transforms.push((node.id, Mat4::translated(x, y)));
+        }
+
+        Ok(LayoutSolution {
+            status: SolveStatus::Solved,
+            transforms,
+            clips: Vec::new(),
+            glyph_runs: Vec::new(),
+            module,
+        })
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a leaf [`LayoutNode`] in `module` owning render object `rid`.
+    fn node(rid: u32, module: u32) -> LayoutNode {
+        LayoutNode {
+            id: RenderObjectId(rid),
+            module: ModuleId(module),
+            measure: MeasureKind::Fixed,
+            children: Vec::new(),
+        }
+    }
+
+    /// Build a [`LayoutVar`]; `rid = None` makes a literal operand.
+    fn facet(rid: Option<u32>, axis: &'static str, value: f32) -> LayoutVar {
+        LayoutVar {
+            object: rid.map(RenderObjectId),
+            axis,
+            value,
+        }
+    }
+
+    /// `add_node` returns monotonically-increasing [`NodeId`]s starting at 0.
+    #[test]
+    fn add_node_returns_incrementing_ids() {
+        let mut solver = CassowarySolver::new();
+        let a = solver.add_node(node(0, 0));
+        let b = solver.add_node(node(1, 0));
+        let c = solver.add_node(node(2, 0));
+        assert_eq!(a, NodeId(0));
+        assert_eq!(b, NodeId(1));
+        assert_eq!(c, NodeId(2));
+    }
+
+    /// Same-module constraints pass the locality gate.
+    #[test]
+    fn assert_local_accepts_same_module() {
+        let mut solver = CassowarySolver::new();
+        solver.add_node(node(0, 0));
+        solver.add_node(node(1, 0));
+        let c = Constraint {
+            kind: ConstraintKind::Linear,
+            a: facet(Some(0), "x", 0.0),
+            b: facet(Some(1), "x", 0.0),
+            weight: 1.0,
+            module: ModuleId(0),
+        };
+        assert!(solver.assert_local(&c).is_ok());
+    }
+
+    /// Cross-module constraints are rejected at the locality gate (§5.5)
+    /// and the violation reports the boundary in `(a.module, b.module)` order.
+    #[test]
+    fn assert_local_rejects_cross_module() {
+        let mut solver = CassowarySolver::new();
+        solver.add_node(node(0, 0));
+        solver.add_node(node(1, 1));
+        let c = Constraint {
+            kind: ConstraintKind::Linear,
+            a: facet(Some(0), "x", 0.0),
+            b: facet(Some(1), "x", 0.0),
+            weight: 1.0,
+            module: ModuleId(0),
+        };
+        let err = solver
+            .assert_local(&c)
+            .expect_err("cross-module constraint must be rejected");
+        assert_eq!(err.boundary, (ModuleId(0), ModuleId(1)));
+    }
+
+    /// Nullary [`MeasuredRun`] stand-in. Wave 6 `solve` does not invoke the
+    /// measurement contract, so the `todo!()` default bodies are never hit.
+    struct NullMeasuredRun;
+    impl MeasuredRun for NullMeasuredRun {}
+
+    /// A single same-module linear constraint solves to [`SolveStatus::Solved`]
+    /// and emits one transform per live node.
+    #[test]
+    fn solve_returns_solved_for_simple_system() {
+        let mut solver = CassowarySolver::new();
+        solver.add_node(node(0, 0));
+        let cid = solver.add_constraint(Constraint {
+            kind: ConstraintKind::Linear,
+            a: facet(Some(0), "x", 0.0),
+            b: facet(None, "", 10.0),
+            weight: 1.0,
+            module: ModuleId(0),
+        });
+        // ConstraintId is also monotonically increasing and independent of NodeId.
+        assert_eq!(cid, ConstraintId(0));
+
+        let dirty = DirtySet::default();
+        let solution = solver
+            .solve(&dirty, &NullMeasuredRun, 0.016)
+            .expect("a simple same-module system must solve");
+        assert_eq!(solution.status, SolveStatus::Solved);
+        assert_eq!(solution.module, ModuleId(0));
+        assert_eq!(solution.transforms.len(), 1);
+        assert_eq!(solution.transforms[0].0, RenderObjectId(0));
+        // The linear-equality pass should have resolved x := 10 and folded
+        // it into the translation column of the instance transform.
+        assert_eq!(solution.transforms[0].1.m[12], 10.0);
+        assert_eq!(solution.transforms[0].1.m[13], 0.0);
+    }
+
+    /// A cross-module constraint surfaces from `solve` as
+    /// [`SolveError::LocalityViolated`] carrying the offending
+    /// [`ConstraintId`] and module boundary.
+    #[test]
+    fn solve_returns_locality_violated_for_cross_module() {
+        let mut solver = CassowarySolver::new();
+        solver.add_node(node(0, 0));
+        solver.add_node(node(1, 1));
+        let cid = solver.add_constraint(Constraint {
+            kind: ConstraintKind::Linear,
+            a: facet(Some(0), "x", 0.0),
+            b: facet(Some(1), "x", 0.0),
+            weight: 1.0,
+            module: ModuleId(0),
+        });
+
+        let dirty = DirtySet::default();
+        let err = solver
+            .solve(&dirty, &NullMeasuredRun, 0.016)
+            .expect_err("cross-module solve must fail");
+        match err {
+            SolveError::LocalityViolated {
+                constraint,
+                boundary,
+            } => {
+                assert_eq!(constraint, cid, "violating ConstraintId must be reported");
+                assert_eq!(boundary, (ModuleId(0), ModuleId(1)));
+            }
+            other => panic!("expected LocalityViolated, got {other:?}"),
+        }
     }
 }
