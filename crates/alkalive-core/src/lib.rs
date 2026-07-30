@@ -719,9 +719,18 @@ mod tests {
     #[test]
     fn signal_subscribe_returns_unique_nonzero_ids() {
         let signal: Signal<i32> = Signal::new();
-        let s1 = signal.subscribe(Listener { id: 1, _marker: PhantomData });
-        let s2 = signal.subscribe(Listener { id: 2, _marker: PhantomData });
-        let s3 = signal.subscribe(Listener { id: 3, _marker: PhantomData });
+        let s1 = signal.subscribe(Listener {
+            id: 1,
+            _marker: PhantomData,
+        });
+        let s2 = signal.subscribe(Listener {
+            id: 2,
+            _marker: PhantomData,
+        });
+        let s3 = signal.subscribe(Listener {
+            id: 3,
+            _marker: PhantomData,
+        });
         // Counter starts at 1; Subscription(0) is the sentinel.
         assert!(s1.0 > 0);
         assert!(s2.0 > s1.0);

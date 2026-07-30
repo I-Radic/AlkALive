@@ -687,7 +687,9 @@ impl FocusManager for FocusManagerImpl {
             self.pending_events.borrow_mut().push(FocusEvent::FocusLost);
         }
         self.current_focus = Some(target);
-        self.pending_events.borrow_mut().push(FocusEvent::FocusGained);
+        self.pending_events
+            .borrow_mut()
+            .push(FocusEvent::FocusGained);
     }
 
     fn current_focus(&self) -> Option<Handle<RenderObject>> {
@@ -759,10 +761,7 @@ mod tests {
         let mut tester = HitTesterImpl::new();
         let a = h(1);
         let b = h(2);
-        tester.set_objects(&[
-            (a, 0.0, 0.0, 10.0, 10.0),
-            (b, 20.0, 20.0, 10.0, 10.0),
-        ]);
+        tester.set_objects(&[(a, 0.0, 0.0, 10.0, 10.0), (b, 20.0, 20.0, 10.0, 10.0)]);
 
         // Inside a only.
         let hits = tester.hit_test(Vec2(5.0, 5.0), DeviceKind::Pointer);
@@ -797,10 +796,7 @@ mod tests {
         let bottom = h(1);
         let top = h(2);
         // Overlapping rects; `top` is inserted later (higher depth).
-        tester.set_objects(&[
-            (bottom, 0.0, 0.0, 10.0, 10.0),
-            (top, 0.0, 0.0, 10.0, 10.0),
-        ]);
+        tester.set_objects(&[(bottom, 0.0, 0.0, 10.0, 10.0), (top, 0.0, 0.0, 10.0, 10.0)]);
         let hits = tester.hit_test(Vec2(5.0, 5.0), DeviceKind::Pointer);
         assert_eq!(hits.len(), 2);
         // Topmost (highest depth) first.
@@ -979,7 +975,8 @@ mod tests {
         // `GestureOutcome::Grab` holds a `Box<dyn GrabHandle>`, so the
         // trait must remain object-safe. Exercise that path directly.
         let owner = h(9);
-        let boxed: Box<dyn GrabHandle> = Box::new(SimpleGrabHandle::new(owner, DeviceKind::Pointer, 0));
+        let boxed: Box<dyn GrabHandle> =
+            Box::new(SimpleGrabHandle::new(owner, DeviceKind::Pointer, 0));
         assert!(boxed.is_active());
         assert_eq!(boxed.owner(), owner);
         assert_eq!(boxed.device(), DeviceKind::Pointer);

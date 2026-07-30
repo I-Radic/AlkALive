@@ -21,6 +21,8 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub use alkalive_core::ModuleId;
+
 use core::fmt;
 
 // ============================================================================
@@ -50,10 +52,6 @@ pub struct SerialisableSceneGraph(());
 /// Local placeholder for the runtime's `Scene` handle.
 #[derive(Debug, Clone)]
 pub struct Scene(());
-
-/// Local placeholder for the core crate's `ModuleId`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ModuleId(());
 
 /// Local placeholder for the input crate's `InputEvent`.
 #[derive(Debug, Clone)]

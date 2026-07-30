@@ -20,6 +20,8 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub use alkalive_core::ModuleId;
+
 use core::ops::Range;
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -46,17 +48,6 @@ pub struct AttachmentId {
 /// Opaque identifier for a draw call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DrawCallId {
-    /// Opaque identifier value.
-    pub value: u64,
-}
-
-/// Module identifier; mirrors `alkalive_core::ModuleId`.
-///
-/// A local copy is kept so this crate compiles standalone under the Wave 3
-/// "no external deps" rule; it will be replaced by a re-export once the
-/// cross-crate dependency is wired in Wave 5.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ModuleId {
     /// Opaque identifier value.
     pub value: u64,
 }
@@ -398,8 +389,22 @@ pub trait Backend {
 // ===========================================================================
 
 /// A merged, reordered, batched, barrier-inserted graph (§4.3).
+///
+/// Wave B populates `sorted_passes`, `pass_count`, and `draw_call_count` from
+/// the merge + topological-sort result so downstream code no longer has to
+/// discard the merged data. Draw-call batching by `(pipeline,
+/// bind_group_topology)`, barrier insertion at lifetime boundaries, and the
+/// occlusion-cull pass against `dirty`/`depth` remain W5-T2/W5-T3 follow-ups
+/// that extend — not replace — these fields.
 #[derive(Debug, Clone, Default)]
-pub struct CompiledGraph;
+pub struct CompiledGraph {
+    /// Merged and topologically-sorted pass IDs.
+    pub sorted_passes: Vec<PassId>,
+    /// Total number of merged passes.
+    pub pass_count: usize,
+    /// Total number of merged draw calls.
+    pub draw_call_count: usize,
+}
 
 /// A compiled frame ready for occlusion culling (§3.6).
 #[derive(Debug, Clone, Default)]
@@ -503,9 +508,16 @@ pub fn compile(
         .filter(|&i| in_degree[i] == 0)
         .collect();
 
+    // `sorted_passes` is the topologically-sorted output of Kahn's algorithm:
+    // each pass is appended exactly once when it is dequeued. Declaration order
+    // among independent passes is preserved because zero-in-degree seeds are
+    // enqueued in index order and successors are appended in edge-encounter
+    // order.
+    let mut sorted_passes: Vec<PassId> = Vec::with_capacity(merged_passes.len());
     let mut visited: usize = 0;
     while let Some(i) = queue.pop_front() {
         visited += 1;
+        sorted_passes.push(merged_passes[i].id);
         for to in &adj[i] {
             if let Some(&ti) = index_of.get(to) {
                 in_degree[ti] -= 1;
@@ -522,15 +534,20 @@ pub fn compile(
         return Err(CompileError::BarrierCycle);
     }
 
-    // The merged, topologically-validated graph is the compiler's output.
-    // Wave 5 keeps `CompiledGraph` as a unit struct; batching, barrier
-    // insertion, and the occlusion-cull pass (W5-T2/T3) will populate it in a
-    // follow-up without changing the public signature. The merge result is
-    // retained here for validation; `_merged_draw_calls` is collected so the
-    // batcher has a stable handoff point in the next task.
-    let _ = (merged_passes, merged_attachments, merged_draw_calls, merged_edges);
-
-    Ok(CompiledGraph)
+    // The merged, topologically-validated graph is the compiler's output. Wave
+    // B populates `CompiledGraph` with the topologically-sorted pass IDs, the
+    // total merged pass count, and the total merged draw-call count so
+    // downstream consumers (the batcher, the encoder) receive a stable handoff.
+    // Draw-call batching by `(pipeline, bind_group_topology)`, barrier insertion
+    // at lifetime boundaries, and the occlusion-cull pass (W5-T2/T3) extend
+    // these fields in a follow-up without changing the public signature.
+    // (`merged_attachments` and `merged_edges` are consumed above by the
+    // attachment-lifetime and edge-validation passes.)
+    Ok(CompiledGraph {
+        sorted_passes,
+        pass_count: merged_passes.len(),
+        draw_call_count: merged_draw_calls.len(),
+    })
 }
 
 // ===========================================================================
@@ -817,7 +834,7 @@ mod tests {
         PipelineHandle { value: v }
     }
     fn mid(v: u64) -> ModuleId {
-        ModuleId { value: v }
+        ModuleId(v)
     }
 
     /// Minimal render pass with no attachments and no draw calls.
@@ -881,6 +898,18 @@ mod tests {
     fn compile_empty_input_ok() {
         let result = compile(&[], &[], &DepthBuffer);
         assert!(result.is_ok(), "empty graph slice must compile to Ok");
+        // An empty input must yield a zero-populated CompiledGraph: no sorted
+        // passes, zero pass count, zero draw calls.
+        let cg = result.unwrap();
+        assert!(
+            cg.sorted_passes.is_empty(),
+            "empty input must yield no sorted passes"
+        );
+        assert_eq!(cg.pass_count, 0, "empty input must yield pass_count == 0");
+        assert_eq!(
+            cg.draw_call_count, 0,
+            "empty input must yield draw_call_count == 0"
+        );
     }
 
     // --- compile(): two graphs merged → Ok -------------------------------------
@@ -893,7 +922,77 @@ mod tests {
         let g2 = graph(vec![bare_pass(2)], vec![], vec![(pid(1), pid(2))], mid(1));
 
         let result = compile(&[g1, g2], &[], &DepthBuffer);
-        assert!(result.is_ok(), "two merged graphs with a cross-graph edge must compile");
+        assert!(
+            result.is_ok(),
+            "two merged graphs with a cross-graph edge must compile"
+        );
+    }
+
+    // --- compile(): non-empty input populates CompiledGraph (Wave B) -----------
+
+    #[test]
+    fn compile_populates_compiled_graph_for_non_empty_input() {
+        // Two passes with a barrier 1 → 2 and one draw call carried by the
+        // first graph. The merged `CompiledGraph` must surface:
+        //   * a non-zero `pass_count` equal to the merged pass count,
+        //   * a non-zero `draw_call_count` equal to the merged draw-call count,
+        //   * a `sorted_passes` of the same length as `pass_count`, in an order
+        //     that respects the barrier edge (pass 1 before pass 2).
+        let dc = DrawCall {
+            pipeline: ph(5),
+            vertices: VertexBinding,
+            indices: None,
+            bindings: Box::new([]),
+            instances: 0..1,
+            scissor: None,
+        };
+        let g1 = RenderGraph {
+            passes: Box::new([bare_pass(1), bare_pass(2)]),
+            attachments: Box::new([]),
+            draw_calls: Box::new([dc]),
+            occlusion_cull: OcclusionCullPass,
+            edges: Box::new([(pid(1), pid(2))]),
+            source_module: mid(0),
+        };
+
+        let result = compile(&[g1], &[], &DepthBuffer);
+        assert!(
+            result.is_ok(),
+            "non-empty graph with a valid edge must compile"
+        );
+        let cg = result.unwrap();
+
+        assert_eq!(
+            cg.pass_count, 2,
+            "pass_count must equal the merged pass count"
+        );
+        assert_eq!(
+            cg.draw_call_count, 1,
+            "draw_call_count must equal the merged draw-call count"
+        );
+        assert_eq!(
+            cg.sorted_passes.len(),
+            cg.pass_count,
+            "sorted_passes length must equal pass_count"
+        );
+
+        // Topological order must respect the 1 → 2 barrier edge: pass 1 must
+        // appear before pass 2 in `sorted_passes`.
+        let pos1 = cg
+            .sorted_passes
+            .iter()
+            .position(|p| *p == pid(1))
+            .expect("pass 1 must appear in sorted_passes");
+        let pos2 = cg
+            .sorted_passes
+            .iter()
+            .position(|p| *p == pid(2))
+            .expect("pass 2 must appear in sorted_passes");
+        assert!(
+            pos1 < pos2,
+            "barrier edge 1 -> 2 must be respected: got sorted_passes = {:?}",
+            cg.sorted_passes
+        );
     }
 
     // --- compile(): barrier cycle → Err(BarrierCycle) --------------------------
@@ -1015,8 +1114,16 @@ mod tests {
         let a = PassBuilder::default().finish();
         let b = PassBuilder::default().finish();
         let c = PassBuilder::default().finish();
-        assert_eq!(b.value, a.value + 1, "second finish must be exactly one past the first");
-        assert_eq!(c.value, b.value + 1, "third finish must be exactly one past the second");
+        assert_eq!(
+            b.value,
+            a.value + 1,
+            "second finish must be exactly one past the first"
+        );
+        assert_eq!(
+            c.value,
+            b.value + 1,
+            "third finish must be exactly one past the second"
+        );
     }
 
     // --- PassBuilder: records pipeline + draws ---------------------------------
@@ -1024,16 +1131,25 @@ mod tests {
     #[test]
     fn pass_builder_records_pipeline_and_draws() {
         let mut builder = PassBuilder::default();
-        builder
-            .bind_pipeline(ph(42))
-            .draw(0..10)
-            .draw(10..20);
+        builder.bind_pipeline(ph(42)).draw(0..10).draw(10..20);
 
         // Private fields are visible to this child test module.
-        assert_eq!(builder.pipeline, Some(ph(42)), "bound pipeline must be stored");
+        assert_eq!(
+            builder.pipeline,
+            Some(ph(42)),
+            "bound pipeline must be stored"
+        );
         assert_eq!(builder.draws.len(), 2, "both draw ranges must be recorded");
-        assert_eq!(builder.draws[0], 0..10, "first draw range preserved in order");
-        assert_eq!(builder.draws[1], 10..20, "second draw range preserved in order");
+        assert_eq!(
+            builder.draws[0],
+            0..10,
+            "first draw range preserved in order"
+        );
+        assert_eq!(
+            builder.draws[1],
+            10..20,
+            "second draw range preserved in order"
+        );
 
         // finish consumes the builder and still yields a valid id.
         let id = builder.finish();

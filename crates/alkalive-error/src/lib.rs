@@ -18,6 +18,8 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub use alkalive_core::ModuleId;
+
 use core::sync::atomic::{AtomicU64, Ordering};
 
 // ============================================================================
@@ -250,12 +252,6 @@ pub struct SlotId(pub u64);
 /// Name of a slot — the string key under which a child is mounted.
 #[derive(Debug, Clone)]
 pub struct SlotName(());
-
-/// Identifier of a module on the render-object tree (ADR 007).
-///
-/// Local placeholder; the core crate will supply the canonical definition.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ModuleId(pub u64);
 
 /// Typed failure delivered to a parent slot when a child subtree is torn
 /// down (§13.3). Carries the slot, the [`AlkALiveError`], the dirty-rect
@@ -696,9 +692,7 @@ mod tests {
             AlkALiveError::Rendering(RenderError::DeviceLost(detail)) => {
                 assert!(detail.is_empty(), "expected empty detail, got {detail:?}");
             }
-            other => panic!(
-                "expected Rendering(DeviceLost(_)), got {other:?}"
-            ),
+            other => panic!("expected Rendering(DeviceLost(_)), got {other:?}"),
         }
     }
 

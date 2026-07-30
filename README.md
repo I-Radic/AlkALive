@@ -15,10 +15,13 @@ AlkALive is an exploratory project investigating a **custom, module- and object-
 | `docs/adr/Decision_Alternatives_*.md` | **Decision Alternatives** — four resolved decision points (text rendering, concurrency/scheduling, accessibility bridge, adoption/interop), superseded by ADRs 019–022 and retained for historical context. |
 | `docs/adr/Spec_Tradeoff_Note_IME.md` | **IME Trade-off Note** — open dependency: IME composition-event acquisition conflicts with ADR 020's metadata-only DOM rule. Three candidate approaches with a recommended resolution. |
 | `IMPLEMENTATION_PLAN.md` | **Implementation Plan** — 12-wave decomposition with granular tasks, DoD criteria per wave, ADR traceability matrix, and risk register. |
+| `TODO_RESOLUTION_PLAN.md` | **TODO Resolution Plan** — wave-by-wave plan that eliminated all 47 `todo!()` calls (trait defaults → required methods + concrete stub/mock implementations), yielding a fully compilable, testable codebase. |
+| `GAP_ANALYSIS.md` | **Gap Analysis** — audit of the 13-crate codebase against the spec/ADRs (41 gaps: 5 Critical, 14 High, 18 Medium, 4 Low), each with spec/ADR references and remediation actions. |
+| `GAP_IMPLEMENTATION_PLAN.md` | **Gap Implementation Plan** — implementation waves (A–…) derived from the Gap Analysis, resolving all Critical/High/Medium gaps with Definition-of-Done criteria per wave. |
 | `Cargo.toml` | **Rust workspace** — 13 crates (`alkalive-{core,runtime,render,layout,text,style,input,dom,a11y,ipc,perf,error,test}`), edition 2021, wasm-release profile. |
 | `rust-toolchain.toml` | **Toolchain pin** — Rust 1.97.1 + wasm32-unknown-unknown + clippy + rustfmt. |
-| `deny.toml` | **cargo-deny** — enforces ADR 018 (capability-scoped imports; no registry deps outside allowlist). |
-| `crates/` | **Crate source** — Wave 3 trait definitions (signatures locked against spec; bodies = `todo!()`). 4,288 lines across 13 crates. |
+| `deny.toml` | **cargo-deny** — enforces ADR 018 (capability-scoped imports; no external registry deps by default — the 13 workspace crates are auto-allowed, every other crate is denied unless explicitly allowlisted). |
+| `crates/` | **Crate source** — real implementations (no `todo!()` remaining). 8,272 lines and 125 tests across 13 crates. |
 
 ## The catalog
 

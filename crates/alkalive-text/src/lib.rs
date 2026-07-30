@@ -30,16 +30,11 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub use alkalive_core::ModuleId;
+
 // ============================================================================
 // Forward-declared cross-crate placeholders
 // ============================================================================
-
-/// Placeholder for the layout crate's `ModuleId` (ADR 002).
-///
-/// Opaque in the text crate: `GlyphAtlas::invalidate` receives it from the
-/// layout side; the rendering-ABI ADR (§4.7) will unify the concrete type.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
-pub struct ModuleId(pub u32);
 
 /// Placeholder for the layout crate's `DirtyRect` (§4.4 / §5.5).
 ///
@@ -854,7 +849,7 @@ mod tests {
         assert_eq!(slot.bearing, (0.0, 0.0));
         assert_eq!(slot.size, (0.0, 0.0));
         assert_eq!(atlas.slot(GlyphKey::default()), None);
-        atlas.invalidate(ModuleId::default(), DirtyRect);
+        atlas.invalidate(ModuleId(0), DirtyRect);
         assert_eq!(
             atlas.evict_lru(&PinSet::default()),
             EvictionStats::default()

@@ -8,3 +8,6 @@ description = "AlkALive alkalive-text crate"
 
 [lib]
 path = "src/lib.rs"
+
+[dependencies]
+alkalive-core = { workspace = true }

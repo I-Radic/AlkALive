@@ -148,11 +148,7 @@ pub trait DomBridge: NavigationContract {
     fn set_meta(&mut self, name: String, content: String) -> Result<(), DomError>;
 
     /// Serve a static HTML snapshot for `route` + `state` (§9.4).
-    fn serve_snapshot(
-        &mut self,
-        route: Route,
-        state: SerialisableState,
-    ) -> Result<Html, DomError>;
+    fn serve_snapshot(&mut self, route: Route, state: SerialisableState) -> Result<Html, DomError>;
 
     // NOTE: `declare_routes` and `serialize_state` are inherited from
     // `NavigationContract`. The DomBridge method set is EXACTLY the five
@@ -233,11 +229,7 @@ impl DomBridge for DomBridgeImpl {
         Ok(())
     }
 
-    fn serve_snapshot(
-        &mut self,
-        route: Route,
-        state: SerialisableState,
-    ) -> Result<Html, DomError> {
+    fn serve_snapshot(&mut self, route: Route, state: SerialisableState) -> Result<Html, DomError> {
         // Build a minimal crawler-grade HTML document from stored SEO
         // metadata. State bytes are not interpreted in Wave 9 — the
         // payload is consumed here so later waves can fold it into the
@@ -318,15 +310,15 @@ mod tests {
             )
             .unwrap();
         bridge
-            .set_meta(
-                "viewport".to_string(),
-                "width=device-width".to_string(),
-            )
+            .set_meta("viewport".to_string(), "width=device-width".to_string())
             .unwrap();
         assert_eq!(
             bridge.meta(),
             &[
-                ("description".to_string(), "GPU-resident UI runtime".to_string()),
+                (
+                    "description".to_string(),
+                    "GPU-resident UI runtime".to_string()
+                ),
                 ("viewport".to_string(), "width=device-width".to_string()),
             ][..]
         );
@@ -338,20 +330,35 @@ mod tests {
         let mut bridge = DomBridgeImpl::new();
         assert!(bridge.routes().is_empty());
         let routes = vec![
-            Route { path: "/".to_string(), name: Some("root".to_string()) },
-            Route { path: "/about".to_string(), name: None },
+            Route {
+                path: "/".to_string(),
+                name: Some("root".to_string()),
+            },
+            Route {
+                path: "/about".to_string(),
+                name: None,
+            },
         ];
         bridge.declare_routes(routes).unwrap();
         assert_eq!(
             bridge.routes(),
             &[
-                Route { path: "/".to_string(), name: Some("root".to_string()) },
-                Route { path: "/about".to_string(), name: None },
+                Route {
+                    path: "/".to_string(),
+                    name: Some("root".to_string())
+                },
+                Route {
+                    path: "/about".to_string(),
+                    name: None
+                },
             ][..]
         );
         // Replaces (not appends) the previous table.
         bridge
-            .declare_routes(vec![Route { path: "/".to_string(), name: None }])
+            .declare_routes(vec![Route {
+                path: "/".to_string(),
+                name: None,
+            }])
             .unwrap();
         assert_eq!(bridge.routes().len(), 1);
     }
@@ -374,7 +381,10 @@ mod tests {
             .set_meta("description".to_string(), "Snapshot test".to_string())
             .unwrap();
 
-        let route = Route { path: "/".to_string(), name: Some("root".to_string()) };
+        let route = Route {
+            path: "/".to_string(),
+            name: Some("root".to_string()),
+        };
         let state = SerialisableState { bytes: vec![] };
         let html = bridge.serve_snapshot(route, state).unwrap();
 
@@ -407,7 +417,10 @@ mod tests {
         // 3. serve_snapshot
         let html = bridge
             .serve_snapshot(
-                Route { path: "/".to_string(), name: None },
+                Route {
+                    path: "/".to_string(),
+                    name: None,
+                },
                 SerialisableState { bytes: vec![] },
             )
             .unwrap();
@@ -415,7 +428,10 @@ mod tests {
 
         // 4. declare_routes (inherited from NavigationContract)
         bridge
-            .declare_routes(vec![Route { path: "/".to_string(), name: None }])
+            .declare_routes(vec![Route {
+                path: "/".to_string(),
+                name: None,
+            }])
             .unwrap();
         assert_eq!(bridge.routes().len(), 1);
 

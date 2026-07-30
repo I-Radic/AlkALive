@@ -23,6 +23,8 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub use alkalive_core::ModuleId;
+
 use std::collections::HashMap;
 
 // ============================================================================
@@ -40,10 +42,6 @@ pub struct RenderObjectId(pub u32);
 /// Stable handle for a constraint registered with the solver (§5.3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub struct ConstraintId(pub u32);
-
-/// Module ownership tag (ADR 002) used to enforce layout locality (§5.5).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
-pub struct ModuleId(pub u32);
 
 /// Stable handle for a text run submitted for measurement (§5.4).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
@@ -305,7 +303,7 @@ pub struct DirtySet {
 // ============================================================================
 
 /// A Unicode text run submitted for synchronous measurement (§5.4).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct TextRun {
     /// Stable run identifier (mirrors [`SolveError::MeasurementFailed::run`]).
     pub id: TextRunId,
@@ -664,7 +662,7 @@ impl LayoutSolver for CassowarySolver {
         // solution's `module` tag is taken from the first live node so the
         // dirty-rect scoping downstream has a stable locality tag.
         let mut transforms = Vec::new();
-        let mut module = ModuleId::default();
+        let mut module = ModuleId(0);
         let mut first = true;
         for node in self.nodes.iter().flatten() {
             if first {
@@ -698,7 +696,7 @@ mod tests {
     fn node(rid: u32, module: u32) -> LayoutNode {
         LayoutNode {
             id: RenderObjectId(rid),
-            module: ModuleId(module),
+            module: ModuleId(module as u64),
             measure: MeasureKind::Fixed,
             children: Vec::new(),
         }

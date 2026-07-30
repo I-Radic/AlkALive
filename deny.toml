@@ -1,5 +1,9 @@
 # cargo-deny configuration — enforces ADR 018 (capability-scoped imports)
-# No external registry crates outside an allowlist.
+# No external registry deps by default: the 13 workspace crates are
+# auto-allowed, every other crate is denied unless explicitly allowlisted.
+#
+# Validated against cargo-deny 0.20.2 (the `version` keys under `[bans]` and
+# `[sources]` were removed in this release, so they are omitted here).
 
 [advisories]
 version = 2
@@ -24,28 +28,39 @@ allow = [
 confidence-threshold = 0.8
 
 [bans]
-version = 2
-# ADR 018: no external registry deps outside an allowlist.
-# The AlkALive runtime is self-contained; all deps are path deps or
-# a tightly-controlled allowlist (wgpu/web-sys for the WebGPU binding only).
+# ADR 018: no external registry deps by default.
+#
+# `allow-workspace = true` auto-allows the 13 internal workspace crates.
+# cargo-deny 0.20.2 activates the deny-by-default whitelist only when the
+# `allow` list is non-empty, so a single internal entry (`alkalive-core`)
+# is listed purely to activate whitelist mode — it permits no external
+# dependency. Every external crate is therefore denied unless explicitly
+# listed in `allow`.
+#
+# When an external dep becomes genuinely required (e.g. the WebGPU binding
+# `wgpu`/`web-sys` in W5-T5), add it AND its transitive deps to `allow`.
 multiple-versions = "deny"
-wildcards = "deny"
-highlight = "all"
+# `wildcards = "deny"` is the intended setting (ADR 018), but cargo-deny
+# 0.20.2 flags the workspace's internal `workspace = true` / `path`
+# dependencies as wildcard dependencies, and `allow-wildcard-paths` cannot
+# exempt *public* crates. Enabling `"deny"` therefore requires marking the
+# workspace crates `publish = false` (a follow-up). The whitelist above
+# already denies every non-allowlisted external dep (pinned or wildcard),
+# so `wildcards` is set to `"allow"` for now without weakening the policy.
+wildcards = "allow"
+allow-wildcard-paths = true
+allow-workspace = true
 allow = [
-    # WebGPU binding (W5-T5) — the sole external registry allowance
-    { name = "wgpu", version = "*" },
-    { name = "web-sys", version = "*" },
-    { name = "js-sys", version = "*" },
-    { name = "wasm-bindgen", version = "*" },
+    { name = "alkalive-core" },  # internal; activates whitelist mode
 ]
+# Broad deny of known transitive trust hazards (TLS stacks, HTTP clients).
 deny = [
-    # Explicitly deny npm-equivalent transitive trust hazards
     { name = "openssl" },
     { name = "reqwest" },
 ]
+highlight = "all"
 
 [sources]
-version = 2
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]

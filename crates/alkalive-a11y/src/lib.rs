@@ -168,7 +168,9 @@ pub trait A11yExtensionPoint {
     ///
     /// Stub: returns an empty [`TextLabel`] — no text exposed this phase.
     fn expose_a11y_text(&self, _run: &ShapedGlyphRun) -> TextLabel {
-        TextLabel { text: String::new() }
+        TextLabel {
+            text: String::new(),
+        }
     }
     /// Read focus state — future reader of the ADR 011 annotation layer.
     ///
