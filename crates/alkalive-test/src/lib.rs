@@ -5,7 +5,13 @@
 //! and ADR 016 (split determinism — WASM-sandboxed layout +
 //! software-rasteriser fallback).
 //!
-//! Wave 3 skeleton: signatures only; every body is `todo!()`.
+//! Wave 11: concrete implementations of [`MockBackend`] ([`MockBackendImpl`]),
+//! [`MockTextStack`] ([`MockTextStackImpl`]), [`SoftwareBackend`]
+//! ([`SoftwareBackendImpl`]), and [`TestHarness`] ([`SimpleTestHarness`]) land
+//! here as self-contained, GPU-free stubs. [`ComponentTest`] and
+//! [`TracePlayer`] remain trait skeletons awaiting cross-crate runtime
+//! integration (ADR 007 owned state + ADR 016 unified trace).
+//!
 //! The test surface is contract-shaped, not selector-shaped: no DOM, no
 //! headless browser, no GPU required. No cross-crate dependencies; types
 //! referenced from other sections (`Backend`, `TextStack`, `RenderGraphIR`,
@@ -252,6 +258,10 @@ pub trait SoftwareBackend: fmt::Debug {
 /// assertions: a test mounts a module with typed props and a slot map,
 /// drives it with typed [`InputEvent`]s, and asserts on typed
 /// [`OutputEvent`]s and [`SlotValue`]s.
+///
+/// Wave 11: this trait remains a skeleton. Its methods require the
+/// cross-crate runtime (ADR 007 owned state, ADR 014 typed component
+/// registry) to implement; bodies are intentionally unimplemented here.
 pub trait ComponentTest {
     /// Mount `module` with `props` and `slots`; returns an [`ActiveHandle`].
     fn mount(&mut self, module: ModuleId, props: TypedProps, slots: SlotMap) -> ActiveHandle;
@@ -269,6 +279,10 @@ pub trait ComponentTest {
 /// frames must match recorded frames byte-for-byte, else the harness returns
 /// [`SnapshotError::TraceGap`] wrapped in [`StepResult::Gap`] or
 /// [`TestResult::Inconclusive`].
+///
+/// Wave 11: this trait remains a skeleton. Its methods require the
+/// cross-crate unified-trace store (ADR 016) to implement; bodies are
+/// intentionally unimplemented here.
 pub trait TracePlayer {
     /// Load `trace` into the player.
     fn load(&mut self, trace: &UnifiedTrace) -> Result<(), TraceError>;
@@ -299,4 +313,276 @@ pub trait TestHarness {
     fn assert_frame(&self, snap: &SceneSnapshot, expected: &Frame) -> TestResult;
     /// Replay `trace` tick-by-tick; returns the aggregated result.
     fn replay(&self, trace: &UnifiedTrace) -> TestResult;
+}
+
+// ============================================================================
+// Concrete implementations (Wave 11)
+// ============================================================================
+
+/// Concrete [`MockBackend`] recording every submitted render graph into an
+/// in-memory log.
+///
+/// The [`RenderGraphIR`] is opaque in this self-contained crate, so each
+/// [`MockBackend::record_submit`] appends one placeholder [`DrawCall`] to
+/// the draw log (standing in for "one pass") and the submitted IR itself to
+/// `submitted_irs`. [`MockBackend::assert_pass_count`] then compares the
+/// number of recorded submissions against the expected pass count.
+#[derive(Debug, Clone, Default)]
+pub struct MockBackendImpl {
+    /// Recorded draw-call placeholders (one per submit).
+    draw_log: Vec<DrawCall>,
+    /// Recorded render-graph submissions.
+    submitted_irs: Vec<RenderGraphIR>,
+}
+
+impl MockBackendImpl {
+    /// Construct an empty mock backend.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl MockBackend for MockBackendImpl {
+    fn record_submit(&mut self, ir: &RenderGraphIR) {
+        // The IR is opaque in this crate; record the submission and push a
+        // single placeholder DrawCall standing in for the pass count.
+        self.submitted_irs.push(ir.clone());
+        self.draw_log.push(DrawCall(()));
+    }
+
+    fn draw_log(&self) -> &[DrawCall] {
+        &self.draw_log
+    }
+
+    fn assert_pass_count(&self, expected: usize) -> TestResult {
+        let actual = self.submitted_irs.len();
+        if actual == expected {
+            TestResult::Pass
+        } else {
+            TestResult::Fail(FailureReport {
+                summary: format!("expected {} got {}", expected, actual),
+                tick: None,
+                snapshot: None,
+            })
+        }
+    }
+}
+
+/// Concrete [`MockTextStack`] backed by an in-memory fixture table.
+///
+/// [`MockTextStack::install_fixture`] appends to `fixtures`; produced runs
+/// accumulate in `shaped_runs` for later inspection via
+/// [`MockTextStack::shaped_runs`].
+#[derive(Debug, Clone, Default)]
+pub struct MockTextStackImpl {
+    /// Installed `(text, run)` fixtures.
+    fixtures: Vec<(String, ShapedRun)>,
+    /// Shaped runs produced so far.
+    shaped_runs: Vec<ShapedRun>,
+}
+
+impl MockTextStackImpl {
+    /// Construct an empty mock text stack.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl MockTextStack for MockTextStackImpl {
+    fn install_fixture(&mut self, text: &str, run: ShapedRun) {
+        self.fixtures.push((text.to_owned(), run));
+    }
+
+    fn shaped_runs(&self) -> &[ShapedRun] {
+        &self.shaped_runs
+    }
+}
+
+/// Concrete [`SoftwareBackend`] — a no-op software rasteriser stub.
+///
+/// [`SoftwareBackend::rasterize`] returns an empty [`Frame`] and
+/// [`SoftwareBackend::raster_class`] reports [`RasterClass::Software`],
+/// matching the CI determinism path of record (ADR 016). A real
+/// byte-identical software rasteriser will replace this stub when the
+/// render crate lands.
+#[derive(Debug, Clone, Default)]
+pub struct SoftwareBackendImpl;
+
+impl SoftwareBackendImpl {
+    /// Construct a software backend stub.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl SoftwareBackend for SoftwareBackendImpl {
+    fn rasterize(&mut self, _ir: &RenderGraphIR) -> Frame {
+        // No-op stub: real software rasterisation lands with the render crate.
+        Frame(())
+    }
+
+    fn raster_class(&self) -> RasterClass {
+        RasterClass::Software
+    }
+}
+
+/// Concrete [`TestHarness`] wiring a [`MockBackendImpl`], [`MockTextStackImpl`],
+/// and [`SoftwareBackendImpl`] together so a single tick produces a
+/// deterministic [`Frame`] without touching the GPU (§14.4).
+///
+/// All harness operations are stubs: [`TestHarness::snapshot`] returns a
+/// fixed [`SceneSnapshot`], [`TestHarness::tick`] returns an empty [`Frame`],
+/// and [`TestHarness::assert_frame`] / [`TestHarness::replay`] report
+/// [`TestResult::Pass`]. The composed components are accessible via
+/// [`TestHarness::backend`], [`TestHarness::text`], and [`TestHarness::raster`].
+#[derive(Debug, Clone, Default)]
+pub struct SimpleTestHarness {
+    /// Composed mock backend.
+    backend: MockBackendImpl,
+    /// Composed mock text stack.
+    text: MockTextStackImpl,
+    /// Composed software rasteriser.
+    raster: SoftwareBackendImpl,
+}
+
+impl SimpleTestHarness {
+    /// Construct a harness with fresh mock/software components.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl TestHarness for SimpleTestHarness {
+    fn backend(&self) -> &dyn MockBackend {
+        &self.backend
+    }
+
+    fn text(&self) -> &dyn MockTextStack {
+        &self.text
+    }
+
+    fn raster(&self) -> &dyn SoftwareBackend {
+        &self.raster
+    }
+
+    fn snapshot(&self, _scene: &Scene) -> SceneSnapshot {
+        // Stub snapshot: real serialisation requires ADR 007 owned state.
+        SceneSnapshot {
+            id: SnapshotId(()),
+            scene_graph: SerialisableSceneGraph(()),
+            inputs: vec![],
+            text_fixtures: TextFixtureTable(()),
+            raster_class: RasterClass::Software,
+            fingerprint: 0,
+        }
+    }
+
+    fn tick(&self, _snap: &SceneSnapshot) -> Frame {
+        // Stub tick: real ticking drives the SoftwareBackend against the snap.
+        Frame(())
+    }
+
+    fn assert_frame(&self, _snap: &SceneSnapshot, _expected: &Frame) -> TestResult {
+        // Stub assertion: real frame diff lands with the render crate.
+        TestResult::Pass
+    }
+
+    fn replay(&self, _trace: &UnifiedTrace) -> TestResult {
+        // Stub replay: real replay drives a TracePlayer across the harness.
+        TestResult::Pass
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mock_backend_record_submit_and_assert_pass_count_pass() {
+        let mut backend = MockBackendImpl::new();
+        assert_eq!(backend.draw_log().len(), 0);
+
+        backend.record_submit(&RenderGraphIR(()));
+        backend.record_submit(&RenderGraphIR(()));
+
+        // One placeholder DrawCall is appended per submit.
+        assert_eq!(backend.draw_log().len(), 2);
+        assert!(matches!(backend.assert_pass_count(2), TestResult::Pass));
+    }
+
+    #[test]
+    fn mock_backend_assert_pass_count_fail() {
+        let mut backend = MockBackendImpl::new();
+        backend.record_submit(&RenderGraphIR(()));
+
+        match backend.assert_pass_count(2) {
+            TestResult::Fail(report) => {
+                assert_eq!(report.summary, "expected 2 got 1");
+                assert!(report.tick.is_none());
+                assert!(report.snapshot.is_none());
+            }
+            other => panic!("expected TestResult::Fail, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn mock_text_stack_install_fixture_and_shaped_runs() {
+        let mut text = MockTextStackImpl::new();
+        assert!(text.shaped_runs().is_empty());
+
+        text.install_fixture("hello", ShapedRun(()));
+        text.install_fixture("world", ShapedRun(()));
+
+        // Fixtures accumulate; shaped_runs are untouched by install_fixture.
+        assert_eq!(text.fixtures.len(), 2);
+        assert_eq!(text.fixtures[0].0, "hello");
+        assert_eq!(text.fixtures[1].0, "world");
+        assert!(text.shaped_runs().is_empty());
+    }
+
+    #[test]
+    fn software_backend_raster_class_is_software() {
+        let mut raster = SoftwareBackendImpl::new();
+        assert_eq!(raster.raster_class(), RasterClass::Software);
+        // rasterize is a no-op stub but must not panic and must yield a Frame.
+        let _frame: Frame = raster.rasterize(&RenderGraphIR(()));
+    }
+
+    #[test]
+    fn simple_test_harness_snapshot_returns_valid_snapshot() {
+        let harness = SimpleTestHarness::new();
+        let snap = harness.snapshot(&Scene(()));
+        assert_eq!(snap.raster_class, RasterClass::Software);
+        assert_eq!(snap.fingerprint, 0);
+        assert!(snap.inputs.is_empty());
+    }
+
+    #[test]
+    fn simple_test_harness_tick_returns_frame() {
+        let harness = SimpleTestHarness::new();
+        let snap = harness.snapshot(&Scene(()));
+        let _frame = harness.tick(&snap);
+        // assert_frame and replay are no-op passes in the stub.
+        assert!(matches!(
+            harness.assert_frame(&snap, &Frame(())),
+            TestResult::Pass
+        ));
+        assert!(matches!(
+            harness.replay(&UnifiedTrace(())),
+            TestResult::Pass
+        ));
+    }
+
+    #[test]
+    fn simple_test_harness_accessors_return_composed_components() {
+        let harness = SimpleTestHarness::new();
+        // Trait-object accessors route to the composed mock/software impls.
+        assert!(harness.backend().draw_log().is_empty());
+        assert!(harness.text().shaped_runs().is_empty());
+        assert_eq!(harness.raster().raster_class(), RasterClass::Software);
+    }
 }

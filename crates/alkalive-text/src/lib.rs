@@ -574,3 +574,214 @@ pub trait TextStack: TextShaper + EditingOps {
         todo!()
     }
 }
+
+// ============================================================================
+// Wave-3 mock implementation
+// ============================================================================
+
+/// Construct a minimal empty [`ShapedRun`] for the mock text stack.
+///
+/// All glyph buffers are empty, metrics are default, BiDi level is `0`,
+/// the font is [`FontId::default`] (`FontId(0)`), and the direction is
+/// [`Direction::Ltr`]. This is the smallest legal [`ShapedRun`] — sufficient
+/// to exercise downstream consumers against the trait surface today.
+fn empty_shaped_run() -> ShapedRun {
+    ShapedRun {
+        glyph_ids: Box::new([]),
+        advances: Box::new([]),
+        offsets: Box::new([]),
+        clusters: Box::new([]),
+        caret_map: ClusterMap::default(),
+        metrics: RunMetrics::default(),
+        bidi_level: 0,
+        font_id: FontId(0),
+        direction: Direction::Ltr,
+    }
+}
+
+/// Wave-3 mock [`TextStack`] with stub implementations of every method.
+///
+/// Returns empty/minimal outputs for every operation — sufficient to compile
+/// downstream consumers against the trait surface today. The real HarfRust
+/// integration (font registry, shaper, LRU glyph atlas, editing ops, IME,
+/// a11y) lands in Wave 6 per §6.2–6.9; the trait defaults remain `todo!()`
+/// and are overridden here with deterministic stubs so that calling any
+/// [`TextStack`] method never panics.
+///
+/// The mock holds no state: every call returns the same constant output.
+/// `ime_compose` always reports [`ImeState::Cancelled`].
+#[derive(Debug, Default, Clone, Copy)]
+pub struct MockTextStack;
+
+impl TextShaper for MockTextStack {
+    fn shape(&self, run: &str, ctx: &ShapeContext) -> Result<ShapedRun, ShapeError> {
+        let _ = (run, ctx);
+        Ok(empty_shaped_run())
+    }
+
+    fn reshape_with_font(&self, run: &str, font: FontId) -> Result<ShapedRun, ShapeError> {
+        let _ = (run, font);
+        Ok(empty_shaped_run())
+    }
+}
+
+impl EditingOps for MockTextStack {
+    fn hit_test(&self, run: &ShapedRun, point: (f32, f32)) -> CaretOffset {
+        let _ = (run, point);
+        CaretOffset::default()
+    }
+
+    fn caret_position(&self, run: &ShapedRun, offset: CaretOffset) -> (f32, f32) {
+        let _ = (run, offset);
+        (0.0, 0.0)
+    }
+
+    fn selection_quads(&self, run: &ShapedRun, sel: CaretSelection) -> Box<[Quad]> {
+        let _ = (run, sel);
+        Box::new([])
+    }
+}
+
+impl TextStack for MockTextStack {
+    fn measure(&self, run: &ShapedRun, max_width: f32) -> MeasuredLines {
+        let _ = (run, max_width);
+        MeasuredLines::default()
+    }
+
+    fn rasterize(&self, run: &ShapedRun, atlas: &mut dyn GlyphAtlas) -> GlyphQuadBatch {
+        let _ = (run, atlas);
+        GlyphQuadBatch::default()
+    }
+
+    fn expose_a11y_text(&self, run: &ShapedRun) -> A11yTextPlaceholder {
+        let _ = run;
+        A11yTextPlaceholder::default()
+    }
+
+    fn ime_compose(&mut self, ev: CompositionEvent) -> ImeState {
+        let _ = ev;
+        ImeState::Cancelled
+    }
+}
+
+// ============================================================================
+// Wave 3 tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mock_shape_returns_ok_with_empty_run() {
+        let stack = MockTextStack;
+        let ctx = ShapeContext::default();
+        let run = stack.shape("hello", &ctx).expect("shape must be Ok");
+        assert!(run.glyph_ids.is_empty());
+        assert!(run.advances.is_empty());
+        assert!(run.offsets.is_empty());
+        assert!(run.clusters.is_empty());
+        assert_eq!(run.font_id, FontId(0));
+        assert_eq!(run.direction, Direction::Ltr);
+        assert_eq!(run.bidi_level, 0);
+        assert_eq!(run.metrics, RunMetrics::default());
+        assert!(run.caret_map.glyph_to_cluster.is_empty());
+        assert!(run.caret_map.caret_to_glyph.is_empty());
+    }
+
+    #[test]
+    fn mock_reshape_with_font_returns_empty_run() {
+        let stack = MockTextStack;
+        let run = stack
+            .reshape_with_font("x", FontId(42))
+            .expect("reshape must be Ok");
+        // Mock ignores the requested font and returns the FontId(0) default.
+        assert_eq!(run.font_id, FontId(0));
+        assert!(run.glyph_ids.is_empty());
+    }
+
+    #[test]
+    fn mock_measure_returns_default() {
+        let stack = MockTextStack;
+        let shaped = stack.shape("", &ShapeContext::default()).unwrap();
+        let measured = stack.measure(&shaped, 1024.0);
+        assert!(measured.line_advances.is_empty());
+        assert!(measured.line_ranges.is_empty());
+        assert_eq!(measured.metrics, RunMetrics::default());
+    }
+
+    #[test]
+    fn mock_rasterize_returns_default_batch() {
+        let stack = MockTextStack;
+        let shaped = stack.shape("", &ShapeContext::default()).unwrap();
+        // A no-op atlas stub: every method body is `todo!()`, but
+        // `rasterize` must not call into it (the mock emits zero quads).
+        let mut atlas = NoopAtlas;
+        let batch = stack.rasterize(&shaped, &mut atlas);
+        assert!(batch.quads.is_empty());
+        assert!(batch.font_ids.is_empty());
+    }
+
+    #[test]
+    fn mock_expose_a11y_text_returns_default() {
+        let stack = MockTextStack;
+        let shaped = stack.shape("", &ShapeContext::default()).unwrap();
+        let a11y = stack.expose_a11y_text(&shaped);
+        assert!(a11y.text.is_empty());
+        assert!(a11y.selection.is_none());
+        assert_eq!(a11y.metrics, RunMetrics::default());
+        assert!(a11y.label.is_none());
+    }
+
+    #[test]
+    fn mock_ime_compose_returns_cancelled() {
+        let mut stack = MockTextStack;
+        let ev = CompositionEvent {
+            text: String::from("a"),
+            caret: 0,
+            replace_range: (0, 0),
+        };
+        assert_eq!(stack.ime_compose(ev), ImeState::Cancelled);
+    }
+
+    #[test]
+    fn mock_editing_ops_return_neutral_defaults() {
+        let stack = MockTextStack;
+        let shaped = stack.shape("", &ShapeContext::default()).unwrap();
+        assert_eq!(
+            stack.hit_test(&shaped, (10.0, 10.0)),
+            CaretOffset::default()
+        );
+        assert_eq!(
+            stack.caret_position(&shaped, CaretOffset::default()),
+            (0.0, 0.0)
+        );
+        assert!(stack
+            .selection_quads(&shaped, CaretSelection::default())
+            .is_empty());
+    }
+
+    /// A no-op [`GlyphAtlas`] used only to prove `MockTextStack::rasterize`
+    /// never calls into the atlas (its method bodies are `todo!()` and would
+    /// panic if invoked).
+    struct NoopAtlas;
+
+    impl GlyphAtlas for NoopAtlas {
+        fn ensure(&mut self, key: GlyphKey) -> AtlasSlot {
+            let _ = key;
+            todo!()
+        }
+        fn slot(&self, key: GlyphKey) -> Option<AtlasSlot> {
+            let _ = key;
+            todo!()
+        }
+        fn invalidate(&mut self, module_id: ModuleId, rect: DirtyRect) {
+            let _ = (module_id, rect);
+            todo!()
+        }
+        fn evict_lru(&mut self, keep: &PinSet) -> EvictionStats {
+            let _ = keep;
+            todo!()
+        }
+    }
+}

@@ -14,6 +14,13 @@
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
+// Wave-3 skeleton: the `Style` and `Theme` trait defaults remain `todo!()`
+// (per IMPL-W10b, pending the concrete `OwnedStyle` impl), so their
+// parameters are intentionally unused. Suppressing this crate-wide keeps
+// spec-faithful parameter names without polluting CI's
+// `clippy -- -D warnings` gate. Concrete impls (`DefaultStyle`,
+// `LinearEasing`, `Animation::tick`) override the defaults with real bodies.
+#![allow(unused_variables)]
 
 use std::time::Duration;
 
@@ -188,6 +195,22 @@ pub trait EasingFn {
     }
 }
 
+/// Linear easing: `f(t) = t`.
+///
+/// The simplest concrete [`EasingFn`]. Provided so that [`Animation`] can
+/// be constructed today; richer easings (ease-in, ease-out, cubic-bezier)
+/// land in the implementation wave alongside keyframe interpolation. The
+/// trait's default `sample` remains `todo!()` — concrete easings override
+/// it.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LinearEasing;
+
+impl EasingFn for LinearEasing {
+    fn sample(&self, t: f32) -> f32 {
+        t
+    }
+}
+
 /// A value-level animation state machine that writes directly to the
 /// owning object's style fields each frame (ADR 005).
 ///
@@ -217,7 +240,20 @@ impl Animation {
     /// On error the runtime logs the error and freezes the animation at
     /// its last valid frame (§7.7).
     pub fn tick(&mut self, dt: Duration) -> Result<(), AnimationError> {
-        todo!()
+        self.elapsed += dt;
+        if self.elapsed >= self.duration {
+            self.state = AnimationState::Completed;
+        }
+        // TODO(Wave N): Keyframe interpolation. The current implementation
+        // advances the clock and flips to `Completed` on duration reach but
+        // does not yet sample/interpolate `keyframes` or write the
+        // interpolated `StyleProperty` back to the owning field. Easing
+        // (`self.easing`) and the per-keyframe `Interpolation` mode are
+        // likewise deferred. State-machine transitions for `Idle` / `Paused`
+        // are also minimal — `tick` always advances the clock regardless of
+        // `state`. Input validation (`DurationZero`, `KeyframeOutOfOrder`,
+        // `InvalidPropertyKind`) is deferred to the construction boundary.
+        Ok(())
     }
 }
 
@@ -298,6 +334,81 @@ pub struct OwnedStyle {
     pub animations: Vec<(String, Animation)>,
 }
 
+/// Hardcoded-default [`Style`] implementation.
+///
+/// Returns the spec's per-instance defaults (ADR 005 / ADR 007):
+/// - [`color`](Style::color): transparent black (`Color(0)`).
+/// - [`opacity`](Style::opacity): `1.0`.
+/// - [`line_width`](Style::line_width): `0.0`.
+/// - [`transform`](Style::transform): identity [`Mat4`].
+/// - [`effect`](Style::effect): passthrough [`ShaderStyle`] (empty WGSL
+///   program, no uniforms, no bindings).
+/// - [`animation`](Style::animation): `None` (no named animations).
+///
+/// The [`Style`] trait's default method bodies remain `todo!()` until the
+/// concrete [`OwnedStyle`] impl lands in a later wave; `DefaultStyle` is the
+/// usable hardcoded-defaults stub for Wave 3.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DefaultStyle;
+
+impl Style for DefaultStyle {
+    fn property(&self, kind: PropertyKind) -> StyleProperty {
+        match kind {
+            PropertyKind::Color => StyleProperty::Scalar(ScalarValue::Color(self.color())),
+            PropertyKind::Opacity => StyleProperty::Scalar(ScalarValue::Opacity(self.opacity())),
+            PropertyKind::LineWidth => {
+                StyleProperty::Scalar(ScalarValue::LineWidth(self.line_width()))
+            }
+            PropertyKind::Transform => StyleProperty::Transform(self.transform()),
+            PropertyKind::Shader => StyleProperty::Shader(self.effect()),
+            // TODO(Wave N): Custom property defaults are module-declared;
+            // until then, fall back to the colour default.
+            PropertyKind::Custom(_) => StyleProperty::Scalar(ScalarValue::Color(self.color())),
+        }
+    }
+
+    fn color(&self) -> Color {
+        // RGBA8 transparent black.
+        Color(0)
+    }
+
+    fn opacity(&self) -> Opacity {
+        Opacity(1.0)
+    }
+
+    fn line_width(&self) -> LineWidth {
+        LineWidth(0.0)
+    }
+
+    fn transform(&self) -> Mat4 {
+        // Column-major identity.
+        Mat4([
+            1.0, 0.0, 0.0, 0.0, //
+            0.0, 1.0, 0.0, 0.0, //
+            0.0, 0.0, 1.0, 0.0, //
+            0.0, 0.0, 0.0, 1.0,
+        ])
+    }
+
+    fn effect(&self) -> ShaderStyle {
+        // Passthrough: empty WGSL program, no uniforms, no bindings.
+        ShaderStyle {
+            program: WgslModule {
+                source_hash: 0,
+                pipeline_handle: 0,
+            },
+            entry_point: "main",
+            uniforms: UniformBuffer { bytes: Vec::new() },
+            bindings: Vec::new(),
+        }
+    }
+
+    fn animation(&self, name: &str) -> Option<&Animation> {
+        let _ = name;
+        None
+    }
+}
+
 // ---------------------------------------------------------------------------
 // §7.4 Theming
 // ---------------------------------------------------------------------------
@@ -309,6 +420,11 @@ pub struct OwnedStyle {
 /// the type's default value, not a parent's value. Subtree consistency
 /// is the author's responsibility, expressed at construction rather than
 /// resolved at match time.
+///
+/// Wave 3: trait method bodies remain `todo!()`. Concrete theme-table
+/// compilation (binary data-section preset blobs, §7.6) lands in a later
+/// wave alongside the concrete [`OwnedStyle`] impl. [`DefaultStyle`] covers
+/// the hardcoded-defaults path in the meantime.
 pub trait Theme {
     /// Look up a named preset.
     fn preset(&self, name: &str) -> OwnedStyle {
@@ -321,5 +437,103 @@ pub trait Theme {
     /// Enumerate available preset names.
     fn names(&self) -> &[&'static str] {
         todo!()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Wave 3 tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_style_returns_spec_defaults() {
+        let s = DefaultStyle;
+        assert_eq!(s.color(), Color(0));
+        assert_eq!(s.opacity(), Opacity(1.0));
+        assert_eq!(s.line_width(), LineWidth(0.0));
+        assert_eq!(
+            s.transform(),
+            Mat4([
+                1.0, 0.0, 0.0, 0.0, //
+                0.0, 1.0, 0.0, 0.0, //
+                0.0, 0.0, 1.0, 0.0, //
+                0.0, 0.0, 0.0, 1.0,
+            ])
+        );
+        let effect = s.effect();
+        assert_eq!(effect.program.source_hash, 0);
+        assert_eq!(effect.program.pipeline_handle, 0);
+        assert_eq!(effect.entry_point, "main");
+        assert!(effect.uniforms.bytes.is_empty());
+        assert!(effect.bindings.is_empty());
+        assert!(s.animation("anything").is_none());
+    }
+
+    #[test]
+    fn default_style_property_round_trips_known_kinds() {
+        let s = DefaultStyle;
+        assert!(matches!(
+            s.property(PropertyKind::Color),
+            StyleProperty::Scalar(ScalarValue::Color(Color(0)))
+        ));
+        assert!(matches!(
+            s.property(PropertyKind::Opacity),
+            StyleProperty::Scalar(ScalarValue::Opacity(Opacity(1.0)))
+        ));
+        assert!(matches!(
+            s.property(PropertyKind::LineWidth),
+            StyleProperty::Scalar(ScalarValue::LineWidth(LineWidth(0.0)))
+        ));
+        assert!(matches!(
+            s.property(PropertyKind::Transform),
+            StyleProperty::Transform(_)
+        ));
+        assert!(matches!(
+            s.property(PropertyKind::Shader),
+            StyleProperty::Shader(_)
+        ));
+        // Custom kinds fall back to the colour default (TODO-noted).
+        assert!(matches!(
+            s.property(PropertyKind::Custom(7)),
+            StyleProperty::Scalar(ScalarValue::Color(Color(0)))
+        ));
+    }
+
+    fn make_animation(duration: Duration) -> Animation {
+        Animation {
+            property: PropertyKind::Opacity,
+            keyframes: Vec::new(),
+            duration,
+            easing: Box::new(LinearEasing),
+            elapsed: Duration::ZERO,
+            state: AnimationState::Running,
+        }
+    }
+
+    #[test]
+    fn animation_tick_advances_elapsed() {
+        let mut anim = make_animation(Duration::from_millis(100));
+        anim.tick(Duration::from_millis(40)).unwrap();
+        assert_eq!(anim.elapsed, Duration::from_millis(40));
+        assert_eq!(anim.state, AnimationState::Running);
+    }
+
+    #[test]
+    fn animation_tick_completes_on_duration_reach() {
+        let mut anim = make_animation(Duration::from_millis(100));
+        anim.tick(Duration::from_millis(100)).unwrap();
+        assert_eq!(anim.elapsed, Duration::from_millis(100));
+        assert_eq!(anim.state, AnimationState::Completed);
+    }
+
+    #[test]
+    fn animation_tick_overshoot_completes() {
+        let mut anim = make_animation(Duration::from_millis(100));
+        anim.tick(Duration::from_millis(150)).unwrap();
+        assert_eq!(anim.elapsed, Duration::from_millis(150));
+        assert_eq!(anim.state, AnimationState::Completed);
     }
 }

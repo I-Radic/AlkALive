@@ -5,8 +5,10 @@
 //! Realises ADR 016 (single author-owned trace + frame-budget watchdog)
 //! and the §12.7 budget table.
 //!
-//! Wave 3 skeleton: signatures only; every body is `todo!()`.
-//! This crate is independent of `alkalive-error`: a local [`SpanKind`]
+//! Wave 10: adds [`LinearMemoryPool`], a concrete [`MemoryPool`] for WASM
+//! linear memory (HardCap enforcement → [`BudgetBreach::LinearMemoryCeiling`]).
+//! Other pool implementations (SAB, atlas, GPU) remain deferred to later
+//! waves. This crate is independent of `alkalive-error`: a local [`SpanKind`]
 //! enum is defined here rather than re-exported.
 
 #![forbid(unsafe_code)]
@@ -362,4 +364,202 @@ pub trait MemoryPool {
     /// Evict least-recently-used entries until at least `target_bytes`
     /// are free; returns the eviction statistics.
     fn evict_lru(&mut self, target_bytes: u64) -> EvictionStats;
+}
+
+// ============================================================================
+// Concrete implementations (Wave 10)
+// ============================================================================
+
+/// Concrete [`MemoryPool`] for WASM linear memory (§12.7 — HardCap, 256 MB).
+///
+/// `reserve` rejects growth past `cap_bytes` with
+/// [`BudgetBreach::LinearMemoryCeiling`]; `release` decrements the used
+/// counter; `evict_lru` is a no-op (linear memory is not LRU-evictable —
+/// callers grow or shrink the linear memory, they do not evict entries
+/// from it).
+#[derive(Debug, Clone)]
+pub struct LinearMemoryPool {
+    /// Hard cap in bytes.
+    cap_bytes: u64,
+    /// Currently used bytes.
+    used_bytes: u64,
+    /// High-water mark in bytes (peak `used_bytes` observed).
+    high_water_bytes: u64,
+}
+
+impl LinearMemoryPool {
+    /// Create a new linear-memory pool with the given hard cap in bytes.
+    pub fn new(cap_bytes: u64) -> Self {
+        Self {
+            cap_bytes,
+            used_bytes: 0,
+            high_water_bytes: 0,
+        }
+    }
+}
+
+impl MemoryPool for LinearMemoryPool {
+    fn kind(&self) -> PoolKind {
+        PoolKind::Linear
+    }
+
+    fn cap_bytes(&self) -> u64 {
+        self.cap_bytes
+    }
+
+    fn used_bytes(&self) -> u64 {
+        self.used_bytes
+    }
+
+    fn high_water_bytes(&self) -> u64 {
+        self.high_water_bytes
+    }
+
+    fn reserve(&mut self, n: u64) -> Result<Region, BudgetBreach> {
+        // `checked_add` rejects both cap overflow and `u64` overflow.
+        match self.used_bytes.checked_add(n) {
+            Some(new_used) if new_used <= self.cap_bytes => {
+                let offset = self.used_bytes;
+                self.used_bytes = new_used;
+                if new_used > self.high_water_bytes {
+                    self.high_water_bytes = new_used;
+                }
+                Ok(Region {
+                    offset,
+                    len: n,
+                    kind: PoolKind::Linear,
+                })
+            }
+            _ => Err(BudgetBreach::LinearMemoryCeiling),
+        }
+    }
+
+    fn release(&mut self, region: Region) {
+        // Saturating subtract guards against underflow from a malformed
+        // (oversized) release; production callers should always release
+        // exactly what they reserved.
+        self.used_bytes = self.used_bytes.saturating_sub(region.len);
+    }
+
+    fn evict_lru(&mut self, _target_bytes: u64) -> EvictionStats {
+        // Linear memory is not LRU-evictable: eviction is a no-op.
+        EvictionStats {
+            evicted_bytes: 0,
+            evicted_entries: 0,
+            kind: PoolKind::Linear,
+        }
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- LinearMemoryPool::reserve ---------------------------------------
+
+    #[test]
+    fn reserve_succeeds_under_cap() {
+        let mut pool = LinearMemoryPool::new(1024);
+        let region = pool.reserve(512).expect("reserve under cap should succeed");
+        assert_eq!(region.len, 512);
+        assert_eq!(region.kind, PoolKind::Linear);
+        assert_eq!(pool.used_bytes(), 512);
+        assert_eq!(pool.high_water_bytes(), 512);
+    }
+
+    #[test]
+    fn reserve_exactly_at_cap_succeeds() {
+        let mut pool = LinearMemoryPool::new(1024);
+        let region = pool
+            .reserve(1024)
+            .expect("reserve exactly at cap should succeed");
+        assert_eq!(region.offset, 0);
+        assert_eq!(pool.used_bytes(), 1024);
+        assert_eq!(pool.high_water_bytes(), 1024);
+    }
+
+    #[test]
+    fn reserve_fails_over_cap() {
+        let mut pool = LinearMemoryPool::new(1024);
+        let _ = pool.reserve(512).unwrap();
+        let err = pool.reserve(600).unwrap_err();
+        assert_eq!(err, BudgetBreach::LinearMemoryCeiling);
+        // used_bytes unchanged after a failed reserve.
+        assert_eq!(pool.used_bytes(), 512);
+    }
+
+    #[test]
+    fn reserve_at_cap_then_one_byte_fails() {
+        let mut pool = LinearMemoryPool::new(1024);
+        let _ = pool.reserve(1024).unwrap();
+        let err = pool.reserve(1).unwrap_err();
+        assert_eq!(err, BudgetBreach::LinearMemoryCeiling);
+    }
+
+    #[test]
+    fn reserve_offsets_increment() {
+        let mut pool = LinearMemoryPool::new(1024);
+        let r1 = pool.reserve(256).unwrap();
+        let r2 = pool.reserve(256).unwrap();
+        let r3 = pool.reserve(256).unwrap();
+        assert_eq!(r1.offset, 0);
+        assert_eq!(r2.offset, 256);
+        assert_eq!(r3.offset, 512);
+        assert_eq!(pool.used_bytes(), 768);
+        assert_eq!(pool.high_water_bytes(), 768);
+    }
+
+    // ---- LinearMemoryPool::release ---------------------------------------
+
+    #[test]
+    fn release_decrements_used() {
+        let mut pool = LinearMemoryPool::new(1024);
+        let region = pool.reserve(512).unwrap();
+        assert_eq!(pool.used_bytes(), 512);
+        pool.release(region);
+        assert_eq!(pool.used_bytes(), 0);
+        // high_water remains at the peak.
+        assert_eq!(pool.high_water_bytes(), 512);
+    }
+
+    #[test]
+    fn release_allows_re_reserve() {
+        let mut pool = LinearMemoryPool::new(1024);
+        let r1 = pool.reserve(1024).unwrap();
+        pool.release(r1);
+        assert_eq!(pool.used_bytes(), 0);
+        // After release, the full cap is available again.
+        let r2 = pool.reserve(1024).unwrap();
+        assert_eq!(r2.offset, 0);
+        assert_eq!(pool.used_bytes(), 1024);
+    }
+
+    // ---- LinearMemoryPool::evict_lru -------------------------------------
+
+    #[test]
+    fn evict_lru_is_noop_for_linear_memory() {
+        let mut pool = LinearMemoryPool::new(1024);
+        let _ = pool.reserve(512).unwrap();
+        let stats = pool.evict_lru(256);
+        assert_eq!(stats.evicted_bytes, 0);
+        assert_eq!(stats.evicted_entries, 0);
+        assert_eq!(stats.kind, PoolKind::Linear);
+        // used_bytes unchanged.
+        assert_eq!(pool.used_bytes(), 512);
+    }
+
+    // ---- LinearMemoryPool::kind / cap_bytes ------------------------------
+
+    #[test]
+    fn pool_kind_and_cap() {
+        let pool = LinearMemoryPool::new(2048);
+        assert_eq!(pool.kind(), PoolKind::Linear);
+        assert_eq!(pool.cap_bytes(), 2048);
+        assert_eq!(pool.used_bytes(), 0);
+        assert_eq!(pool.high_water_bytes(), 0);
+    }
 }

@@ -13,6 +13,7 @@
 #![warn(missing_docs)]
 
 use core::fmt;
+use std::collections::VecDeque;
 
 // ============================================================================
 // Markers
@@ -233,4 +234,206 @@ pub trait IPCSocket<T: Serial> {
     /// Close the channel; subsequent sends/recvs return
     /// [`ChannelError::Closed`].
     fn close(&mut self);
+}
+
+// ============================================================================
+// Wave-3 in-process implementation
+// ============================================================================
+
+/// In-process [`IPCSocket`] backed by a `VecDeque<T>`.
+///
+/// This is the Wave-3 stand-in for the SAB-backed ring buffer (ADR 021).
+/// No `SharedArrayBuffer` is involved — the channel is purely in-process,
+/// suitable for unit tests, single-threaded hosts, and any caller that
+/// needs a deterministic, panic-free channel before the WASM-thread IPC
+/// shim lands.
+///
+/// Semantics (per IMPL-W10b):
+/// - `send` / `try_send` push to the back of the deque and return `Ok(())`.
+/// - `recv` pops from the front; an empty deque yields
+///   [`Err(ChannelError::Underrun)`].
+/// - `try_recv` pops from the front; an empty deque yields `Ok(None)`.
+/// - `capacity` returns a fixed `1024` (advisory; not enforced — the deque
+///   grows unbounded in practice). TODO(Wave N): enforce backpressure
+///   (`ChannelError::Backpressure`) once the SAB ring lands.
+/// - `close` flips a `closed` flag; every subsequent `send` / `try_send` /
+///   `recv` / `try_recv` short-circuits to [`Err(ChannelError::Closed)`],
+///   even if messages remain buffered.
+///
+/// The `deadline` parameters of `try_send` / `try_recv` are accepted for
+/// signature compatibility but ignored — the in-process channel is
+/// non-blocking, so deadlines are trivially satisfied. Real deadline
+/// semantics arrive with the SAB-backed ring.
+#[derive(Debug)]
+pub struct LocalIPCSocket<T> {
+    /// Backing FIFO queue.
+    queue: VecDeque<T>,
+    /// Set by `close`; short-circuits all subsequent operations.
+    closed: bool,
+}
+
+impl<T> LocalIPCSocket<T> {
+    /// Create a new open `LocalIPCSocket` with an empty queue.
+    pub fn new() -> Self {
+        Self {
+            queue: VecDeque::new(),
+            closed: false,
+        }
+    }
+
+    /// Returns `true` once [`close`](IPCSocket::close) has been called.
+    pub fn is_closed(&self) -> bool {
+        self.closed
+    }
+
+    /// Current number of buffered messages.
+    pub fn len(&self) -> usize {
+        self.queue.len()
+    }
+
+    /// Returns `true` if no messages are buffered.
+    pub fn is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
+}
+
+impl<T> Default for LocalIPCSocket<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T: Serial> IPCSocket<T> for LocalIPCSocket<T> {
+    fn send(&mut self, msg: T) -> Result<(), ChannelError> {
+        if self.closed {
+            return Err(ChannelError::Closed);
+        }
+        self.queue.push_back(msg);
+        Ok(())
+    }
+
+    fn try_send(&mut self, msg: T, _deadline: Instant) -> Result<(), ChannelError> {
+        if self.closed {
+            return Err(ChannelError::Closed);
+        }
+        self.queue.push_back(msg);
+        Ok(())
+    }
+
+    fn recv(&mut self) -> Result<T, ChannelError> {
+        if self.closed {
+            return Err(ChannelError::Closed);
+        }
+        match self.queue.pop_front() {
+            Some(msg) => Ok(msg),
+            None => Err(ChannelError::Underrun),
+        }
+    }
+
+    fn try_recv(&mut self, _deadline: Instant) -> Result<Option<T>, ChannelError> {
+        if self.closed {
+            return Err(ChannelError::Closed);
+        }
+        Ok(self.queue.pop_front())
+    }
+
+    fn capacity(&self) -> usize {
+        1024
+    }
+
+    fn close(&mut self) {
+        self.closed = true;
+    }
+}
+
+// ============================================================================
+// Wave 3 tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A minimal `Serial` message used by the channel tests.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct MockMsg(u32);
+    impl Serial for MockMsg {}
+
+    #[test]
+    fn send_recv_roundtrip_preserves_fifo_order() {
+        let mut sock: LocalIPCSocket<MockMsg> = LocalIPCSocket::new();
+        sock.send(MockMsg(1)).unwrap();
+        sock.send(MockMsg(2)).unwrap();
+        sock.send(MockMsg(3)).unwrap();
+        assert_eq!(sock.len(), 3);
+        assert_eq!(sock.recv().unwrap(), MockMsg(1));
+        assert_eq!(sock.recv().unwrap(), MockMsg(2));
+        assert_eq!(sock.recv().unwrap(), MockMsg(3));
+        assert!(sock.is_empty());
+    }
+
+    #[test]
+    fn try_send_and_try_recv_roundtrip() {
+        let mut sock: LocalIPCSocket<MockMsg> = LocalIPCSocket::new();
+        sock.try_send(MockMsg(42), Instant(())).unwrap();
+        assert_eq!(sock.try_recv(Instant(())).unwrap(), Some(MockMsg(42)));
+    }
+
+    #[test]
+    fn recv_on_empty_returns_underrun() {
+        let mut sock: LocalIPCSocket<MockMsg> = LocalIPCSocket::new();
+        assert!(matches!(sock.recv(), Err(ChannelError::Underrun)));
+    }
+
+    #[test]
+    fn try_recv_on_empty_returns_ok_none() {
+        let mut sock: LocalIPCSocket<MockMsg> = LocalIPCSocket::new();
+        assert_eq!(sock.try_recv(Instant(())).unwrap(), None);
+    }
+
+    #[test]
+    fn capacity_is_fixed_1024() {
+        let sock: LocalIPCSocket<MockMsg> = LocalIPCSocket::new();
+        assert_eq!(sock.capacity(), 1024);
+    }
+
+    #[test]
+    fn close_blocks_all_further_operations() {
+        let mut sock: LocalIPCSocket<MockMsg> = LocalIPCSocket::new();
+        // Buffer a message, then close. Even with a buffered message,
+        // every subsequent operation short-circuits to `Closed`.
+        sock.send(MockMsg(1)).unwrap();
+        sock.close();
+        assert!(sock.is_closed());
+        assert!(matches!(sock.send(MockMsg(2)), Err(ChannelError::Closed)));
+        assert!(matches!(
+            sock.try_send(MockMsg(3), Instant(())),
+            Err(ChannelError::Closed)
+        ));
+        assert!(matches!(sock.recv(), Err(ChannelError::Closed)));
+        assert!(matches!(
+            sock.try_recv(Instant(())),
+            Err(ChannelError::Closed)
+        ));
+    }
+
+    #[test]
+    fn close_on_empty_socket_blocks_subsequent_recv() {
+        let mut sock: LocalIPCSocket<MockMsg> = LocalIPCSocket::new();
+        sock.close();
+        // `recv` on a closed empty socket returns `Closed`, not `Underrun`.
+        assert!(matches!(sock.recv(), Err(ChannelError::Closed)));
+        assert!(matches!(
+            sock.try_recv(Instant(())),
+            Err(ChannelError::Closed)
+        ));
+    }
+
+    #[test]
+    fn default_creates_open_empty_socket() {
+        let sock: LocalIPCSocket<MockMsg> = LocalIPCSocket::default();
+        assert!(sock.is_empty());
+        assert!(!sock.is_closed());
+        assert_eq!(sock.capacity(), 1024);
+    }
 }
