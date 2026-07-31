@@ -1,0 +1,65 @@
+[workspace]
+members = ["harfrust", "hr-shape", "fuzz"]
+resolver = "2"
+
+[workspace.package]
+version = "0.12.0"
+edition = "2021"
+rust-version = "1.85"  # should match https://github.com/googlefonts/fontations/blob/main/Cargo.toml
+description = "A complete HarfBuzz shaping algorithm port to Rust."
+repository = "https://github.com/harfbuzz/harfrust"
+license = "MIT"
+keywords = ["text", "shaping", "opentype", "truetype"]
+categories = ["text-processing"]
+
+[profile.release]
+strip = true
+lto = "fat"
+overflow-checks = false
+codegen-units = 1
+
+[profile.bench]
+inherits = "release"
+
+[workspace.dependencies]
+read-fonts = { version = "0.41.0", default-features = false, features = ["experimental_font_api"] }
+harfrust = { version = "0.12.0", path = "./harfrust", default-features = false }
+
+[workspace.lints.rust]
+unused_qualifications = "warn"
+
+[workspace.lints.clippy]
+cargo = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# Reviewed Lints
+redundant_closure_for_method_calls = "allow"  # use for Result and Into, allow the rest
+# These are the currently triggering clippy lints, which should be fixed in the subsequent PRs.
+# This list was generated with this command:
+#  cargo clippy --all-targets --workspace --all-features --message-format=json --quiet | jq -r '.message.code.code | select(. != null and startswith("clippy::"))' | sort | uniq -c | sort -h -r
+cast_lossless = "allow" # 390
+cast_possible_truncation = "allow" # 312
+cast_sign_loss = "allow" # 192
+used_underscore_binding = "allow" # 163
+doc_markdown = "allow" # 120
+wildcard_imports = "allow" # 79
+cast_possible_wrap = "allow" # 72
+used_underscore_items = "allow" # 64
+must_use_candidate = "allow" # 49
+items_after_statements = "allow" # 46
+too_many_lines = "allow" # 36
+match_same_arms = "allow" # 34
+if_not_else = "allow" # 31
+many_single_char_names = "allow" # 16
+trivially_copy_pass_by_ref = "allow" # 14
+struct_excessive_bools = "allow" # 14
+needless_pass_by_value = "allow" # 14
+similar_names = "allow" # 12
+return_self_not_must_use = "allow" # 10
+range_plus_one = "allow" # 6
+unnecessary_wraps = "allow" # 5
+missing_panics_doc = "allow" # 5
+redundant_else = "allow" # 4
+needless_continue = "allow" # 4
+ref_option = "allow" # 2
+fn_params_excessive_bools = "allow" # 2
+large-stack-arrays = "allow"
