@@ -350,6 +350,48 @@ impl SoftwareRenderer {
         }
     }
 
+    /// Draw a filled rectangle (no blending — overwrites).
+    pub fn fill_rect(&mut self, x: i32, y: i32, w: i32, h: i32, r: u8, g: u8, b: u8) {
+        let fb_w = self.width as i32;
+        let fb_h = self.height as i32;
+        let x0 = x.max(0).min(fb_w);
+        let y0 = y.max(0).min(fb_h);
+        let x1 = (x + w).max(0).min(fb_w);
+        let y1 = (y + h).max(0).min(fb_h);
+
+        for dy in y0..y1 {
+            for dx in x0..x1 {
+                let idx = ((dy as usize) * (fb_w as usize) + (dx as usize)) * 4;
+                if idx + 3 < self.framebuffer.len() {
+                    self.framebuffer[idx] = r;
+                    self.framebuffer[idx + 1] = g;
+                    self.framebuffer[idx + 2] = b;
+                    self.framebuffer[idx + 3] = 255;
+                }
+            }
+        }
+    }
+
+    /// Draw a rectangle outline (1px border).
+    pub fn draw_rect_outline(&mut self, x: i32, y: i32, w: i32, h: i32, r: u8, g: u8, b: u8) {
+        // Top and bottom edges.
+        self.fill_rect(x, y, w, 1, r, g, b);
+        self.fill_rect(x, y + h - 1, w, 1, r, g, b);
+        // Left and right edges.
+        self.fill_rect(x, y, 1, h, r, g, b);
+        self.fill_rect(x + w - 1, y, 1, h, r, g, b);
+    }
+
+    /// Draw a vertical line (for the text cursor).
+    pub fn draw_vertical_line(&mut self, x: i32, y: i32, h: i32, r: u8, g: u8, b: u8) {
+        self.fill_rect(x, y, 2, h, r, g, b);
+    }
+
+    /// Draw a horizontal line.
+    pub fn draw_horizontal_line(&mut self, x: i32, y: i32, w: i32, r: u8, g: u8, b: u8) {
+        self.fill_rect(x, y, w, 1, r, g, b);
+    }
+
     /// Get a raw pointer to the framebuffer for WASM export.
     pub fn framebuffer_ptr(&self) -> *const u8 {
         self.framebuffer.as_ptr()
@@ -488,7 +530,7 @@ mod tests {
 
         // Pixel at (10,10) before glow.
         let idx = (10 * 20 + 10) * 4;
-        let before = r.framebuffer[idx];
+        let _before = r.framebuffer[idx];
 
         r.apply_glow();
 

@@ -1,6 +1,25 @@
 /* @ts-self-types="./alkalive_app.d.ts" */
 
 /**
+ * Clear the input field text.
+ */
+export function clear_input() {
+    wasm.clear_input();
+}
+
+/**
+ * Check if a click at (x, y) is within the input field bounds.
+ * Returns true if the click hit the input field (and focuses it).
+ * @param {number} x
+ * @param {number} y
+ * @returns {boolean}
+ */
+export function click_input_field(x, y) {
+    const ret = wasm.click_input_field(x, y);
+    return ret !== 0;
+}
+
+/**
  * Get the current FPS estimate.
  * @returns {number}
  */
@@ -46,6 +65,23 @@ export function get_height() {
 }
 
 /**
+ * Get the input field text content.
+ * @returns {string}
+ */
+export function get_input_text() {
+    let deferred1_0;
+    let deferred1_1;
+    try {
+        const ret = wasm.get_input_text();
+        deferred1_0 = ret[0];
+        deferred1_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+    }
+}
+
+/**
  * Get the current rotation angle in radians (for HUD display).
  * @returns {number}
  */
@@ -64,6 +100,28 @@ export function get_width() {
 }
 
 /**
+ * Handle a key press. Returns true if the key was handled.
+ *
+ * Supported keys:
+ * - "Backspace" — delete previous char
+ * - "Delete" — delete next char
+ * - "ArrowLeft" — move cursor left
+ * - "ArrowRight" — move cursor right
+ * - "Home" — move cursor to start
+ * - "End" — move cursor to end
+ * - "Enter" — submit (no-op for now, just returns true)
+ * - Printable characters — inserted via input_insert_char
+ * @param {string} key
+ * @returns {boolean}
+ */
+export function handle_key_press(key) {
+    const ptr0 = passStringToWasm0(key, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.handle_key_press(ptr0, len0);
+    return ret !== 0;
+}
+
+/**
  * Initialize the application with the given canvas dimensions.
  * @param {number} width
  * @param {number} height
@@ -73,6 +131,35 @@ export function init(width, height) {
     if (ret[1]) {
         throw takeFromExternrefTable0(ret[0]);
     }
+}
+
+/**
+ * Insert a character into the input field at the cursor position.
+ * Only works if the input field is focused.
+ * @param {string} c
+ */
+export function input_insert_char(c) {
+    const ptr0 = passStringToWasm0(c, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    wasm.input_insert_char(ptr0, len0);
+}
+
+/**
+ * Check if the input field is visible.
+ * @returns {boolean}
+ */
+export function is_input_enabled() {
+    const ret = wasm.is_input_enabled();
+    return ret !== 0;
+}
+
+/**
+ * Check if the input field is focused.
+ * @returns {boolean}
+ */
+export function is_input_focused() {
+    const ret = wasm.is_input_focused();
+    return ret !== 0;
 }
 
 /**
@@ -127,6 +214,32 @@ export function set_gradient(r1, g1, b1, r2, g2, b2) {
 }
 
 /**
+ * Toggle the input field visibility.
+ * @param {boolean} enabled
+ */
+export function set_input_enabled(enabled) {
+    wasm.set_input_enabled(enabled);
+}
+
+/**
+ * Set input field focus state.
+ * @param {boolean} focused
+ */
+export function set_input_focus(focused) {
+    wasm.set_input_focus(focused);
+}
+
+/**
+ * Set the input field text directly.
+ * @param {string} text
+ */
+export function set_input_text(text) {
+    const ptr0 = passStringToWasm0(text, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    wasm.set_input_text(ptr0, len0);
+}
+
+/**
  * Pause or resume the animation.
  * @param {boolean} paused
  */
@@ -168,6 +281,13 @@ export function set_text(text) {
  */
 export function tick() {
     wasm.tick();
+}
+
+/**
+ * Toggle input field focus.
+ */
+export function toggle_input_focus() {
+    wasm.toggle_input_focus();
 }
 function __wbg_get_imports() {
     const import0 = {

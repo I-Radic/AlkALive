@@ -31,6 +31,8 @@ const ATLAS_SIZE: usize = 512;
 /// A complete text scene: font loaded, text shaped, glyphs rasterized into
 /// the atlas, and positioned quads ready for rendering.
 pub struct TextScene {
+    /// The font registry (shared via Arc with the atlas and input field).
+    pub registry: Arc<HarfRustFontRegistry>,
     /// The glyph atlas (owns rasterized glyph bitmaps in CPU-side pages).
     pub atlas: HarfRustGlyphAtlas,
     /// The shaped run (immutable output of HarfRust shaping).
@@ -69,12 +71,12 @@ impl TextScene {
         };
         let font_id = registry.resolve(&req).unwrap_or(loaded_id);
 
-        // Wrap in Arc for sharing between shaper and atlas.
+        // Wrap in Arc for sharing between shaper, atlas, and input field.
         let registry_arc = Arc::new(registry);
 
         // 3. Create shaper and atlas.
         let shaper = HarfRustTextShaper::new(Arc::clone(&registry_arc));
-        let mut atlas = HarfRustGlyphAtlas::new(registry_arc);
+        let mut atlas = HarfRustGlyphAtlas::new(Arc::clone(&registry_arc));
 
         // 4. Shape the text.
         let ctx = ShapeContext {
@@ -92,6 +94,7 @@ impl TextScene {
         let glyphs = Self::rasterize_run(&shaped_run, &mut atlas, size_px);
 
         Ok(Self {
+            registry: registry_arc,
             atlas,
             shaped_run,
             glyphs,

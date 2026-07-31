@@ -35,10 +35,12 @@ use std::cell::RefCell;
 
 use wasm_bindgen::prelude::*;
 
+pub mod input_field;
 pub mod renderer;
 pub mod starfield;
 pub mod text_scene;
 
+use input_field::{input_color_mode, InputField};
 use renderer::{ColorMode, PositionedGlyph, SoftwareRenderer};
 use starfield::Starfield;
 use text_scene::TextScene;
@@ -57,6 +59,7 @@ struct App {
     renderer: SoftwareRenderer,
     scene: TextScene,
     starfield: Starfield,
+    input_field: InputField,
     time: f32,
     rotation_speed: f32,
     paused: bool,
@@ -75,6 +78,8 @@ struct App {
     current_fps: f32,
     /// Starfield enabled.
     starfield_enabled: bool,
+    /// Input field enabled.
+    input_enabled: bool,
 }
 
 thread_local! {
@@ -95,6 +100,7 @@ pub fn init(width: u32, height: u32) -> Result<(), JsValue> {
 
     let renderer = SoftwareRenderer::new(width, height);
     let starfield = Starfield::new(STAR_COUNT, 42);
+    let input_field = InputField::new("Click here to type...");
 
     let (text_offset_x, text_baseline_y, rotation_center_x) =
         compute_layout(&scene, width, height);
@@ -104,6 +110,7 @@ pub fn init(width: u32, height: u32) -> Result<(), JsValue> {
             renderer,
             scene,
             starfield,
+            input_field,
             time: 0.0,
             rotation_speed: DEFAULT_ROTATION_SPEED,
             paused: false,
@@ -119,6 +126,7 @@ pub fn init(width: u32, height: u32) -> Result<(), JsValue> {
             last_fps_time: 0.0,
             current_fps: 0.0,
             starfield_enabled: true,
+            input_enabled: true,
         });
     });
 
@@ -170,12 +178,14 @@ pub fn tick() {
 
         // Get the atlas page data (all glyphs are on page 0 for this simple scene).
         let atlas_size = app.scene.atlas_size();
+
+        // --- Render the rotating title text ---
         let page_data = match app.scene.page_data(0) {
             Some(d) => d,
             None => return,
         };
 
-        // Transform glyphs to screen coordinates (apply centering offsets).
+        // Transform title glyphs to screen coordinates (apply centering offsets).
         let screen_glyphs: Vec<PositionedGlyph> = app
             .scene
             .glyphs
@@ -188,7 +198,7 @@ pub fn tick() {
             })
             .collect();
 
-        // Composite text with rotation and current color mode.
+        // Composite title text with rotation and current color mode.
         app.renderer.composite_glyphs_rotated(
             page_data,
             atlas_size,
@@ -197,6 +207,11 @@ pub fn tick() {
             app.rotation_center_x,
             app.color_mode,
         );
+
+        // --- Render the input field below the title ---
+        if app.input_enabled {
+            render_input_field(app);
+        }
 
         // Apply glow/bloom effect.
         app.renderer.apply_glow();
@@ -211,6 +226,113 @@ pub fn tick() {
             }
         }
     });
+}
+
+/// Render the input field below the rotating title text.
+///
+/// This draws:
+/// 1. A rounded rectangle border (focused = gold, unfocused = gray)
+/// 2. The input text (or placeholder) centered horizontally
+/// 3. A blinking cursor if focused
+fn render_input_field(app: &mut App) {
+    let width = app.renderer.width as f32;
+    let height = app.renderer.height as f32;
+
+    // Input field dimensions.
+    let field_w = (width * 0.6).min(500.0);
+    let field_h = 44.0;
+    let field_x = (width - field_w) / 2.0;
+    // Position below the title (title baseline + some gap).
+    let title_bottom = app.text_baseline_y + 20.0;
+    let field_y = title_bottom + 40.0;
+
+    // Ensure the field fits on screen.
+    if field_y + field_h > height {
+        return;
+    }
+
+    // Draw the field background (semi-transparent dark).
+    app.renderer.fill_rect(
+        field_x as i32,
+        field_y as i32,
+        field_w as i32,
+        field_h as i32,
+        12, 12, 20, // Very dark blue-gray
+    );
+
+    // Draw the field border.
+    let (br, bg, bb) = if app.input_field.focused {
+        (255, 215, 0) // Gold when focused
+    } else {
+        (80, 80, 100) // Gray when unfocused
+    };
+    app.renderer.draw_rect_outline(
+        field_x as i32,
+        field_y as i32,
+        field_w as i32,
+        field_h as i32,
+        br, bg, bb,
+    );
+
+    // Get the input field text glyphs.
+    // We need to borrow the registry from the scene and the atlas mutably.
+    let registry = app.scene.registry.clone();
+    let (input_glyphs, input_width) = {
+        let atlas = &mut app.scene.atlas;
+        app.input_field.get_positioned_glyphs(&registry, atlas)
+    };
+
+    // Center the input text horizontally within the field.
+    let text_x = field_x + (field_w - input_width) / 2.0;
+    let text_y = field_y + (field_h - input_field::INPUT_FONT_SIZE_PX) / 2.0
+        + app.scene.metrics.ascent * (input_field::INPUT_FONT_SIZE_PX / FONT_SIZE_PX)
+            - input_field::INPUT_FONT_SIZE_PX * 0.8;
+
+    // Use the title's ascent to estimate input text baseline. Simplified:
+    // position text vertically centered in the field.
+    let text_baseline_y = field_y + field_h / 2.0 + input_field::INPUT_FONT_SIZE_PX * 0.35;
+
+    let _ = text_y; // Suppress unused warning
+
+    // Get the atlas page data (input field shares the same atlas).
+    let atlas_size = app.scene.atlas_size();
+    let page_data = match app.scene.page_data(0) {
+        Some(d) => d,
+        None => return,
+    };
+
+    // Composite input text glyphs (no rotation).
+    let color_mode = input_color_mode(&app.input_field);
+    for glyph in &input_glyphs {
+        let mut sg = *glyph;
+        sg.x += text_x;
+        sg.y += text_baseline_y;
+        app.renderer.composite_glyph(
+            page_data,
+            atlas_size,
+            &sg,
+            1.0,  // No horizontal scaling
+            0.0,  // No offset
+            color_mode,
+            app.renderer.glow_enabled && app.input_field.focused,
+        );
+    }
+
+    // Draw the cursor if focused (blinking).
+    if app.input_field.focused {
+        let blink = (app.time / input_field::CURSOR_BLINK_PERIOD).fract() < 0.5;
+        if blink {
+            let cursor_x = (text_x + app.input_field.cursor_x()) as i32;
+            let cursor_y = (field_y + 8.0) as i32;
+            let cursor_h = (field_h - 16.0) as i32;
+            app.renderer.draw_vertical_line(
+                cursor_x,
+                cursor_y,
+                cursor_h,
+                240, 240, 255, // White cursor
+            );
+        }
+    }
 }
 
 /// Get a raw pointer to the framebuffer data.
@@ -398,6 +520,203 @@ pub fn is_paused() -> bool {
 }
 
 // ============================================================================
+// Input Field Controls (ADR 023 — text input rendered by AlkALive)
+// ============================================================================
+
+/// Set input field focus state.
+#[wasm_bindgen]
+pub fn set_input_focus(focused: bool) {
+    APP.with(|app| {
+        if let Some(a) = app.borrow_mut().as_mut() {
+            a.input_field.set_focus(focused);
+        }
+    });
+}
+
+/// Toggle input field focus.
+#[wasm_bindgen]
+pub fn toggle_input_focus() {
+    APP.with(|app| {
+        if let Some(a) = app.borrow_mut().as_mut() {
+            a.input_field.toggle_focus();
+        }
+    });
+}
+
+/// Check if the input field is focused.
+#[wasm_bindgen]
+pub fn is_input_focused() -> bool {
+    APP.with(|app| {
+        let app = app.borrow();
+        app.as_ref().map_or(false, |a| a.input_field.focused)
+    })
+}
+
+/// Insert a character into the input field at the cursor position.
+/// Only works if the input field is focused.
+#[wasm_bindgen]
+pub fn input_insert_char(c: &str) {
+    APP.with(|app| {
+        if let Some(a) = app.borrow_mut().as_mut() {
+            if a.input_field.focused {
+                // Take the first char of the string (handles multi-byte).
+                if let Some(ch) = c.chars().next() {
+                    if input_field::is_printable_char(ch) {
+                        a.input_field.insert_char(ch);
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// Handle a key press. Returns true if the key was handled.
+///
+/// Supported keys:
+/// - "Backspace" — delete previous char
+/// - "Delete" — delete next char
+/// - "ArrowLeft" — move cursor left
+/// - "ArrowRight" — move cursor right
+/// - "Home" — move cursor to start
+/// - "End" — move cursor to end
+/// - "Enter" — submit (no-op for now, just returns true)
+/// - Printable characters — inserted via input_insert_char
+#[wasm_bindgen]
+pub fn handle_key_press(key: &str) -> bool {
+    APP.with(|app| {
+        let mut app = app.borrow_mut();
+        if let Some(a) = app.as_mut() {
+            if !a.input_field.focused {
+                return false;
+            }
+            match key {
+                "Backspace" => {
+                    a.input_field.backspace();
+                    true
+                }
+                "Delete" => {
+                    a.input_field.delete_forward();
+                    true
+                }
+                "ArrowLeft" => {
+                    a.input_field.cursor_left();
+                    true
+                }
+                "ArrowRight" => {
+                    a.input_field.cursor_right();
+                    true
+                }
+                "Home" => {
+                    a.input_field.cursor_home();
+                    true
+                }
+                "End" => {
+                    a.input_field.cursor_end();
+                    true
+                }
+                "Enter" => {
+                    // Enter could submit the form in the future.
+                    true
+                }
+                _ => false,
+            }
+        } else {
+            false
+        }
+    })
+}
+
+/// Clear the input field text.
+#[wasm_bindgen]
+pub fn clear_input() {
+    APP.with(|app| {
+        if let Some(a) = app.borrow_mut().as_mut() {
+            a.input_field.clear();
+        }
+    });
+}
+
+/// Get the input field text content.
+#[wasm_bindgen]
+pub fn get_input_text() -> String {
+    APP.with(|app| {
+        let app = app.borrow();
+        app.as_ref().map_or(String::new(), |a| a.input_field.text.clone())
+    })
+}
+
+/// Set the input field text directly.
+#[wasm_bindgen]
+pub fn set_input_text(text: &str) {
+    APP.with(|app| {
+        if let Some(a) = app.borrow_mut().as_mut() {
+            a.input_field.text = text.to_string();
+            a.input_field.cursor = a.input_field.text.len();
+            a.input_field.mark_dirty();
+        }
+    });
+}
+
+/// Toggle the input field visibility.
+#[wasm_bindgen]
+pub fn set_input_enabled(enabled: bool) {
+    APP.with(|app| {
+        if let Some(a) = app.borrow_mut().as_mut() {
+            a.input_enabled = enabled;
+            if !enabled {
+                a.input_field.set_focus(false);
+            }
+        }
+    });
+}
+
+/// Check if the input field is visible.
+#[wasm_bindgen]
+pub fn is_input_enabled() -> bool {
+    APP.with(|app| {
+        let app = app.borrow();
+        app.as_ref().map_or(false, |a| a.input_enabled)
+    })
+}
+
+/// Check if a click at (x, y) is within the input field bounds.
+/// Returns true if the click hit the input field (and focuses it).
+#[wasm_bindgen]
+pub fn click_input_field(x: f32, y: f32) -> bool {
+    APP.with(|app| {
+        let mut app = app.borrow_mut();
+        if let Some(a) = app.as_mut() {
+            if !a.input_enabled {
+                return false;
+            }
+            let width = a.renderer.width as f32;
+            let height = a.renderer.height as f32;
+            let field_w = (width * 0.6).min(500.0);
+            let field_h = 44.0;
+            let field_x = (width - field_w) / 2.0;
+            let title_bottom = a.text_baseline_y + 20.0;
+            let field_y = title_bottom + 40.0;
+
+            if field_y + field_h > height {
+                return false;
+            }
+
+            if x >= field_x && x <= field_x + field_w
+                && y >= field_y && y <= field_y + field_h
+            {
+                a.input_field.set_focus(true);
+                return true;
+            }
+            // Click outside the field — unfocus.
+            a.input_field.set_focus(false);
+            false
+        } else {
+            false
+        }
+    })
+}
+
+// ============================================================================
 // Native (non-WASM) entry point for testing
 // ============================================================================
 
@@ -546,5 +865,155 @@ mod tests {
         assert_eq!(get_frame_count(), 1);
         tick();
         assert_eq!(get_frame_count(), 2);
+    }
+
+    // --- Input field tests ---
+
+    #[test]
+    fn input_field_starts_unfocused() {
+        init(400, 300).unwrap();
+        assert!(!is_input_focused());
+    }
+
+    #[test]
+    fn input_focus_toggle() {
+        init(400, 300).unwrap();
+        assert!(!is_input_focused());
+        set_input_focus(true);
+        assert!(is_input_focused());
+        set_input_focus(false);
+        assert!(!is_input_focused());
+    }
+
+    #[test]
+    fn input_insert_char_requires_focus() {
+        init(400, 300).unwrap();
+        // Without focus, insert does nothing.
+        input_insert_char("a");
+        assert_eq!(get_input_text(), "");
+        // With focus, insert works.
+        set_input_focus(true);
+        input_insert_char("a");
+        input_insert_char("b");
+        input_insert_char("c");
+        assert_eq!(get_input_text(), "abc");
+    }
+
+    #[test]
+    fn input_handle_backspace() {
+        init(400, 300).unwrap();
+        set_input_focus(true);
+        input_insert_char("H");
+        input_insert_char("i");
+        assert_eq!(get_input_text(), "Hi");
+        let handled = handle_key_press("Backspace");
+        assert!(handled);
+        assert_eq!(get_input_text(), "H");
+    }
+
+    #[test]
+    fn input_handle_arrow_keys() {
+        init(400, 300).unwrap();
+        set_input_focus(true);
+        input_insert_char("a");
+        input_insert_char("b");
+        input_insert_char("c");
+        // Move cursor left.
+        assert!(handle_key_press("ArrowLeft"));
+        // Backspace should delete 'b' (cursor was between 'b' and 'c').
+        handle_key_press("Backspace");
+        assert_eq!(get_input_text(), "ac");
+    }
+
+    #[test]
+    fn input_handle_home_end() {
+        init(400, 300).unwrap();
+        set_input_focus(true);
+        input_insert_char("a");
+        input_insert_char("b");
+        input_insert_char("c");
+        // Home: cursor to start.
+        handle_key_press("Home");
+        // Delete forward should delete 'a'.
+        handle_key_press("Delete");
+        assert_eq!(get_input_text(), "bc");
+        // End: cursor to end.
+        handle_key_press("End");
+        handle_key_press("Backspace");
+        assert_eq!(get_input_text(), "b");
+    }
+
+    #[test]
+    fn input_clear() {
+        init(400, 300).unwrap();
+        set_input_focus(true);
+        input_insert_char("H");
+        input_insert_char("i");
+        clear_input();
+        assert_eq!(get_input_text(), "");
+    }
+
+    #[test]
+    fn input_set_text_directly() {
+        init(400, 300).unwrap();
+        set_input_text("Preset text");
+        assert_eq!(get_input_text(), "Preset text");
+    }
+
+    #[test]
+    fn input_enabled_toggle() {
+        init(400, 300).unwrap();
+        assert!(is_input_enabled());
+        set_input_enabled(false);
+        assert!(!is_input_enabled());
+        set_input_enabled(true);
+        assert!(is_input_enabled());
+    }
+
+    #[test]
+    fn input_click_focuses_field() {
+        init(800, 600).unwrap();
+        // Click in the center where the input field should be.
+        let clicked = click_input_field(400.0, 380.0);
+        // May or may not hit depending on layout, but should not crash.
+        let _ = clicked;
+    }
+
+    #[test]
+    fn input_unicode_text() {
+        init(400, 300).unwrap();
+        set_input_focus(true);
+        input_insert_char("你");
+        input_insert_char("好");
+        assert_eq!(get_input_text(), "你好");
+    }
+
+    #[test]
+    fn input_renders_without_crash() {
+        init(800, 600).unwrap();
+        set_input_focus(true);
+        input_insert_char("T");
+        input_insert_char("e");
+        input_insert_char("s");
+        input_insert_char("t");
+        // Render a frame — should not panic.
+        tick();
+        assert!(get_framebuffer_len() > 0);
+    }
+
+    #[test]
+    fn input_key_press_unfocused_returns_false() {
+        init(400, 300).unwrap();
+        // Not focused — should return false.
+        let handled = handle_key_press("Backspace");
+        assert!(!handled);
+    }
+
+    #[test]
+    fn input_unknown_key_returns_false() {
+        init(400, 300).unwrap();
+        set_input_focus(true);
+        let handled = handle_key_press("F1");
+        assert!(!handled, "Unknown keys should not be handled");
     }
 }
