@@ -11,3 +11,5 @@ path = "src/lib.rs"
 
 [dependencies]
 alkalive-core = { workspace = true }
+harfrust = { workspace = true, features = ["std", "experimental_font_api"] }
+read-fonts = { workspace = true }

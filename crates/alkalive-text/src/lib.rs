@@ -1,11 +1,11 @@
 //! Text rendering stack — forked in-WASM HarfRust (ADR 022).
 //!
-//! Trait surface with **required** methods (no `todo!()` defaults). The real
-//! HarfRust integration lands in Wave 6 (font registry, shaper, LRU glyph
-//! atlas, editing ops, `TextStack` measure/rasterize/a11y/ime adapters
-//! per §6.2–6.9). Until then, [`MockFontRegistry`], [`MockGlyphAtlas`], and
-//! [`MockTextStack`] provide non-panicking stub implementations so downstream
-//! crates can compile against the trait surface today.
+//! Trait surface with **required** methods (no `todo!()` defaults). Wave 1
+//! ships the default HarfRust-backed implementations: [`HarfRustFontRegistry`]
+//! (§6.2) and [`HarfRustTextShaper`] (§6.3). The remaining trait surface
+//! (LRU glyph atlas, editing ops, `TextStack` measure/rasterize/a11y/ime
+//! adapters per §6.4–6.9) still uses [`MockGlyphAtlas`] and [`MockTextStack`]
+//! as non-panicking stubs; those mocks are retained as test-only fallbacks.
 //!
 //! # Cross-crate forward declarations
 //!
@@ -31,6 +31,13 @@
 #![warn(missing_docs)]
 
 pub use alkalive_core::ModuleId;
+
+use harfrust::font::{Font, FontInstance};
+use harfrust::{
+    shape as harfrust_shape, Direction as HarfRustDirection, ShapeOptions, UnicodeBuffer,
+};
+use read_fonts::TableProvider;
+use std::sync::Arc;
 
 // ============================================================================
 // Forward-declared cross-crate placeholders
@@ -164,9 +171,9 @@ pub enum FontLoadError {
 /// caches parsed OpenType tables for HarfRust (§6.2). Serves HarfRust
 /// directly from WASM-heap memory.
 ///
-/// Every method is required (no default body); the real HarfRust-backed
-/// implementation lands in Wave 6. [`MockFontRegistry`] provides a
-/// non-panicking stub for downstream consumers today.
+/// Every method is required (no default body). The default implementation is
+/// [`HarfRustFontRegistry`]; [`MockFontRegistry`] is retained as a
+/// test-only stub.
 pub trait FontRegistry {
     /// Resolve a [`FontRequest`] to a [`FontId`], following the fallback
     /// chain (requested → generic alias → bundled default).
@@ -274,9 +281,8 @@ pub enum ShapeError {
 /// language, performs BiDi segmentation and reordering in-WASM, and emits
 /// an immutable [`ShapedRun`] (§6.3).
 ///
-/// Every method is required (no default body); the real HarfRust-backed
-/// implementation lands in Wave 6. [`MockTextStack`] provides a
-/// non-panicking stub for downstream consumers today.
+/// Every method is required (no default body). The default implementation is
+/// [`HarfRustTextShaper`]; [`MockTextStack`] is retained as a test-only stub.
 pub trait TextShaper {
     /// Shape `run` under the given context.
     fn shape(&self, run: &str, ctx: &ShapeContext) -> Result<ShapedRun, ShapeError>;
@@ -344,7 +350,7 @@ pub struct EvictionStats {
 /// the whole atlas.
 ///
 /// Every method is required (no default body); the real GPU-backed
-/// implementation lands in Wave 6. [`MockGlyphAtlas`] provides a
+/// implementation lands in a later wave. [`MockGlyphAtlas`] provides a
 /// non-panicking stub for downstream consumers today.
 pub trait GlyphAtlas {
     /// Rasterize-on-demand: ensure `key` is resident and return its slot.
@@ -419,7 +425,7 @@ pub struct CaretSelection {
 /// the run's `caret_map`, honoring directional affinity.
 ///
 /// Every method is required (no default body); the real HarfRust-backed
-/// implementation lands in Wave 6. [`MockTextStack`] provides a
+/// implementation lands in a later wave. [`MockTextStack`] provides a
 /// non-panicking stub for downstream consumers today.
 pub trait EditingOps {
     /// Map a screen-space point to the nearest caret offset.
@@ -532,7 +538,7 @@ pub struct MeasuredLines {
 /// will unify their type signatures precisely.
 ///
 /// Every method is required (no default body); the real HarfRust-backed
-/// implementation lands in Wave 6. [`MockTextStack`] provides a
+/// implementation lands in a later wave. [`MockTextStack`] provides a
 /// non-panicking stub for downstream consumers today.
 pub trait TextStack: TextShaper + EditingOps {
     /// Implements the `MeasuredRun` contract consumed by §5's
@@ -556,7 +562,291 @@ pub trait TextStack: TextShaper + EditingOps {
 }
 
 // ============================================================================
-// Wave-3 mock implementations
+// HarfRust-backed implementations (Wave 1 default — ADR 022)
+// ============================================================================
+
+/// Internal entry for a registered font face.
+struct HarfRustFontEntry {
+    /// Stable handle.
+    id: FontId,
+    /// Parsed, Arc-reference-counted font (cheap to clone for shaping).
+    font: Font,
+    /// Cached decoded metrics.
+    face: DecodedFace,
+}
+
+/// HarfRust-backed [`FontRegistry`] — the default implementation (ADR 022).
+///
+/// Stores parsed OpenType tables on the WASM heap via [`harfrust::font::Font`]
+/// (internally `Arc`-reference-counted, `Send + Sync`). Each [`FontId`] maps
+/// to a single face entry. Wave 1 limitations:
+/// - [`resolve`](FontRegistry::resolve) returns the first loaded font;
+///   real family/weight/style matching is deferred.
+/// - [`fallback_chain`](FontRegistry::fallback_chain) always returns `&[]`;
+///   real fallback chains land with the font-config integration.
+#[derive(Default)]
+pub struct HarfRustFontRegistry {
+    /// Registered font entries, indexed by `FontId(u32)` == position.
+    entries: Vec<HarfRustFontEntry>,
+}
+
+impl HarfRustFontRegistry {
+    /// Create an empty registry.
+    pub fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+
+    /// Returns a cheap clone of the underlying [`Font`] for `id`, if
+    /// registered. Used by [`HarfRustTextShaper`] to build a fresh
+    /// [`FontInstance`] per shape call.
+    pub fn font(&self, id: FontId) -> Option<Font> {
+        self.entries
+            .iter()
+            .find(|e| e.id == id)
+            .map(|e| e.font.clone())
+    }
+
+    /// Number of registered faces.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Returns `true` if no faces are registered.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+impl FontRegistry for HarfRustFontRegistry {
+    fn resolve(&mut self, _req: &FontRequest) -> Result<FontId, FontLoadError> {
+        // Wave 1: return the first loaded font. Real family/weight/style
+        // matching lands with the font-config integration.
+        self.entries
+            .first()
+            .map(|e| e.id)
+            .ok_or(FontLoadError::RegistryEmpty)
+    }
+
+    fn face(&self, id: FontId) -> &DecodedFace {
+        self.entries
+            .iter()
+            .find(|e| e.id == id)
+            .map(|e| &e.face)
+            .expect("HarfRustFontRegistry::face: FontId not registered")
+    }
+
+    fn load_bundle(&mut self, bytes: &[u8]) -> Result<FontId, FontLoadError> {
+        let font = Font::new(bytes.to_vec(), 0).map_err(|_| FontLoadError::TableDecodeFailed {
+            font_id: FontId::default(),
+            table: Tag(*b"sfnt"),
+        })?;
+        let id = FontId(self.entries.len() as u32);
+        let face = decode_face(&font, id);
+        self.entries.push(HarfRustFontEntry { id, font, face });
+        Ok(id)
+    }
+
+    fn fallback_chain(&self, _id: FontId) -> &[FontId] {
+        &[]
+    }
+}
+
+/// Decode the `head`/`hhea` metrics for a [`Font`] into a [`DecodedFace`].
+///
+/// Missing tables are tolerated — the corresponding metric defaults to `0`.
+fn decode_face(font: &Font, id: FontId) -> DecodedFace {
+    let tables = font.tables();
+    let units_per_em = tables.head().map(|h| h.units_per_em()).unwrap_or(0);
+    let (ascender, descender, line_gap) = tables
+        .hhea()
+        .map(|h| {
+            (
+                h.ascender().to_i16(),
+                h.descender().to_i16(),
+                h.line_gap().to_i16(),
+            )
+        })
+        .unwrap_or((0, 0, 0));
+    DecodedFace {
+        id,
+        units_per_em,
+        ascender,
+        descender,
+        line_gap,
+    }
+}
+
+/// Default size (px) used by [`HarfRustTextShaper::reshape_with_font`] when
+/// no [`ShapeContext`] is available. The trait method
+/// [`TextShaper::reshape_with_font`] only receives a [`FontId`], so a
+/// reasonable default is required; `16.0` px matches common body-text size.
+const DEFAULT_SHAPE_SIZE_PX: f32 = 16.0;
+
+/// Fixed-point divisor for HarfRust's 16.16 position format. When a
+/// [`FontInstance`] has a non-`None` size, HarfRust's free `shape` function
+/// auto-sets the scale to `ppem * 65536`, producing positions in 16.16
+/// fixed point. Dividing by `65536.0` recovers pixel-space `f32` values.
+const HARF_POSITION_DIVISOR: f32 = 65536.0;
+
+/// HarfRust-backed [`TextShaper`] — the default implementation (ADR 022).
+///
+/// Holds an [`Arc`] share of a [`HarfRustFontRegistry`] so multiple shapers
+/// can share one registry. Each [`shape`](TextShaper::shape) call builds a
+/// fresh [`FontInstance`] (which is neither `Clone` nor `Sync` — it holds
+/// mutable shaping state) from the registry's [`Font`] clone.
+///
+/// Wave 1 limitations:
+/// - BiDi is not implemented; the run is shaped as a single segment with
+///   direction from [`ShapeContext::direction`] or auto-detected by
+///   HarfRust's `guess_segment_properties`.
+/// - [`reshape_with_font`](TextShaper::reshape_with_font) uses
+///   [`DEFAULT_SHAPE_SIZE_PX`] (the trait doesn't pass a [`ShapeContext`]).
+/// - `ShapeError::NotdefOnly` is never returned; uncovered codepoints
+///   surface as `.notdef` glyphs with real metrics (visible tofu) per §6.3.
+pub struct HarfRustTextShaper {
+    /// Read-only share of the font registry.
+    registry: Arc<HarfRustFontRegistry>,
+}
+
+impl HarfRustTextShaper {
+    /// Create a shaper backed by `registry`. The registry should have all
+    /// fonts loaded before the shaper is constructed (the shaper takes a
+    /// read-only [`Arc`] share).
+    pub fn new(registry: Arc<HarfRustFontRegistry>) -> Self {
+        Self { registry }
+    }
+}
+
+impl TextShaper for HarfRustTextShaper {
+    fn shape(&self, run: &str, ctx: &ShapeContext) -> Result<ShapedRun, ShapeError> {
+        shape_run(&self.registry, run, ctx.font, ctx.size_px, ctx.direction)
+    }
+
+    fn reshape_with_font(&self, run: &str, font: FontId) -> Result<ShapedRun, ShapeError> {
+        shape_run(
+            &self.registry,
+            run,
+            font,
+            DEFAULT_SHAPE_SIZE_PX,
+            None,
+        )
+    }
+}
+
+/// Core shaping routine shared by [`HarfRustTextShaper::shape`] and
+/// [`HarfRustTextShaper::reshape_with_font`].
+///
+/// Builds a fresh [`FontInstance`], runs HarfRust's [`harfrust_shape`], and
+/// converts the [`harfrust::GlyphBuffer`] into a [`ShapedRun`].
+fn shape_run(
+    registry: &HarfRustFontRegistry,
+    text: &str,
+    font_id: FontId,
+    size_px: f32,
+    direction: Option<Direction>,
+) -> Result<ShapedRun, ShapeError> {
+    let font = registry.font(font_id).ok_or(ShapeError::FontUnresolved)?;
+
+    // FontInstance is neither Clone nor Sync — create a fresh one per call.
+    let instance = FontInstance::builder(&font).size(Some(size_px)).build();
+
+    let mut buffer = UnicodeBuffer::new();
+    buffer.push_str(text);
+    if let Some(dir) = direction {
+        buffer.set_direction(map_direction_to_harfrust(dir));
+    }
+    // Auto-detect script (and direction if not explicitly set).
+    buffer.guess_segment_properties();
+    let resolved_harfrust_dir = buffer.direction();
+
+    let glyph_buffer = harfrust_shape(&instance, buffer, ShapeOptions::new());
+
+    let infos = glyph_buffer.glyph_infos();
+    let positions = glyph_buffer.glyph_positions();
+
+    let n = infos.len();
+    let mut glyph_ids = Vec::with_capacity(n);
+    let mut advances = Vec::with_capacity(n);
+    let mut offsets = Vec::with_capacity(n);
+    let mut clusters = Vec::with_capacity(n);
+    let mut total_advance = 0.0f32;
+
+    for (info, pos) in infos.iter().zip(positions.iter()) {
+        glyph_ids.push(info.glyph_id);
+        let x_adv = pos.x_advance as f32 / HARF_POSITION_DIVISOR;
+        advances.push(x_adv);
+        offsets.push((
+            pos.x_offset as f32 / HARF_POSITION_DIVISOR,
+            pos.y_offset as f32 / HARF_POSITION_DIVISOR,
+        ));
+        clusters.push(info.cluster);
+        total_advance += x_adv;
+    }
+
+    // Font metrics scaled from font units to pixels.
+    let face = registry.face(font_id);
+    let scale = if face.units_per_em > 0 {
+        size_px / face.units_per_em as f32
+    } else {
+        0.0
+    };
+    let metrics = RunMetrics {
+        ascent: face.ascender as f32 * scale,
+        descent: face.descender as f32 * scale,
+        line_gap: face.line_gap as f32 * scale,
+        total_advance,
+    };
+
+    let out_direction = map_direction_from_harfrust(resolved_harfrust_dir);
+    // Wave 1: BiDi is not implemented. Embedding level is derived from
+    // direction only (0 for LTR, 1 for RTL).
+    let bidi_level: u8 = if out_direction == Direction::Rtl { 1 } else { 0 };
+
+    // Cluster map: glyph_to_cluster mirrors the per-glyph cluster index;
+    // caret_to_glyph maps each caret boundary to the glyph index immediately
+    // to its right (LTR) — for an N-glyph run there are N+1 carets.
+    let glyph_to_cluster = clusters.clone();
+    let caret_to_glyph: Vec<u32> = (0..=n).map(|i| i as u32).collect();
+
+    Ok(ShapedRun {
+        glyph_ids: glyph_ids.into_boxed_slice(),
+        advances: advances.into_boxed_slice(),
+        offsets: offsets.into_boxed_slice(),
+        clusters: clusters.into_boxed_slice(),
+        caret_map: ClusterMap {
+            glyph_to_cluster,
+            caret_to_glyph,
+        },
+        metrics,
+        bidi_level,
+        font_id,
+        direction: out_direction,
+    })
+}
+
+/// Map our [`Direction`] to HarfRust's [`HarfRustDirection`].
+fn map_direction_to_harfrust(dir: Direction) -> HarfRustDirection {
+    match dir {
+        Direction::Ltr => HarfRustDirection::LeftToRight,
+        Direction::Rtl => HarfRustDirection::RightToLeft,
+    }
+}
+
+/// Map HarfRust's [`HarfRustDirection`] back to our [`Direction`].
+///
+/// Vertical and `Invalid` directions are folded to [`Direction::Ltr`] for
+/// Wave 1; vertical text support lands in a later wave.
+fn map_direction_from_harfrust(dir: HarfRustDirection) -> Direction {
+    match dir {
+        HarfRustDirection::RightToLeft => Direction::Rtl,
+        _ => Direction::Ltr,
+    }
+}
+
+// ============================================================================
+// Wave-3 mock implementations (test-only — prefer HarfRust* defaults above)
 // ============================================================================
 
 /// Construct a minimal empty [`ShapedRun`] for the mock text stack.
@@ -579,13 +869,13 @@ fn empty_shaped_run() -> ShapedRun {
     }
 }
 
-/// Wave-3 mock [`FontRegistry`] with stub implementations of every method.
+/// **Test-only** mock [`FontRegistry`] with stub implementations of every
+/// method.
 ///
 /// Returns neutral/empty outputs for every operation — sufficient to compile
-/// downstream consumers against the trait surface today. The real HarfRust
-/// integration (font registry backed by parsed OpenType tables) lands in
-/// Wave 6 per §6.2; until then, calling any [`FontRegistry`] method on this
-/// mock never panics.
+/// downstream consumers against the trait surface. The default
+/// HarfRust-backed implementation is [`HarfRustFontRegistry`]; this mock is
+/// retained for tests and as a non-panicking fallback.
 ///
 /// - [`resolve`](FontRegistry::resolve) always returns `Ok(FontId(0))`.
 /// - [`face`](FontRegistry::face) always returns a default [`DecodedFace`].
@@ -622,11 +912,12 @@ impl FontRegistry for MockFontRegistry {
     }
 }
 
-/// Wave-3 mock [`GlyphAtlas`] with stub implementations of every method.
+/// **Test-only** mock [`GlyphAtlas`] with stub implementations of every
+/// method.
 ///
 /// Returns neutral/empty outputs for every operation — sufficient to compile
 /// downstream consumers against the trait surface today. The real GPU-backed
-/// LRU atlas lands in Wave 6 per §6.4; until then, calling any
+/// LRU atlas lands in a later wave per §6.4; until then, calling any
 /// [`GlyphAtlas`] method on this mock never panics.
 ///
 /// - [`ensure`](GlyphAtlas::ensure) returns a zeroed [`AtlasSlot`] (page `0`,
@@ -666,14 +957,15 @@ impl GlyphAtlas for MockGlyphAtlas {
     }
 }
 
-/// Wave-3 mock [`TextStack`] with stub implementations of every method.
+/// **Test-only** mock [`TextStack`] with stub implementations of every
+/// method.
 ///
 /// Returns empty/minimal outputs for every operation — sufficient to compile
-/// downstream consumers against the trait surface today. The real HarfRust
-/// integration (font registry, shaper, LRU glyph atlas, editing ops, IME,
-/// a11y) lands in Wave 6 per §6.2–6.9; this mock overrides every required
-/// trait method with deterministic stubs so that calling any [`TextStack`]
-/// method never panics.
+/// downstream consumers against the trait surface today. The default
+/// HarfRust-backed shaper is [`HarfRustTextShaper`]; this mock is retained
+/// for tests and as a non-panicking fallback for the `TextStack`-level
+/// methods (`measure`, `rasterize`, `expose_a11y_text`, `ime_compose`) that
+/// are not yet implemented by [`HarfRustTextShaper`].
 ///
 /// The mock holds no state: every call returns the same constant output.
 /// `ime_compose` always reports [`ImeState::Cancelled`].
@@ -732,12 +1024,205 @@ impl TextStack for MockTextStack {
 }
 
 // ============================================================================
-// Wave 3 tests
+// Tests
 // ============================================================================
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Minimal embedded TTF — OpenSans variable subset (3196 bytes).
+    /// Covers U+0065 ('e') and exercises GSUB/GPOS, fvar, etc. Used for
+    /// both the registry `load_bundle` test and the shaper `shape` test.
+    const TEST_FONT_TTF: &[u8] = include_bytes!(
+        "../../../vendor/harfrust/harfrust/tests/fonts/rb_custom/OpenSans.subset1.ttf"
+    );
+
+    // -- HarfRust-backed tests ---------------------------------------------
+
+    #[test]
+    fn harfrust_registry_load_bundle_returns_ok() {
+        let mut reg = HarfRustFontRegistry::new();
+        assert!(reg.is_empty());
+        let id = reg
+            .load_bundle(TEST_FONT_TTF)
+            .expect("load_bundle must be Ok for a valid TTF");
+        assert_eq!(id, FontId(0));
+        assert_eq!(reg.len(), 1);
+        assert!(!reg.is_empty());
+
+        // The face should carry real metrics from head/hhea.
+        let face = reg.face(id);
+        assert_eq!(face.id, id);
+        // OpenSans subset has 2048 units per em.
+        assert_eq!(face.units_per_em, 2048);
+        // Ascender should be positive, descender negative.
+        assert!(face.ascender > 0, "ascender should be positive");
+        assert!(face.descender < 0, "descender should be negative");
+    }
+
+    #[test]
+    fn harfrust_registry_load_bundle_rejects_garbage() {
+        let mut reg = HarfRustFontRegistry::new();
+        let result = reg.load_bundle(b"not a font");
+        assert!(
+            matches!(result, Err(FontLoadError::TableDecodeFailed { .. })),
+            "garbage bytes should produce TableDecodeFailed, got {:?}",
+            result
+        );
+        assert!(reg.is_empty(), "registry should remain empty on failure");
+    }
+
+    #[test]
+    fn harfrust_registry_resolve_returns_first_font() {
+        let mut reg = HarfRustFontRegistry::new();
+        // Empty registry → RegistryEmpty.
+        assert!(matches!(
+            reg.resolve(&FontRequest::default()),
+            Err(FontLoadError::RegistryEmpty)
+        ));
+        // Load a font → resolve returns FontId(0).
+        reg.load_bundle(TEST_FONT_TTF).unwrap();
+        let id = reg.resolve(&FontRequest::default()).expect("resolve must be Ok");
+        assert_eq!(id, FontId(0));
+    }
+
+    #[test]
+    fn harfrust_registry_fallback_chain_is_empty() {
+        let mut reg = HarfRustFontRegistry::new();
+        let id = reg.load_bundle(TEST_FONT_TTF).unwrap();
+        assert!(reg.fallback_chain(id).is_empty());
+    }
+
+    #[test]
+    fn harfrust_shape_returns_non_empty_run() {
+        let mut reg = HarfRustFontRegistry::new();
+        let font_id = reg.load_bundle(TEST_FONT_TTF).expect("load_bundle must be Ok");
+
+        let shaper = HarfRustTextShaper::new(Arc::new(reg));
+        let ctx = ShapeContext {
+            font: font_id,
+            size_px: 16.0,
+            direction: Some(Direction::Ltr),
+        };
+        // The subset font covers U+0065 ('e').
+        let run = shaper.shape("e", &ctx).expect("shape must be Ok");
+
+        assert!(
+            !run.glyph_ids.is_empty(),
+            "glyph_ids must be non-empty for a covered codepoint"
+        );
+        assert!(
+            run.metrics.total_advance > 0.0,
+            "total_advance must be non-zero, got {}",
+            run.metrics.total_advance
+        );
+        assert_eq!(run.font_id, font_id);
+        assert_eq!(run.direction, Direction::Ltr);
+        assert_eq!(run.bidi_level, 0);
+        // Parallel arrays must all have the same length.
+        assert_eq!(run.glyph_ids.len(), run.advances.len());
+        assert_eq!(run.advances.len(), run.offsets.len());
+        assert_eq!(run.offsets.len(), run.clusters.len());
+        // Caret map: N+1 carets for N glyphs.
+        assert_eq!(run.caret_map.glyph_to_cluster.len(), run.glyph_ids.len());
+        assert_eq!(
+            run.caret_map.caret_to_glyph.len(),
+            run.glyph_ids.len() + 1
+        );
+        // Ascent should be positive at non-zero size.
+        assert!(
+            run.metrics.ascent > 0.0,
+            "ascent should be positive, got {}",
+            run.metrics.ascent
+        );
+    }
+
+    #[test]
+    fn harfrust_shape_auto_detects_direction() {
+        let mut reg = HarfRustFontRegistry::new();
+        let font_id = reg.load_bundle(TEST_FONT_TTF).unwrap();
+        let shaper = HarfRustTextShaper::new(Arc::new(reg));
+
+        // direction = None → HarfRust auto-detects (Latin → LTR).
+        let ctx = ShapeContext {
+            font: font_id,
+            size_px: 16.0,
+            direction: None,
+        };
+        let run = shaper.shape("e", &ctx).expect("shape must be Ok");
+        assert_eq!(run.direction, Direction::Ltr);
+        assert_eq!(run.bidi_level, 0);
+    }
+
+    #[test]
+    fn harfrust_shape_font_unresolved() {
+        let mut reg = HarfRustFontRegistry::new();
+        reg.load_bundle(TEST_FONT_TTF).unwrap();
+        let shaper = HarfRustTextShaper::new(Arc::new(reg));
+
+        let ctx = ShapeContext {
+            font: FontId(999), // not registered
+            size_px: 16.0,
+            direction: Some(Direction::Ltr),
+        };
+        assert!(matches!(
+            shaper.shape("e", &ctx),
+            Err(ShapeError::FontUnresolved)
+        ));
+    }
+
+    #[test]
+    fn harfrust_reshape_with_font_uses_default_size() {
+        let mut reg = HarfRustFontRegistry::new();
+        let font_id = reg.load_bundle(TEST_FONT_TTF).unwrap();
+        let shaper = HarfRustTextShaper::new(Arc::new(reg));
+
+        let run = shaper
+            .reshape_with_font("e", font_id)
+            .expect("reshape_with_font must be Ok");
+        assert!(!run.glyph_ids.is_empty());
+        assert!(run.metrics.total_advance > 0.0);
+        assert_eq!(run.font_id, font_id);
+    }
+
+    #[test]
+    fn harfrust_shape_empty_string() {
+        let mut reg = HarfRustFontRegistry::new();
+        let font_id = reg.load_bundle(TEST_FONT_TTF).unwrap();
+        let shaper = HarfRustTextShaper::new(Arc::new(reg));
+
+        let ctx = ShapeContext {
+            font: font_id,
+            size_px: 16.0,
+            direction: Some(Direction::Ltr),
+        };
+        let run = shaper.shape("", &ctx).expect("shape must be Ok");
+        assert!(run.glyph_ids.is_empty());
+        assert_eq!(run.metrics.total_advance, 0.0);
+        // Even an empty run carries font metrics.
+        assert!(run.metrics.ascent > 0.0);
+    }
+
+    #[test]
+    fn harfrust_registry_multiple_fonts() {
+        let mut reg = HarfRustFontRegistry::new();
+        let id0 = reg.load_bundle(TEST_FONT_TTF).unwrap();
+        let id1 = reg.load_bundle(TEST_FONT_TTF).unwrap();
+        assert_eq!(id0, FontId(0));
+        assert_eq!(id1, FontId(1));
+        assert_eq!(reg.len(), 2);
+
+        // resolve still returns the first font (Wave 1 behavior).
+        let resolved = reg.resolve(&FontRequest::default()).unwrap();
+        assert_eq!(resolved, FontId(0));
+
+        // Both faces should be accessible.
+        assert_eq!(reg.face(id0).id, id0);
+        assert_eq!(reg.face(id1).id, id1);
+    }
+
+    // -- Mock tests (retained from Wave 3) ---------------------------------
 
     #[test]
     fn mock_shape_returns_ok_with_empty_run() {

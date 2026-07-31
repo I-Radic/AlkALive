@@ -41,6 +41,7 @@ alkalive-error  = { path = "crates/alkalive-error" }
 alkalive-test   = { path = "crates/alkalive-test" }
 alkalive-runtime = { path = "crates/alkalive-runtime" }
 harfrust = { path = "vendor/harfrust/harfrust", default-features = false }
+read-fonts = { version = "0.41.0", default-features = false, features = ["experimental_font_api"] }
 
 [profile.wasm-release]
 inherits = "release"
