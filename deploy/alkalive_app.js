@@ -1,6 +1,24 @@
 /* @ts-self-types="./alkalive_app.d.ts" */
 
 /**
+ * Get the current FPS estimate.
+ * @returns {number}
+ */
+export function get_fps() {
+    const ret = wasm.get_fps();
+    return ret;
+}
+
+/**
+ * Get the current frame count.
+ * @returns {bigint}
+ */
+export function get_frame_count() {
+    const ret = wasm.get_frame_count();
+    return BigInt.asUintN(64, ret);
+}
+
+/**
  * Get the framebuffer length in bytes.
  * @returns {number}
  */
@@ -11,9 +29,6 @@ export function get_framebuffer_len() {
 
 /**
  * Get a raw pointer to the framebuffer data.
- *
- * In JavaScript, use this with `new Uint8Array(wasm.memory.buffer, ptr, len)`
- * to create a view into the WASM memory without copying.
  * @returns {number}
  */
 export function get_framebuffer_ptr() {
@@ -31,6 +46,15 @@ export function get_height() {
 }
 
 /**
+ * Get the current rotation angle in radians (for HUD display).
+ * @returns {number}
+ */
+export function get_rotation_angle() {
+    const ret = wasm.get_rotation_angle();
+    return ret;
+}
+
+/**
  * Get the framebuffer width.
  * @returns {number}
  */
@@ -41,9 +65,6 @@ export function get_width() {
 
 /**
  * Initialize the application with the given canvas dimensions.
- *
- * This loads the embedded Roboto font, shapes "Hello World!", rasterizes
- * all glyphs into the atlas, and prepares the framebuffer.
  * @param {number} width
  * @param {number} height
  */
@@ -52,6 +73,15 @@ export function init(width, height) {
     if (ret[1]) {
         throw takeFromExternrefTable0(ret[0]);
     }
+}
+
+/**
+ * Check if animation is paused.
+ * @returns {boolean}
+ */
+export function is_paused() {
+    const ret = wasm.is_paused();
+    return ret !== 0;
 }
 
 /**
@@ -64,10 +94,77 @@ export function resize(width, height) {
 }
 
 /**
+ * Set solid text color (r, g, b).
+ * @param {number} r
+ * @param {number} g
+ * @param {number} b
+ */
+export function set_color(r, g, b) {
+    wasm.set_color(r, g, b);
+}
+
+/**
+ * Configure the glow effect: (enabled, radius, intensity).
+ * @param {boolean} enabled
+ * @param {number} radius
+ * @param {number} intensity
+ */
+export function set_glow(enabled, radius, intensity) {
+    wasm.set_glow(enabled, radius, intensity);
+}
+
+/**
+ * Set vertical gradient: top (r1,g1,b1) to bottom (r2,g2,b2).
+ * @param {number} r1
+ * @param {number} g1
+ * @param {number} b1
+ * @param {number} r2
+ * @param {number} g2
+ * @param {number} b2
+ */
+export function set_gradient(r1, g1, b1, r2, g2, b2) {
+    wasm.set_gradient(r1, g1, b1, r2, g2, b2);
+}
+
+/**
+ * Pause or resume the animation.
+ * @param {boolean} paused
+ */
+export function set_paused(paused) {
+    wasm.set_paused(paused);
+}
+
+/**
+ * Set the rotation speed (radians per second).
+ * @param {number} speed
+ */
+export function set_rotation_speed(speed) {
+    wasm.set_rotation_speed(speed);
+}
+
+/**
+ * Toggle the starfield background.
+ * @param {boolean} enabled
+ */
+export function set_starfield_enabled(enabled) {
+    wasm.set_starfield_enabled(enabled);
+}
+
+/**
+ * Change the rendered text. Re-shapes and re-rasterizes the glyphs.
+ * @param {string} text
+ */
+export function set_text(text) {
+    const ptr0 = passStringToWasm0(text, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.set_text(ptr0, len0);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
  * Render one frame.
- *
- * Advances the animation time, clears the framebuffer to black, and
- * composites the golden "Hello World!" text with a Y-axis rotation.
  */
 export function tick() {
     wasm.tick();
@@ -114,6 +211,43 @@ function getUint8ArrayMemory0() {
     return cachedUint8ArrayMemory0;
 }
 
+function passStringToWasm0(arg, malloc, realloc) {
+    if (realloc === undefined) {
+        const buf = cachedTextEncoder.encode(arg);
+        const ptr = malloc(buf.length, 1) >>> 0;
+        getUint8ArrayMemory0().subarray(ptr, ptr + buf.length).set(buf);
+        WASM_VECTOR_LEN = buf.length;
+        return ptr;
+    }
+
+    let len = arg.length;
+    let ptr = malloc(len, 1) >>> 0;
+
+    const mem = getUint8ArrayMemory0();
+
+    let offset = 0;
+
+    for (; offset < len; offset++) {
+        const code = arg.charCodeAt(offset);
+        if (code > 0x7F) break;
+        mem[ptr + offset] = code;
+    }
+    if (offset !== len) {
+        if (offset !== 0) {
+            arg = arg.slice(offset);
+        }
+        ptr = realloc(ptr, len, len = offset + arg.length * 3, 1) >>> 0;
+        const view = getUint8ArrayMemory0().subarray(ptr + offset, ptr + len);
+        const ret = cachedTextEncoder.encodeInto(arg, view);
+
+        offset += ret.written;
+        ptr = realloc(ptr, len, offset, 1) >>> 0;
+    }
+
+    WASM_VECTOR_LEN = offset;
+    return ptr;
+}
+
 function takeFromExternrefTable0(idx) {
     const value = wasm.__wbindgen_externrefs.get(idx);
     wasm.__externref_table_dealloc(idx);
@@ -133,6 +267,21 @@ function decodeText(ptr, len) {
     }
     return cachedTextDecoder.decode(getUint8ArrayMemory0().subarray(ptr, ptr + len));
 }
+
+const cachedTextEncoder = new TextEncoder();
+
+if (!('encodeInto' in cachedTextEncoder)) {
+    cachedTextEncoder.encodeInto = function (arg, view) {
+        const buf = cachedTextEncoder.encode(arg);
+        view.set(buf);
+        return {
+            read: arg.length,
+            written: buf.length
+        };
+    };
+}
+
+let WASM_VECTOR_LEN = 0;
 
 let wasmModule, wasmInstance, wasm;
 function __wbg_finalize_init(instance, module) {
