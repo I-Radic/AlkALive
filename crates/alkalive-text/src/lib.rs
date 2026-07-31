@@ -42,7 +42,7 @@ use harfrust::{
 use rasterizer::Rasterizer;
 use read_fonts::model::pen::{ControlBoundsPen, OutlinePen, PathElement};
 use read_fonts::tables::glyf::{CurvePoint, Glyph};
-use read_fonts::types::GlyphId;
+use read_fonts::types::{GlyphId, NameId};
 use read_fonts::TableProvider;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -581,17 +581,33 @@ struct HarfRustFontEntry {
     font: Font,
     /// Cached decoded metrics.
     face: DecodedFace,
+    /// Family name extracted from the font's `name` table (Gap #8).
+    ///
+    /// Prefers the Typographic Family Name (name ID 16) and falls back to
+    /// the legacy Family Name (name ID 1); defaults to `"Unknown"` when
+    /// neither is decodable. Used by
+    /// [`resolve`](HarfRustFontRegistry::resolve) for family matching.
+    family: String,
+    /// Weight class extracted from the font's `OS/2` table (Gap #8).
+    ///
+    /// CSS-scale value (100–900); defaults to `400` (regular) when the
+    /// `OS/2` table is missing or undecodable. Used by
+    /// [`resolve`](HarfRustFontRegistry::resolve) for weight matching.
+    weight: u16,
 }
 
 /// HarfRust-backed [`FontRegistry`] — the default implementation (ADR 022).
 ///
 /// Stores parsed OpenType tables on the WASM heap via [`harfrust::font::Font`]
 /// (internally `Arc`-reference-counted, `Send + Sync`). Each [`FontId`] maps
-/// to a single face entry. Wave 1 limitations:
-/// - [`resolve`](FontRegistry::resolve) returns the first loaded font;
-///   real family/weight/style matching is deferred.
-/// - [`fallback_chain`](FontRegistry::fallback_chain) always returns `&[]`;
-///   real fallback chains land with the font-config integration.
+/// to a single face entry. Wave 4 (Gap #8) closes the family/weight matching
+/// loop: each loaded entry now carries its family name (extracted from the
+/// `name` table) and weight (extracted from the `OS/2` table), and
+/// [`resolve`](FontRegistry::resolve) follows the cascade
+/// exact-family+exact-weight → exact-family+nearest-weight-within-±100 →
+/// generic alias (`serif`/`sans`/`mono`) → `FamilyNotFound`.
+/// [`fallback_chain`](FontRegistry::fallback_chain) still always returns
+/// `&[]`; real fallback chains land with the font-config integration.
 #[derive(Default)]
 pub struct HarfRustFontRegistry {
     /// Registered font entries, indexed by `FontId(u32)` == position.
@@ -625,16 +641,86 @@ impl HarfRustFontRegistry {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+
+    /// Returns the `(family, weight)` extracted at load time for the font
+    /// at `id`, or `None` if no such font is registered (Gap #8). Useful for
+    /// callers that need to construct a matching [`FontRequest`] against an
+    /// already-loaded face.
+    pub fn family_and_weight(&self, id: FontId) -> Option<(&str, u16)> {
+        self.entries
+            .iter()
+            .find(|e| e.id == id)
+            .map(|e| (e.family.as_str(), e.weight))
+    }
 }
 
 impl FontRegistry for HarfRustFontRegistry {
-    fn resolve(&mut self, _req: &FontRequest) -> Result<FontId, FontLoadError> {
-        // Wave 1: return the first loaded font. Real family/weight/style
-        // matching lands with the font-config integration.
-        self.entries
-            .first()
-            .map(|e| e.id)
-            .ok_or(FontLoadError::RegistryEmpty)
+    fn resolve(&mut self, req: &FontRequest) -> Result<FontId, FontLoadError> {
+        // Empty registry → RegistryEmpty (preserved Wave 1 behaviour for
+        // the "nothing loaded yet" path; distinct from FamilyNotFound which
+        // indicates a populated registry with no match).
+        if self.entries.is_empty() {
+            return Err(FontLoadError::RegistryEmpty);
+        }
+
+        // A blank requested family never matches a loaded family — skip
+        // straight to alias matching / FamilyNotFound.
+        let family_matches: Vec<&HarfRustFontEntry> = if req.family.is_empty() {
+            Vec::new()
+        } else {
+            self.entries
+                .iter()
+                .filter(|e| e.family.eq_ignore_ascii_case(&req.family))
+                .collect()
+        };
+
+        if !family_matches.is_empty() {
+            // a. Exact family + exact weight.
+            if let Some(entry) = family_matches.iter().find(|e| e.weight == req.weight) {
+                return Ok(entry.id);
+            }
+            // b. Exact family + nearest weight within ±100 (Gap #8).
+            let nearest = family_matches
+                .iter()
+                .filter(|e| (e.weight as i32 - req.weight as i32).abs() <= 100)
+                .min_by_key(|e| (e.weight as i32 - req.weight as i32).abs());
+            if let Some(entry) = nearest {
+                return Ok(entry.id);
+            }
+            // Family matched but no acceptable weight — fall through to
+            // FamilyNotFound. (Wave 4: WeightUnavailable is intentionally
+            // not surfaced here; the spec's fallback chain collapses a
+            // weight miss into the same terminal FamilyNotFound path so
+            // callers handle a single miss code.)
+        } else {
+            // c. No family match — try generic alias mapping (Gap #8):
+            //   "serif"       → first font with "serif" in its family name
+            //   "sans-serif"  → first font with "sans" in its family name
+            //   "sans"        → (same as "sans-serif")
+            //   "monospace"   → first font with "mono" in its family name
+            //   "mono"        → (same as "monospace")
+            // Matching is case-insensitive on both the request and the
+            // loaded family name.
+            let req_lower = req.family.to_ascii_lowercase();
+            let alias_needle: Option<&str> = match req_lower.as_str() {
+                "serif" => Some("serif"),
+                "sans-serif" | "sans" => Some("sans"),
+                "monospace" | "mono" => Some("mono"),
+                _ => None,
+            };
+            if let Some(needle) = alias_needle {
+                if let Some(entry) = self
+                    .entries
+                    .iter()
+                    .find(|e| e.family.to_ascii_lowercase().contains(needle))
+                {
+                    return Ok(entry.id);
+                }
+            }
+        }
+
+        // d. No match across the cascade.
+        Err(FontLoadError::FamilyNotFound)
     }
 
     fn face(&self, id: FontId) -> &DecodedFace {
@@ -652,7 +738,14 @@ impl FontRegistry for HarfRustFontRegistry {
         })?;
         let id = FontId(self.entries.len() as u32);
         let face = decode_face(&font, id);
-        self.entries.push(HarfRustFontEntry { id, font, face });
+        let (family, weight) = extract_family_and_weight(&font);
+        self.entries.push(HarfRustFontEntry {
+            id,
+            font,
+            face,
+            family,
+            weight,
+        });
         Ok(id)
     }
 
@@ -684,6 +777,51 @@ fn decode_face(font: &Font, id: FontId) -> DecodedFace {
         descender,
         line_gap,
     }
+}
+
+/// Extract the family name and weight class from a [`Font`]'s `name` and
+/// `OS/2` tables (Gap #8).
+///
+/// Family extraction prefers the Typographic Family Name (name ID 16) and
+/// falls back to the legacy Family Name (name ID 1); only Unicode-encoded
+/// records are read. Weight is read from `OS/2::us_weight_class`. Any
+/// failure (missing table, undecodable string, empty string) falls back to
+/// the documented defaults of `"Unknown"` / `400`.
+fn extract_family_and_weight(font: &Font) -> (String, u16) {
+    let tables = font.tables();
+
+    // Family: prefer Typographic Family Name (ID 16) over legacy Family
+    // Name (ID 1). Only Unicode-platform name records are decoded.
+    let family = tables
+        .name()
+        .ok()
+        .and_then(|name_table| {
+            let storage = name_table.string_data();
+            let records = name_table.name_record();
+            for &target_id in &[NameId::TYPOGRAPHIC_FAMILY_NAME, NameId::FAMILY_NAME] {
+                for record in records.iter() {
+                    if record.name_id() == target_id && record.is_unicode() {
+                        if let Ok(name_string) = record.string(storage) {
+                            let collected: String = name_string.chars().collect();
+                            if !collected.is_empty() {
+                                return Some(collected);
+                            }
+                        }
+                    }
+                }
+            }
+            None
+        })
+        .unwrap_or_else(|| "Unknown".to_string());
+
+    // Weight: OS/2::us_weight_class (CSS scale 100–900).
+    let weight = tables
+        .os2()
+        .ok()
+        .map(|os2| os2.us_weight_class())
+        .unwrap_or(400);
+
+    (family, weight)
 }
 
 /// Default size (px) used by [`HarfRustTextShaper::reshape_with_font`] when
@@ -1509,6 +1647,15 @@ mod tests {
         "../../../vendor/harfrust/harfrust/tests/fonts/rb_custom/OpenSans.subset1.ttf"
     );
 
+    /// Second embedded TTF — PT Sans Caption (full, non-subset). Used by
+    /// the Gap #8 family-matching tests alongside [`TEST_FONT_TTF`] to
+    /// exercise multi-family resolution. PT Sans Caption has a distinct
+    /// family name from OpenSans, so the two are suitable for verifying
+    /// that [`HarfRustFontRegistry::resolve`] dispatches on family.
+    const TEST_FONT_TTF_2: &[u8] = include_bytes!(
+        "../../../vendor/harfrust/harfrust/tests/fonts/rb_custom/PT_Sans-Caption-Web-Regular.ttf"
+    );
+
     // -- HarfRust-backed tests ---------------------------------------------
 
     /// Glyph ID of the only glyph in `TEST_FONT_TTF` that has a real
@@ -1560,12 +1707,102 @@ mod tests {
             reg.resolve(&FontRequest::default()),
             Err(FontLoadError::RegistryEmpty)
         ));
-        // Load a font → resolve returns FontId(0).
+        // Load a font and read back its extracted family/weight (Gap #8).
+        let id = reg.load_bundle(TEST_FONT_TTF).unwrap();
+        let (family, weight) = reg
+            .family_and_weight(id)
+            .expect("loaded font must expose family_and_weight");
+        // Resolving by the loaded font's actual family + weight must hit
+        // the exact-match path and return the same FontId.
+        let req = FontRequest {
+            family: family.to_string(),
+            weight,
+            style: "normal",
+        };
+        let resolved = reg.resolve(&req).expect("resolve must be Ok");
+        assert_eq!(resolved, id);
+    }
+
+    /// Wave 4 (Gap #8): a request for a family that is not loaded (and is
+    /// not a generic alias) returns [`FontLoadError::FamilyNotFound`].
+    #[test]
+    fn harfrust_registry_resolve_unknown_family_returns_family_not_found() {
+        let mut reg = HarfRustFontRegistry::new();
         reg.load_bundle(TEST_FONT_TTF).unwrap();
-        let id = reg
-            .resolve(&FontRequest::default())
-            .expect("resolve must be Ok");
-        assert_eq!(id, FontId(0));
+        let req = FontRequest {
+            family: String::from("This Font Does Not Exist"),
+            weight: 400,
+            style: "normal",
+        };
+        assert!(matches!(
+            reg.resolve(&req),
+            Err(FontLoadError::FamilyNotFound)
+        ));
+    }
+
+    /// Wave 4 (Gap #8): loading two fonts with different families lets
+    /// [`resolve`](FontRegistry::resolve) return the correct [`FontId`] for
+    /// each, by exact family + exact weight match.
+    #[test]
+    fn harfrust_registry_resolve_matches_family_and_weight() {
+        let mut reg = HarfRustFontRegistry::new();
+        let id_a = reg.load_bundle(TEST_FONT_TTF).unwrap();
+        let id_b = reg.load_bundle(TEST_FONT_TTF_2).unwrap();
+        assert_eq!(id_a, FontId(0));
+        assert_eq!(id_b, FontId(1));
+        assert_ne!(id_a, id_b);
+
+        // Read back each font's extracted family/weight as owned values so
+        // the borrows from `reg` end before the `&mut self` resolve calls
+        // (Gap #8).
+        let (family_a, weight_a) = reg
+            .family_and_weight(id_a)
+            .expect("font A must expose family_and_weight");
+        let (family_b, weight_b) = reg
+            .family_and_weight(id_b)
+            .expect("font B must expose family_and_weight");
+        let family_a = family_a.to_string();
+        let family_b = family_b.to_string();
+
+        // The two fonts must have different families for this test to be
+        // meaningful; if they don't, the registry's family extraction is
+        // broken.
+        assert_ne!(
+            family_a, family_b,
+            "the two test fonts must have different family names for Gap #8 coverage"
+        );
+
+        // Resolve each family → correct FontId.
+        let req_a = FontRequest {
+            family: family_a.clone(),
+            weight: weight_a,
+            style: "normal",
+        };
+        let req_b = FontRequest {
+            family: family_b.clone(),
+            weight: weight_b,
+            style: "normal",
+        };
+        assert_eq!(
+            reg.resolve(&req_a).expect("resolve family A must be Ok"),
+            id_a
+        );
+        assert_eq!(
+            reg.resolve(&req_b).expect("resolve family B must be Ok"),
+            id_b
+        );
+
+        // Case-insensitive family match: requesting "FAMILY_A" in upper
+        // case must still resolve to id_a (Gap #8 case-insensitivity).
+        let req_a_upper = FontRequest {
+            family: family_a.to_ascii_uppercase(),
+            weight: weight_a,
+            style: "normal",
+        };
+        assert_eq!(
+            reg.resolve(&req_a_upper).expect("resolve family A (upper) must be Ok"),
+            id_a
+        );
     }
 
     #[test]
@@ -1693,9 +1930,22 @@ mod tests {
         assert_eq!(id1, FontId(1));
         assert_eq!(reg.len(), 2);
 
-        // resolve still returns the first font (Wave 1 behavior).
-        let resolved = reg.resolve(&FontRequest::default()).unwrap();
-        assert_eq!(resolved, FontId(0));
+        // Wave 4 (Gap #8): resolve now dispatches on family/weight rather
+        // than returning the first loaded font. Two copies of the same
+        // font share the same family, so an exact-family+exact-weight
+        // request resolves to the first copy (id0). See
+        // `harfrust_registry_resolve_matches_family_and_weight` for the
+        // multi-family case.
+        let (family, weight) = reg
+            .family_and_weight(id0)
+            .expect("loaded font must expose family_and_weight");
+        let req = FontRequest {
+            family: family.to_string(),
+            weight,
+            style: "normal",
+        };
+        let resolved = reg.resolve(&req).expect("resolve must be Ok");
+        assert_eq!(resolved, id0);
 
         // Both faces should be accessible.
         assert_eq!(reg.face(id0).id, id0);

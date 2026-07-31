@@ -262,21 +262,27 @@ pub struct Animation {
     pub elapsed: Duration,
     /// Current lifecycle state.
     pub state: AnimationState,
+    /// Most recently sampled interpolated value, written by [`tick`](Animation::tick)
+    /// each frame (Gap #6). `None` until the first successful `Running` tick
+    /// with at least one keyframe; render objects read this during the
+    /// per-frame style-read phase and write it back into the owning field.
+    pub current_value: Option<StyleProperty>,
 }
 
 impl Animation {
-    /// Advance `elapsed` by `dt` and write the interpolated
-    /// [`StyleProperty`] back into the owning field.
+    /// Advance `elapsed` by `dt`, sample the keyframe pair surrounding the
+    /// current normalised time, and store the interpolated
+    /// [`StyleProperty`] in [`current_value`](Animation::current_value).
     ///
-    /// Wave E (Gap H5) update — `tick` now honours the lifecycle state
-    /// (`Idle` / `Paused` are no-ops), advances the clock only while
-    /// `Running`, flips to `Completed` on duration reach, and samples the
-    /// keyframe pair surrounding the current normalised time. The
-    /// interpolated value is computed but **not written back** yet — the
-    /// per-`StyleProperty` arithmetic and the owning-field accessor are
-    /// unified by the rendering-ABI ADR (§4.7 / §7.5), so a `TODO` marks
-    /// the deferred write-back. On error the runtime logs the error and
-    /// freezes the animation at its last valid frame (§7.7).
+    /// Wave E (Gap H5) lifecycle: `Idle` / `Paused` are no-ops, the clock
+    /// advances only while `Running`, and the animation flips to
+    /// `Completed` on duration reach. Wave 4 (Gap #6) closes the
+    /// interpolation loop: each `Running` tick now interpolates
+    /// `kf_a.value` ↔ `kf_b.value` per `kf_a.interpolation` and writes
+    /// the result to `current_value`. The owning render object reads
+    /// `current_value` during the per-frame style-read phase and writes
+    /// it back into its typed field. On error the runtime logs the error
+    /// and freezes the animation at its last valid frame (§7.7).
     pub fn tick(&mut self, dt: Duration) -> Result<(), AnimationError> {
         // 1. Idle / Paused: hold the clock — do not advance (Gap H5).
         if matches!(self.state, AnimationState::Idle | AnimationState::Paused) {
@@ -290,17 +296,20 @@ impl Animation {
 
         // 3. Duration reached → flip to `Completed` and return early. The
         // keyframe interpolation in step 4 only runs while the animation
-        // is still advancing.
+        // is still advancing; the last `Running` frame's `current_value`
+        // is preserved (§7.7 "freeze at last valid frame").
         if self.duration > Duration::ZERO && self.elapsed >= self.duration {
             self.state = AnimationState::Completed;
             return Ok(());
         }
 
         // 4. Non-empty keyframes: locate the two keyframes surrounding the
-        // current normalised time `t = elapsed / duration` and compute the
-        // linear blend factor between them. Wave E performs the lookup and
-        // the parameter arithmetic only; the actual `StyleProperty`
-        // interpolation and write-back are deferred (TODO below).
+        // current normalised time `t = elapsed / duration`, compute the
+        // local blend factor between them, apply the easing function, and
+        // interpolate `kf_a.value` ↔ `kf_b.value` per `kf_a.interpolation`
+        // (Gap #6). The result is stored in `current_value` for the
+        // owning render object to read during the per-frame style-read
+        // phase.
         if !self.keyframes.is_empty() {
             let duration_secs = self.duration.as_secs_f32();
             if duration_secs > 0.0 {
@@ -324,25 +333,114 @@ impl Animation {
                 // keyframes; guarded against a zero span (single keyframe or
                 // coincident times).
                 let span = (kf_b.time - kf_a.time).max(1e-6);
-                let u = ((t - kf_a.time) / span).clamp(0.0, 1.0);
+                let local_t = ((t - kf_a.time) / span).clamp(0.0, 1.0);
                 // Apply the easing function to the local parameter.
-                let _eased = self.easing.sample(u);
-                // TODO(Wave N, Gap H5): Interpolate `kf_a.value` <->
-                // `kf_b.value` per `kf_a.interpolation` (`Linear` / `Step` /
-                // `CubicSpline`) using `_eased` as the blend factor, then
-                // write the resulting `StyleProperty` back into the owning
-                // field. The arithmetic is deferred until the rendering-ABI
-                // ADR (§4.7) unifies `StyleProperty` with the owning
-                // field's typed accessor; for now the surrounding pair
-                // `(kf_a, kf_b)` and the eased local parameter are
-                // computed but discarded.
-                let _ = (kf_a, kf_b, _eased);
+                let eased_t = self.easing.sample(local_t);
+                // Interpolate per `kf_a.interpolation` and store the
+                // resulting `StyleProperty` in `current_value`.
+                self.current_value = Some(interpolate_keyframes(kf_a, kf_b, eased_t));
             }
         }
-        // 5. Empty keyframes: current behaviour — the clock has already
-        // advanced above; nothing else to do.
+        // 5. Empty keyframes: `current_value` stays at its prior value
+        // (default `None`); the clock has already advanced above.
 
         Ok(())
+    }
+}
+
+/// Linearly interpolate two `f32` values by `t ∈ [0, 1]` (Gap #6).
+#[inline]
+fn lerp_f32(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
+}
+
+/// Linearly interpolate two [`Color`]s channel-by-channel by `t ∈ [0, 1]`
+/// (Gap #6).
+///
+/// The packed `u32` is treated as four 8-bit channels in the order
+/// `0xRRGGBBAA` (CSS-style big-endian within the `u32`); each channel is
+/// blended as an `f32`, rounded to the nearest integer, and clamped to
+/// `[0, 255]` before being repacked.
+#[inline]
+fn lerp_color(a: Color, b: Color, t: f32) -> Color {
+    let unpack = |c: Color| -> [f32; 4] {
+        [
+            ((c.0 >> 24) & 0xFF) as f32,
+            ((c.0 >> 16) & 0xFF) as f32,
+            ((c.0 >> 8) & 0xFF) as f32,
+            (c.0 & 0xFF) as f32,
+        ]
+    };
+    let ca = unpack(a);
+    let cb = unpack(b);
+    let mut out = 0u32;
+    for i in 0..4 {
+        let v = lerp_f32(ca[i], cb[i], t).round().clamp(0.0, 255.0) as u32;
+        out = (out << 8) | v;
+    }
+    Color(out)
+}
+
+/// Blend two [`StyleProperty`] values linearly by `t ∈ [0, 1]` (Gap #6).
+///
+/// - [`ScalarValue::Color`], [`ScalarValue::Opacity`],
+///   [`ScalarValue::LineWidth`]: lerp the underlying `f32` (per-channel for
+///   [`Color`]).
+/// - [`StyleProperty::Transform`]: lerp each of the 16 [`Mat4`] elements.
+/// - [`StyleProperty::Shader`]: WGSL programs cannot be interpolated; the
+///   `kf_a` shader is held unchanged.
+/// - Mismatched property kinds: no arithmetic is defined; `a` is held
+///   unchanged.
+#[inline]
+fn interpolate_linear(a: &StyleProperty, b: &StyleProperty, t: f32) -> StyleProperty {
+    match (a, b) {
+        (StyleProperty::Scalar(ScalarValue::Color(ca)), StyleProperty::Scalar(ScalarValue::Color(cb))) => {
+            StyleProperty::Scalar(ScalarValue::Color(lerp_color(*ca, *cb, t)))
+        }
+        (
+            StyleProperty::Scalar(ScalarValue::Opacity(oa)),
+            StyleProperty::Scalar(ScalarValue::Opacity(ob)),
+        ) => StyleProperty::Scalar(ScalarValue::Opacity(Opacity(lerp_f32(oa.0, ob.0, t)))),
+        (
+            StyleProperty::Scalar(ScalarValue::LineWidth(la)),
+            StyleProperty::Scalar(ScalarValue::LineWidth(lb)),
+        ) => StyleProperty::Scalar(ScalarValue::LineWidth(LineWidth(lerp_f32(
+            la.0, lb.0, t,
+        )))),
+        (StyleProperty::Transform(ma), StyleProperty::Transform(mb)) => {
+            let mut out = [0.0f32; 16];
+            for (out_slot, (a_elem, b_elem)) in out.iter_mut().zip(ma.0.iter().zip(mb.0.iter())) {
+                *out_slot = lerp_f32(*a_elem, *b_elem, t);
+            }
+            StyleProperty::Transform(Mat4(out))
+        }
+        // Shaders cannot be interpolated, and mismatched kinds have no
+        // defined arithmetic: hold `kf_a.value`.
+        _ => a.clone(),
+    }
+}
+
+/// Interpolate between two keyframes by the eased local blend factor
+/// `eased_t ∈ [0, 1]`, dispatching on `kf_a.interpolation` (Gap #6).
+///
+/// - [`Interpolation::Linear`]: linear blend of `kf_a.value` and
+///   `kf_b.value`.
+/// - [`Interpolation::Step`]: hold `kf_a.value` until the next keyframe.
+/// - [`Interpolation::CubicSpline`]: treated as [`Interpolation::Linear`]
+///   for now — real spline math (with tangent control points) lands in a
+///   later wave.
+#[inline]
+fn interpolate_keyframes(kf_a: &Keyframe, kf_b: &Keyframe, eased_t: f32) -> StyleProperty {
+    match kf_a.interpolation {
+        Interpolation::Step => kf_a.value.clone(),
+        // TODO(Wave N, Gap #6): CubicSpline currently falls back to Linear
+        // interpolation. Real cubic-spline interpolation requires the
+        // keyframe's tangent control points (`x1, y1, x2, y2` per CSS
+        // `animation-timing-function: cubic-bezier(...)` semantics); the
+        // [`Keyframe`] struct will need extending before this branch can
+        // do real spline math.
+        Interpolation::CubicSpline => interpolate_linear(&kf_a.value, &kf_b.value, eased_t),
+        Interpolation::Linear => interpolate_linear(&kf_a.value, &kf_b.value, eased_t),
     }
 }
 
@@ -640,6 +738,7 @@ mod tests {
             easing: Box::new(LinearEasing),
             elapsed: Duration::ZERO,
             state: AnimationState::Running,
+            current_value: None,
         }
     }
 
@@ -688,6 +787,7 @@ mod tests {
             easing: Box::new(LinearEasing),
             elapsed: Duration::ZERO,
             state: AnimationState::Running,
+            current_value: None,
         }
     }
 
@@ -700,10 +800,17 @@ mod tests {
 
         // First tick: half-way through. The animation must remain `Running`
         // (not yet at duration) and the clock must advance by 50ms. The
-        // surrounding-keyframe lookup runs but does not write back.
+        // surrounding-keyframe lookup runs and writes the interpolated
+        // value into `current_value` (Gap #6).
         anim.tick(Duration::from_millis(50)).unwrap();
         assert_eq!(anim.elapsed, Duration::from_millis(50));
         assert_eq!(anim.state, AnimationState::Running);
+        // Mid-point blend of Opacity(0.0) and Opacity(1.0) under linear
+        // easing is Opacity(0.5).
+        assert_eq!(
+            anim.current_value,
+            Some(StyleProperty::Scalar(ScalarValue::Opacity(Opacity(0.5))))
+        );
 
         // Second tick: reaches the duration. State flips to `Completed`
         // and `elapsed` reflects both ticks (50ms + 50ms).
@@ -752,6 +859,104 @@ mod tests {
         anim.tick(Duration::from_millis(30)).unwrap();
         assert_eq!(anim.elapsed, Duration::from_millis(130));
         assert_eq!(anim.state, AnimationState::Completed);
+    }
+
+    // -----------------------------------------------------------------
+    // Gap #6 — keyframe interpolation in `Animation::tick`
+    // -----------------------------------------------------------------
+
+    /// Helper: build a `Running` [`Animation`] with two [`Color`] keyframes
+    /// (`from` → `to`) at normalised times `0.0` and `1.0`, using the
+    /// requested [`Interpolation`] mode (Gap #6).
+    fn make_color_animation(from: Color, to: Color, interp: Interpolation) -> Animation {
+        Animation {
+            property: PropertyKind::Color,
+            keyframes: vec![
+                Keyframe {
+                    time: 0.0,
+                    value: StyleProperty::Scalar(ScalarValue::Color(from)),
+                    interpolation: interp,
+                },
+                Keyframe {
+                    time: 1.0,
+                    value: StyleProperty::Scalar(ScalarValue::Color(to)),
+                    interpolation: interp,
+                },
+            ],
+            duration: Duration::from_millis(100),
+            easing: Box::new(LinearEasing),
+            elapsed: Duration::ZERO,
+            state: AnimationState::Running,
+            current_value: None,
+        }
+    }
+
+    /// Two [`Color`] keyframes (black → white) under [`Interpolation::Linear`]
+    /// blend at the midpoint to a per-channel average of black and white
+    /// (Gap #6).
+    ///
+    /// `Color(0x0000_0000)` (transparent black) and `Color(0xFFFF_FFFF)`
+    /// (opaque white) sit at opposite ends of every 8-bit channel, so the
+    /// linear midpoint at `t = 0.5` is `Color(0x8080_8080)` (each channel
+    /// = `round(0.5 * 255) = 128 = 0x80`).
+    #[test]
+    fn animation_tick_interpolates_color_keyframes_at_midpoint() {
+        let mut anim = make_color_animation(
+            Color(0x0000_0000),
+            Color(0xFFFF_FFFF),
+            Interpolation::Linear,
+        );
+        // Tick to the midpoint (50ms of a 100ms duration → t = 0.5).
+        anim.tick(Duration::from_millis(50)).unwrap();
+        assert_eq!(anim.state, AnimationState::Running);
+        // The interpolated value must be a blend of the two keyframes —
+        // not black, not white, but the per-channel midpoint.
+        let expected = StyleProperty::Scalar(ScalarValue::Color(Color(0x8080_8080)));
+        assert_eq!(
+            anim.current_value,
+            Some(expected),
+            "midpoint blend of black/white should be 0x80808080, got {:?}",
+            anim.current_value
+        );
+    }
+
+    /// [`Interpolation::Step`] holds `kf_a.value` until the next keyframe:
+    /// at the midpoint of a black → white animation, `current_value` must
+    /// still be black (Gap #6).
+    #[test]
+    fn animation_tick_step_interpolation_holds_first_keyframe() {
+        let mut anim = make_color_animation(
+            Color(0x0000_0000),
+            Color(0xFFFF_FFFF),
+            Interpolation::Step,
+        );
+        // Tick to the midpoint (50ms of a 100ms duration → t = 0.5). Under
+        // Step interpolation, `kf_a.value` (black) must be held — the
+        // second keyframe is only reached at t == 1.0.
+        anim.tick(Duration::from_millis(50)).unwrap();
+        assert_eq!(anim.state, AnimationState::Running);
+        assert_eq!(
+            anim.current_value,
+            Some(StyleProperty::Scalar(ScalarValue::Color(Color(0x0000_0000)))),
+            "Step interpolation must hold kf_a.value until the next keyframe"
+        );
+    }
+
+    /// An animation with empty keyframes never writes `current_value` —
+    /// it stays `None` across ticks (Gap #6).
+    #[test]
+    fn animation_tick_empty_keyframes_leaves_current_value_none() {
+        let mut anim = make_animation(Duration::from_millis(100));
+        // Default helper has empty keyframes; `current_value` starts None.
+        assert!(anim.current_value.is_none());
+        anim.tick(Duration::from_millis(40)).unwrap();
+        assert_eq!(anim.elapsed, Duration::from_millis(40));
+        assert_eq!(anim.state, AnimationState::Running);
+        // No keyframes → no interpolation → `current_value` stays None.
+        assert!(
+            anim.current_value.is_none(),
+            "empty keyframes must leave current_value as None"
+        );
     }
 
     // -----------------------------------------------------------------
