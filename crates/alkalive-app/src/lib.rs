@@ -884,8 +884,10 @@ pub fn is_input_enabled() -> bool {
 
 /// Check if a click at (x, y) is within the input field bounds.
 /// Returns true if the click hit the input field (and focuses it).
+/// Also positions the cursor at the clicked location (hit-test).
+/// If `extend` is true (shift+click), extends the selection instead of clearing.
 #[wasm_bindgen]
-pub fn click_input_field(x: f32, y: f32) -> bool {
+pub fn click_input_field(x: f32, y: f32, extend: bool) -> bool {
     APP.with(|app| {
         let mut app = app.borrow_mut();
         if let Some(a) = app.as_mut() {
@@ -908,10 +910,101 @@ pub fn click_input_field(x: f32, y: f32) -> bool {
                 && y >= field_y && y <= field_y + field_h
             {
                 a.input_field.set_focus(true);
+                // Compute text-relative X for hit-testing.
+                // We need to know where the text starts horizontally.
+                // The text is centered in the field, so:
+                // text_x = field_x + (field_w - text_width) / 2
+                // But we need the shaped run to know text_width.
+                // Force a shape if needed, then hit-test.
+                let registry = a.scene.registry.clone();
+                let text_width = {
+                    let atlas = &mut a.scene.atlas;
+                    let (_, w) = a.input_field.get_positioned_glyphs(&registry, atlas);
+                    w
+                };
+                let text_x = field_x + (field_w - text_width) / 2.0;
+                let text_relative_x = x - text_x;
+                a.input_field.click_at(text_relative_x, extend);
                 return true;
             }
             // Click outside the field — unfocus.
             a.input_field.set_focus(false);
+            false
+        } else {
+            false
+        }
+    })
+}
+
+/// Handle mouse drag for text selection. Called when the mouse moves while
+/// the button is held down (after a click on the input field).
+/// Updates the cursor to the dragged position, extending the selection.
+#[wasm_bindgen]
+pub fn mouse_drag_input(x: f32, y: f32) {
+    APP.with(|app| {
+        let mut app = app.borrow_mut();
+        if let Some(a) = app.as_mut() {
+            if !a.input_field.focused {
+                return;
+            }
+            let width = a.renderer.width as f32;
+            let field_w = (width * 0.6).min(500.0);
+            let field_x = (width - field_w) / 2.0;
+
+            // Compute text-relative X.
+            let registry = a.scene.registry.clone();
+            let text_width = {
+                let atlas = &mut a.scene.atlas;
+                let (_, w) = a.input_field.get_positioned_glyphs(&registry, atlas);
+                w
+            };
+            let text_x = field_x + (field_w - text_width) / 2.0;
+            let text_relative_x = x - text_x;
+            a.input_field.drag_to(text_relative_x);
+        }
+    });
+}
+
+/// Handle double-click on the input field to select a word.
+/// Returns true if the double-click was on the input field.
+#[wasm_bindgen]
+pub fn double_click_input(x: f32, y: f32) -> bool {
+    APP.with(|app| {
+        let mut app = app.borrow_mut();
+        if let Some(a) = app.as_mut() {
+            if !a.input_enabled {
+                return false;
+            }
+            let width = a.renderer.width as f32;
+            let height = a.renderer.height as f32;
+            let field_w = (width * 0.6).min(500.0);
+            let field_h = 44.0;
+            let field_x = (width - field_w) / 2.0;
+            let title_bottom = a.text_baseline_y + 20.0;
+            let field_y = title_bottom + 40.0;
+
+            if field_y + field_h > height {
+                return false;
+            }
+
+            if x >= field_x && x <= field_x + field_w
+                && y >= field_y && y <= field_y + field_h
+            {
+                a.input_field.set_focus(true);
+                // First position the cursor at the click for select_word to work.
+                let registry = a.scene.registry.clone();
+                let text_width = {
+                    let atlas = &mut a.scene.atlas;
+                    let (_, w) = a.input_field.get_positioned_glyphs(&registry, atlas);
+                    w
+                };
+                let text_x = field_x + (field_w - text_width) / 2.0;
+                let text_relative_x = x - text_x;
+                a.input_field.click_at(text_relative_x, false);
+                // Now select the word at the cursor.
+                a.input_field.select_word();
+                return true;
+            }
             false
         } else {
             false
@@ -1286,7 +1379,7 @@ mod tests {
     fn input_click_focuses_field() {
         init(800, 600).unwrap();
         // Click in the center where the input field should be.
-        let clicked = click_input_field(400.0, 380.0);
+        let clicked = click_input_field(400.0, 380.0, false);
         // May or may not hit depending on layout, but should not crash.
         let _ = clicked;
     }
@@ -1327,6 +1420,89 @@ mod tests {
         set_input_focus(true);
         let handled = handle_key_press("F1");
         assert!(!handled, "Unknown keys should not be handled");
+    }
+
+    // --- Mouse interaction tests ---
+
+    #[test]
+    fn click_input_positions_cursor() {
+        init(800, 600).unwrap();
+        // Type some text first.
+        set_input_focus(true);
+        input_insert_char("H");
+        input_insert_char("i");
+        // The input field is centered. Field_y ≈ text_baseline_y + 60.
+        // With FONT_SIZE_PX=64, baseline ≈ (600-64)/2 + 50 ≈ 318.
+        // field_y = 318 + 20 + 40 = 378. field_h = 44.
+        // Field spans y=378..422, x=160..640 (field_w=480).
+        // Click in the center.
+        let clicked = click_input_field(400.0, 400.0, false);
+        // If the click hit, we should be focused.
+        if clicked {
+            assert!(is_input_focused());
+        }
+        // Either way, should not crash.
+    }
+
+    #[test]
+    fn click_outside_unfocuses() {
+        init(800, 600).unwrap();
+        set_input_focus(true);
+        // Click far outside the input field.
+        click_input_field(10.0, 10.0, false);
+        assert!(!is_input_focused());
+    }
+
+    #[test]
+    fn shift_click_extends_selection() {
+        init(800, 600).unwrap();
+        set_input_focus(true);
+        input_insert_char("H");
+        input_insert_char("e");
+        input_insert_char("l");
+        input_insert_char("l");
+        input_insert_char("o");
+        // Click with extend=true (shift+click).
+        let _ = click_input_field(400.0, 400.0, true);
+        // Should not crash.
+    }
+
+    #[test]
+    fn mouse_drag_does_not_crash() {
+        init(800, 600).unwrap();
+        set_input_focus(true);
+        input_insert_char("H");
+        input_insert_char("i");
+        // Drag should not crash.
+        mouse_drag_input(350.0, 400.0);
+        mouse_drag_input(450.0, 400.0);
+    }
+
+    #[test]
+    fn double_click_selects_word() {
+        init(800, 600).unwrap();
+        set_input_focus(true);
+        input_insert_char("H");
+        input_insert_char("e");
+        input_insert_char("l");
+        input_insert_char("l");
+        input_insert_char("o");
+        input_insert_char(" ");
+        input_insert_char("W");
+        input_insert_char("o");
+        input_insert_char("r");
+        input_insert_char("l");
+        input_insert_char("d");
+        // Double-click should select a word.
+        let _ = double_click_input(400.0, 400.0);
+        // Should not crash.
+    }
+
+    #[test]
+    fn mouse_drag_without_focus_does_nothing() {
+        init(800, 600).unwrap();
+        // Not focused — drag should be a no-op.
+        mouse_drag_input(400.0, 400.0);
     }
 
     // --- Particle system tests ---

@@ -24,12 +24,15 @@ export function clear_selection() {
 /**
  * Check if a click at (x, y) is within the input field bounds.
  * Returns true if the click hit the input field (and focuses it).
+ * Also positions the cursor at the clicked location (hit-test).
+ * If `extend` is true (shift+click), extends the selection instead of clearing.
  * @param {number} x
  * @param {number} y
+ * @param {boolean} extend
  * @returns {boolean}
  */
-export function click_input_field(x, y) {
-    const ret = wasm.click_input_field(x, y);
+export function click_input_field(x, y, extend) {
+    const ret = wasm.click_input_field(x, y, extend);
     return ret !== 0;
 }
 
@@ -65,6 +68,18 @@ export function cut_selection() {
     } finally {
         wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
     }
+}
+
+/**
+ * Handle double-click on the input field to select a word.
+ * Returns true if the double-click was on the input field.
+ * @param {number} x
+ * @param {number} y
+ * @returns {boolean}
+ */
+export function double_click_input(x, y) {
+    const ret = wasm.double_click_input(x, y);
+    return ret !== 0;
 }
 
 /**
@@ -295,6 +310,17 @@ export function is_paused() {
 export function is_rainbow_mode() {
     const ret = wasm.is_rainbow_mode();
     return ret !== 0;
+}
+
+/**
+ * Handle mouse drag for text selection. Called when the mouse moves while
+ * the button is held down (after a click on the input field).
+ * Updates the cursor to the dragged position, extending the selection.
+ * @param {number} x
+ * @param {number} y
+ */
+export function mouse_drag_input(x, y) {
+    wasm.mouse_drag_input(x, y);
 }
 
 /**

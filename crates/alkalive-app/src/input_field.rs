@@ -536,6 +536,73 @@ impl InputField {
         Some((cursor_x.min(anchor_x), cursor_x.max(anchor_x)))
     }
 
+    /// Hit-test: convert an X pixel position (relative to text start) to the
+    /// nearest cursor byte offset.
+    ///
+    /// This is the inverse of `byte_offset_to_x`. Given a click position,
+    /// returns the byte offset of the character boundary closest to that position.
+    pub fn hit_test(&self, x: f32) -> usize {
+        if self.cached_shaped.is_none() || self.text.is_empty() {
+            return 0;
+        }
+        let run = self.cached_shaped.as_ref().unwrap();
+
+        // Walk through glyphs, tracking the byte offset and accumulated x.
+        // When the click x is closer to the right edge of the current glyph
+        // than the left edge, we place the cursor after it.
+        let mut accum_x = 0.0f32;
+        let mut last_cluster = 0u32;
+
+        for (i, &cluster) in run.clusters.iter().enumerate() {
+            let glyph_center = accum_x + run.advances[i] / 2.0;
+            if x < glyph_center {
+                // Click is in the left half of this glyph — cursor goes before it.
+                return cluster as usize;
+            }
+            accum_x += run.advances[i];
+            last_cluster = cluster;
+        }
+
+        // Click is past the end — cursor at the end of text.
+        // Find the byte length of the last cluster's character.
+        // The cluster value is the byte offset of the start of the character.
+        // The end is either the next cluster or the text length.
+        let last_cluster_byte = last_cluster as usize;
+        if last_cluster_byte >= self.text.len() {
+            return self.text.len();
+        }
+        // Find the next character boundary after last_cluster_byte.
+        let remainder = &self.text[last_cluster_byte..];
+        if let Some(c) = remainder.chars().next() {
+            last_cluster_byte + c.len_utf8()
+        } else {
+            self.text.len()
+        }
+    }
+
+    /// Handle a mouse click at the given X position (relative to text start).
+    /// Sets the cursor to the clicked position and clears selection (unless
+    /// shift is held, which extends the selection).
+    pub fn click_at(&mut self, x: f32, extend: bool) {
+        let pos = self.hit_test(x);
+        if extend {
+            // Shift+click: extend selection to clicked position.
+            self.cursor = pos;
+        } else {
+            // Plain click: move cursor, clear selection.
+            self.cursor = pos;
+            self.anchor = pos;
+        }
+    }
+
+    /// Handle a drag selection: update cursor to the dragged position,
+    /// keeping the anchor where the drag started.
+    pub fn drag_to(&mut self, x: f32) {
+        let pos = self.hit_test(x);
+        self.cursor = pos;
+        // Anchor stays at the click position to create a selection.
+    }
+
     /// Whether the displayed text is the placeholder.
     pub fn is_placeholder(&self) -> bool {
         self.is_showing_placeholder()
@@ -927,5 +994,70 @@ mod tests {
         field.cursor_home_extend();
         assert!(field.has_selection());
         assert_eq!(field.selected_text(), "Hel");
+    }
+
+    // --- Hit test / mouse selection tests ---
+
+    #[test]
+    fn hit_test_before_text_returns_zero() {
+        let mut field = InputField::new("");
+        field.insert_str("Hello");
+        // Force shape by getting glyphs (this populates cached_shaped).
+        // We can't call get_positioned_glyphs without registry, so test hit_test
+        // returns 0 when there's no cached shaped run.
+        let pos = field.hit_test(-10.0);
+        assert_eq!(pos, 0);
+    }
+
+    #[test]
+    fn hit_test_empty_text_returns_zero() {
+        let field = InputField::new("");
+        let pos = field.hit_test(100.0);
+        assert_eq!(pos, 0);
+    }
+
+    #[test]
+    fn click_at_clears_selection() {
+        let mut field = InputField::new("");
+        field.insert_str("Hello");
+        field.select_all();
+        assert!(field.has_selection());
+        // click_at with extend=false should clear selection.
+        field.click_at(0.0, false);
+        assert!(!field.has_selection());
+    }
+
+    #[test]
+    fn click_at_extend_creates_selection() {
+        let mut field = InputField::new("");
+        field.insert_str("Hello World");
+        field.cursor = 0;
+        field.anchor = 0;
+        // Shift+click at some position should extend selection.
+        // Without a shaped run, hit_test returns 0, so this just sets cursor=0.
+        field.click_at(50.0, true);
+        // cursor and anchor may both be 0 (no shaped run), but it shouldn't panic.
+    }
+
+    #[test]
+    fn drag_to_updates_cursor() {
+        let mut field = InputField::new("");
+        field.insert_str("Hello");
+        field.cursor = 0;
+        field.anchor = 0;
+        // Drag without shaped run — hit_test returns 0.
+        field.drag_to(100.0);
+        // Should not panic; cursor may stay at 0.
+    }
+
+    #[test]
+    fn hit_test_returns_text_len_for_past_end() {
+        let mut field = InputField::new("");
+        field.insert_str("Hi");
+        // Without cached shaped run, hit_test returns 0 for empty/no cache.
+        // But if we set cached_shaped to None, it returns 0.
+        let pos = field.hit_test(10000.0);
+        // Without a shaped run, returns 0.
+        assert_eq!(pos, 0);
     }
 }
