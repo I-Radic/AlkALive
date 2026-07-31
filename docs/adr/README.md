@@ -15,10 +15,12 @@ This directory records the architectural decisions for the AlkALive system (a cu
 | [`Decision_Alternatives_concurrency-scheduling.md`](Decision_Alternatives_concurrency-scheduling.md) | ⚠ RESOLVED — superseded by ADR 021. Retained for historical context. |
 | [`Decision_Alternatives_accessibility-bridge.md`](Decision_Alternatives_accessibility-bridge.md) | ⚠ RESOLVED — superseded by ADR 019. Retained for historical context. |
 | [`Decision_Alternatives_adoption-interop.md`](Decision_Alternatives_adoption-interop.md) | ⚠ RESOLVED — superseded by ADR 020. Retained for historical context. |
+| [`ADR_023_IME_Composition.md`](ADR_023_IME_Composition.md) | **ADR 023** — IME Composition via Hidden Input Exception (Approach B). Grants a scoped exception to ADR 020 for IME composition-event acquisition. |
+| [`Spec_Tradeoff_Note_IME.md`](Spec_Tradeoff_Note_IME.md) | ⚠ RESOLVED — superseded by ADR 023. Retained for historical context. |
 
 ## Decision summary
 
-All 22 ADRs are **Proposed** (awaiting ratification). ADRs 001–018 were the original set; ADRs 019–022 are the four project-owner resolutions that supersede the prior Decision Alternatives.
+All 23 ADRs are **Proposed** (awaiting ratification). ADRs 001–018 were the original set; ADRs 019–022 are the four project-owner resolutions that supersede the prior Decision Alternatives; ADR 023 resolves the IME composition-event acquisition open dependency.
 
 | ID | Decision | Confidence | Status |
 |----|----------|------------|--------|
@@ -44,6 +46,7 @@ All 22 ADRs are **Proposed** (awaiting ratification). ADRs 001–018 were the or
 | ADR 020 | Metadata-Only DOM Layer for SEO — No UI DOM Interop | High | Proposed |
 | ADR 021 | Main Thread + On-Demand WASM Threads with Socket IPC | High | Proposed |
 | ADR 022 | Forked HarfRust as the In-WASM Text Shaping/Rasterization Stack | High | Proposed |
+| ADR 023 | IME Composition via Hidden Input Exception (Approach B) | High | Proposed |
 
 ## Resolved Decision Alternatives
 
