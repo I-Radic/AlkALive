@@ -15,6 +15,13 @@ export function clear_particles() {
 }
 
 /**
+ * Clear the current selection (collapse to cursor).
+ */
+export function clear_selection() {
+    wasm.clear_selection();
+}
+
+/**
  * Check if a click at (x, y) is within the input field bounds.
  * Returns true if the click hit the input field (and focuses it).
  * @param {number} x
@@ -24,6 +31,57 @@ export function clear_particles() {
 export function click_input_field(x, y) {
     const ret = wasm.click_input_field(x, y);
     return ret !== 0;
+}
+
+/**
+ * Copy the selection to the internal clipboard. Returns the copied text.
+ * @returns {string}
+ */
+export function copy_selection() {
+    let deferred1_0;
+    let deferred1_1;
+    try {
+        const ret = wasm.copy_selection();
+        deferred1_0 = ret[0];
+        deferred1_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+    }
+}
+
+/**
+ * Cut the selection to the internal clipboard. Returns the cut text.
+ * @returns {string}
+ */
+export function cut_selection() {
+    let deferred1_0;
+    let deferred1_1;
+    try {
+        const ret = wasm.cut_selection();
+        deferred1_0 = ret[0];
+        deferred1_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+    }
+}
+
+/**
+ * Get the clipboard content.
+ * @returns {string}
+ */
+export function get_clipboard() {
+    let deferred1_0;
+    let deferred1_1;
+    try {
+        const ret = wasm.get_clipboard();
+        deferred1_0 = ret[0];
+        deferred1_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+    }
 }
 
 /**
@@ -107,6 +165,23 @@ export function get_rotation_angle() {
 }
 
 /**
+ * Get the selected text (empty string if no selection).
+ * @returns {string}
+ */
+export function get_selected_text() {
+    let deferred1_0;
+    let deferred1_1;
+    try {
+        const ret = wasm.get_selected_text();
+        deferred1_0 = ret[0];
+        deferred1_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+    }
+}
+
+/**
  * Get the framebuffer width.
  * @returns {number}
  */
@@ -119,12 +194,20 @@ export function get_width() {
  * Handle a key press. Returns true if the key was handled.
  *
  * Supported keys:
- * - "Backspace" — delete previous char
- * - "Delete" — delete next char
+ * - "Backspace" — delete previous char (or selection)
+ * - "Delete" — delete next char (or selection)
  * - "ArrowLeft" — move cursor left
  * - "ArrowRight" — move cursor right
  * - "Home" — move cursor to start
  * - "End" — move cursor to end
+ * - "Shift+ArrowLeft" — extend selection left
+ * - "Shift+ArrowRight" — extend selection right
+ * - "Shift+Home" — extend selection to start
+ * - "Shift+End" — extend selection to end
+ * - "Ctrl+a" / "Meta+a" — select all
+ * - "Ctrl+c" / "Meta+c" — copy selection
+ * - "Ctrl+x" / "Meta+x" — cut selection
+ * - "Ctrl+v" / "Meta+v" — paste from clipboard
  * - "Enter" — submit (no-op for now, just returns true)
  * - Printable characters — inserted via input_insert_char
  * @param {string} key
@@ -134,6 +217,15 @@ export function handle_key_press(key) {
     const ptr0 = passStringToWasm0(key, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len0 = WASM_VECTOR_LEN;
     const ret = wasm.handle_key_press(ptr0, len0);
+    return ret !== 0;
+}
+
+/**
+ * Check if the input field has an active selection.
+ * @returns {boolean}
+ */
+export function has_selection() {
+    const ret = wasm.has_selection();
     return ret !== 0;
 }
 
@@ -206,12 +298,36 @@ export function is_rainbow_mode() {
 }
 
 /**
+ * Paste from the internal clipboard at the cursor.
+ */
+export function paste_clipboard() {
+    wasm.paste_clipboard();
+}
+
+/**
  * Resize the framebuffer.
  * @param {number} width
  * @param {number} height
  */
 export function resize(width, height) {
     wasm.resize(width, height);
+}
+
+/**
+ * Select all text in the input field.
+ */
+export function select_all_input() {
+    wasm.select_all_input();
+}
+
+/**
+ * Set the clipboard content (for external paste from browser clipboard).
+ * @param {string} text
+ */
+export function set_clipboard(text) {
+    const ptr0 = passStringToWasm0(text, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    wasm.set_clipboard(ptr0, len0);
 }
 
 /**

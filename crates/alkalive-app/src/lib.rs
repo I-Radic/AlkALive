@@ -350,7 +350,25 @@ fn render_input_field(app: &mut App) {
     };
 
     // Composite input text glyphs (no rotation).
+    // Skip rendering text glyphs if we're showing the placeholder (rendered dim).
     let color_mode = input_color_mode(&app.input_field);
+
+    // Draw selection highlight behind the text (if there is a selection).
+    if app.input_field.focused && app.input_field.has_selection() {
+        if let Some((sel_start_x, sel_end_x)) = app.input_field.selection_x_range() {
+            let sx = (text_x + sel_start_x) as i32;
+            let ex = (text_x + sel_end_x) as i32;
+            let sel_y = (field_y + 6.0) as i32;
+            let sel_h = (field_h - 12.0) as i32;
+            let sel_w = (ex - sx).max(2);
+            // Golden selection highlight.
+            app.renderer.fill_rect(
+                sx, sel_y, sel_w, sel_h,
+                60, 50, 10, // Dark gold
+            );
+        }
+    }
+
     for glyph in &input_glyphs {
         let mut sg = *glyph;
         sg.x += text_x;
@@ -367,7 +385,8 @@ fn render_input_field(app: &mut App) {
     }
 
     // Draw the cursor if focused (blinking).
-    if app.input_field.focused {
+    // Don't draw cursor if there's a selection (the highlight indicates the range).
+    if app.input_field.focused && !app.input_field.has_selection() {
         let blink = (app.time / input_field::CURSOR_BLINK_PERIOD).fract() < 0.5;
         if blink {
             let cursor_x = (text_x + app.input_field.cursor_x()) as i32;
@@ -621,12 +640,20 @@ pub fn input_insert_char(c: &str) {
 /// Handle a key press. Returns true if the key was handled.
 ///
 /// Supported keys:
-/// - "Backspace" — delete previous char
-/// - "Delete" — delete next char
+/// - "Backspace" — delete previous char (or selection)
+/// - "Delete" — delete next char (or selection)
 /// - "ArrowLeft" — move cursor left
 /// - "ArrowRight" — move cursor right
 /// - "Home" — move cursor to start
 /// - "End" — move cursor to end
+/// - "Shift+ArrowLeft" — extend selection left
+/// - "Shift+ArrowRight" — extend selection right
+/// - "Shift+Home" — extend selection to start
+/// - "Shift+End" — extend selection to end
+/// - "Ctrl+a" / "Meta+a" — select all
+/// - "Ctrl+c" / "Meta+c" — copy selection
+/// - "Ctrl+x" / "Meta+x" — cut selection
+/// - "Ctrl+v" / "Meta+v" — paste from clipboard
 /// - "Enter" — submit (no-op for now, just returns true)
 /// - Printable characters — inserted via input_insert_char
 #[wasm_bindgen]
@@ -660,6 +687,38 @@ pub fn handle_key_press(key: &str) -> bool {
                 }
                 "End" => {
                     a.input_field.cursor_end();
+                    true
+                }
+                "Shift+ArrowLeft" => {
+                    a.input_field.cursor_left_extend();
+                    true
+                }
+                "Shift+ArrowRight" => {
+                    a.input_field.cursor_right_extend();
+                    true
+                }
+                "Shift+Home" => {
+                    a.input_field.cursor_home_extend();
+                    true
+                }
+                "Shift+End" => {
+                    a.input_field.cursor_end_extend();
+                    true
+                }
+                "Ctrl+a" | "Meta+a" => {
+                    a.input_field.select_all();
+                    true
+                }
+                "Ctrl+c" | "Meta+c" => {
+                    a.input_field.copy_selection();
+                    true
+                }
+                "Ctrl+x" | "Meta+x" => {
+                    a.input_field.cut_selection();
+                    true
+                }
+                "Ctrl+v" | "Meta+v" => {
+                    a.input_field.paste();
                     true
                 }
                 "Enter" => {
@@ -700,7 +759,103 @@ pub fn set_input_text(text: &str) {
         if let Some(a) = app.borrow_mut().as_mut() {
             a.input_field.text = text.to_string();
             a.input_field.cursor = a.input_field.text.len();
+            a.input_field.anchor = a.input_field.cursor;
             a.input_field.mark_dirty();
+        }
+    });
+}
+
+// ============================================================================
+// Selection Operations (copy/cut/paste/select all)
+// ============================================================================
+
+/// Check if the input field has an active selection.
+#[wasm_bindgen]
+pub fn has_selection() -> bool {
+    APP.with(|app| {
+        let app = app.borrow();
+        app.as_ref().map_or(false, |a| a.input_field.has_selection())
+    })
+}
+
+/// Get the selected text (empty string if no selection).
+#[wasm_bindgen]
+pub fn get_selected_text() -> String {
+    APP.with(|app| {
+        let app = app.borrow();
+        app.as_ref().map_or(String::new(), |a| a.input_field.selected_text().to_string())
+    })
+}
+
+/// Select all text in the input field.
+#[wasm_bindgen]
+pub fn select_all_input() {
+    APP.with(|app| {
+        if let Some(a) = app.borrow_mut().as_mut() {
+            a.input_field.select_all();
+        }
+    });
+}
+
+/// Clear the current selection (collapse to cursor).
+#[wasm_bindgen]
+pub fn clear_selection() {
+    APP.with(|app| {
+        if let Some(a) = app.borrow_mut().as_mut() {
+            a.input_field.clear_selection();
+        }
+    });
+}
+
+/// Copy the selection to the internal clipboard. Returns the copied text.
+#[wasm_bindgen]
+pub fn copy_selection() -> String {
+    APP.with(|app| {
+        if let Some(a) = app.borrow_mut().as_mut() {
+            a.input_field.copy_selection()
+        } else {
+            String::new()
+        }
+    })
+}
+
+/// Cut the selection to the internal clipboard. Returns the cut text.
+#[wasm_bindgen]
+pub fn cut_selection() -> String {
+    APP.with(|app| {
+        if let Some(a) = app.borrow_mut().as_mut() {
+            a.input_field.cut_selection()
+        } else {
+            String::new()
+        }
+    })
+}
+
+/// Paste from the internal clipboard at the cursor.
+#[wasm_bindgen]
+pub fn paste_clipboard() {
+    APP.with(|app| {
+        if let Some(a) = app.borrow_mut().as_mut() {
+            a.input_field.paste();
+        }
+    });
+}
+
+/// Get the clipboard content.
+#[wasm_bindgen]
+pub fn get_clipboard() -> String {
+    APP.with(|app| {
+        let app = app.borrow();
+        app.as_ref().map_or(String::new(), |a| a.input_field.get_clipboard().to_string())
+    })
+}
+
+/// Set the clipboard content (for external paste from browser clipboard).
+#[wasm_bindgen]
+pub fn set_clipboard(text: &str) {
+    APP.with(|app| {
+        if let Some(a) = app.borrow_mut().as_mut() {
+            a.input_field.set_clipboard(text);
         }
     });
 }
@@ -1197,7 +1352,6 @@ mod tests {
         set_particle_mode(1); // TextLine
         set_particle_rate(100.0);
         tick();
-        let count1 = get_particle_count();
         for _ in 0..10 {
             tick();
         }
