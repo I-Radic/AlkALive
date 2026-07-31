@@ -8,6 +8,13 @@ export function clear_input() {
 }
 
 /**
+ * Clear all particles immediately.
+ */
+export function clear_particles() {
+    wasm.clear_particles();
+}
+
+/**
  * Check if a click at (x, y) is within the input field bounds.
  * Returns true if the click hit the input field (and focuses it).
  * @param {number} x
@@ -79,6 +86,15 @@ export function get_input_text() {
     } finally {
         wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
     }
+}
+
+/**
+ * Get the current active particle count.
+ * @returns {number}
+ */
+export function get_particle_count() {
+    const ret = wasm.get_particle_count();
+    return ret >>> 0;
 }
 
 /**
@@ -163,11 +179,29 @@ export function is_input_focused() {
 }
 
 /**
+ * Check if particles are enabled.
+ * @returns {boolean}
+ */
+export function is_particles_enabled() {
+    const ret = wasm.is_particles_enabled();
+    return ret !== 0;
+}
+
+/**
  * Check if animation is paused.
  * @returns {boolean}
  */
 export function is_paused() {
     const ret = wasm.is_paused();
+    return ret !== 0;
+}
+
+/**
+ * Check if rainbow mode is enabled.
+ * @returns {boolean}
+ */
+export function is_rainbow_mode() {
+    const ret = wasm.is_rainbow_mode();
     return ret !== 0;
 }
 
@@ -240,11 +274,53 @@ export function set_input_text(text) {
 }
 
 /**
+ * Set the particle emission mode.
+ * 0 = Off, 1 = TextLine, 2 = RisingSparks, 3 = RadialBurst, 4 = Ambient
+ * @param {number} mode
+ */
+export function set_particle_mode(mode) {
+    wasm.set_particle_mode(mode);
+}
+
+/**
+ * Set the particle emission rate (particles per second, 0-500).
+ * @param {number} rate
+ */
+export function set_particle_rate(rate) {
+    wasm.set_particle_rate(rate);
+}
+
+/**
+ * Toggle particle visibility.
+ * @param {boolean} enabled
+ */
+export function set_particles_enabled(enabled) {
+    wasm.set_particles_enabled(enabled);
+}
+
+/**
  * Pause or resume the animation.
  * @param {boolean} paused
  */
 export function set_paused(paused) {
     wasm.set_paused(paused);
+}
+
+/**
+ * Enable/disable animated rainbow color mode.
+ * When enabled, the text color cycles through the HSV spectrum over time.
+ * @param {boolean} enabled
+ */
+export function set_rainbow_mode(enabled) {
+    wasm.set_rainbow_mode(enabled);
+}
+
+/**
+ * Set the rainbow animation speed (cycles per second, 0-5).
+ * @param {number} speed
+ */
+export function set_rainbow_speed(speed) {
+    wasm.set_rainbow_speed(speed);
 }
 
 /**

@@ -18,19 +18,43 @@ pub const BG_R: u8 = 0;
 pub const BG_G: u8 = 0;
 pub const BG_B: u8 = 0;
 
-/// Text color mode: solid color or gradient.
+/// Text color mode: solid color, gradient, or animated rainbow.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ColorMode {
     /// Solid color (r, g, b).
     Solid(u8, u8, u8),
     /// Vertical gradient from top color to bottom color.
     Gradient(u8, u8, u8, u8, u8, u8),
+    /// Animated rainbow: hue cycles over time, `time` in seconds, `speed` in cycles/sec.
+    /// `local_y` (0-1) adds a vertical offset to the hue for a flowing effect.
+    AnimatedRainbow { time: f32, speed: f32 },
 }
 
 impl Default for ColorMode {
     fn default() -> Self {
         ColorMode::Solid(GOLDEN_R, GOLDEN_G, GOLDEN_B)
     }
+}
+
+/// Convert HSV (hue 0-360, saturation 0-1, value 0-1) to RGB (0-255 each).
+pub fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
+    let c = v * s;
+    let h60 = h / 60.0;
+    let x = c * (1.0 - (h60 % 2.0 - 1.0).abs());
+    let m = v - c;
+    let (r1, g1, b1) = match h60 as u8 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    (
+        ((r1 + m) * 255.0) as u8,
+        ((g1 + m) * 255.0) as u8,
+        ((b1 + m) * 255.0) as u8,
+    )
 }
 
 /// A positioned glyph ready for compositing into the framebuffer.
@@ -121,6 +145,14 @@ impl SoftwareRenderer {
                 let g = (g1 as f32 * (1.0 - t) + g2 as f32 * t) as u8;
                 let b = (b1 as f32 * (1.0 - t) + b2 as f32 * t) as u8;
                 (r, g, b)
+            }
+            ColorMode::AnimatedRainbow { time, speed } => {
+                // Hue cycles 0-360 based on time and vertical position.
+                // local_y adds a flowing wave effect across the text height.
+                let hue = (time * speed * 360.0 + local_y * 180.0) % 360.0;
+                let hue = if hue < 0.0 { hue + 360.0 } else { hue };
+                // High saturation and value for vibrant colors.
+                hsv_to_rgb(hue, 0.9, 1.0)
             }
         }
     }

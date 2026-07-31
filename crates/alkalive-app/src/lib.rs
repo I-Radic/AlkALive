@@ -36,11 +36,13 @@ use std::cell::RefCell;
 use wasm_bindgen::prelude::*;
 
 pub mod input_field;
+pub mod particles;
 pub mod renderer;
 pub mod starfield;
 pub mod text_scene;
 
 use input_field::{input_color_mode, InputField};
+use particles::{EmissionMode, ParticleSystem};
 use renderer::{ColorMode, PositionedGlyph, SoftwareRenderer};
 use starfield::Starfield;
 use text_scene::TextScene;
@@ -60,10 +62,15 @@ struct App {
     scene: TextScene,
     starfield: Starfield,
     input_field: InputField,
+    particles: ParticleSystem,
     time: f32,
     rotation_speed: f32,
     paused: bool,
     color_mode: ColorMode,
+    /// Whether the color mode is the animated rainbow (needs time updates).
+    rainbow_mode: bool,
+    /// Rainbow animation speed.
+    rainbow_speed: f32,
     /// Offset to center the text horizontally in the framebuffer.
     text_offset_x: f32,
     /// Offset to place the baseline vertically center.
@@ -80,6 +87,8 @@ struct App {
     starfield_enabled: bool,
     /// Input field enabled.
     input_enabled: bool,
+    /// Particles enabled.
+    particles_enabled: bool,
 }
 
 thread_local! {
@@ -101,6 +110,12 @@ pub fn init(width: u32, height: u32) -> Result<(), JsValue> {
     let renderer = SoftwareRenderer::new(width, height);
     let starfield = Starfield::new(STAR_COUNT, 42);
     let input_field = InputField::new("Click here to type...");
+    let mut particles = ParticleSystem::new();
+    // Default: emit from text line
+    particles.set_mode(EmissionMode::TextLine);
+    particles.set_emission_rate(30.0);
+    particles.set_center(width as f32 / 2.0, height as f32 / 2.0);
+    particles.set_line_width(scene.total_width());
 
     let (text_offset_x, text_baseline_y, rotation_center_x) =
         compute_layout(&scene, width, height);
@@ -111,6 +126,7 @@ pub fn init(width: u32, height: u32) -> Result<(), JsValue> {
             scene,
             starfield,
             input_field,
+            particles,
             time: 0.0,
             rotation_speed: DEFAULT_ROTATION_SPEED,
             paused: false,
@@ -118,6 +134,8 @@ pub fn init(width: u32, height: u32) -> Result<(), JsValue> {
                 255, 255, 180,  // Top: light gold
                 255, 165, 0,    // Bottom: orange-gold
             ),
+            rainbow_mode: false,
+            rainbow_speed: 0.3,
             text_offset_x,
             text_baseline_y,
             rotation_center_x,
@@ -127,6 +145,7 @@ pub fn init(width: u32, height: u32) -> Result<(), JsValue> {
             current_fps: 0.0,
             starfield_enabled: true,
             input_enabled: true,
+            particles_enabled: true,
         });
     });
 
@@ -158,10 +177,30 @@ pub fn tick() {
         };
 
         // Advance time (unless paused).
-        if !app.paused {
-            app.time += 1.0 / 60.0;
-        }
+        let dt = if app.paused { 0.0 } else { 1.0 / 60.0 };
+        app.time += dt;
         let angle = app.time * app.rotation_speed;
+
+        // Update the color mode if rainbow is active (needs current time).
+        let effective_color_mode = if app.rainbow_mode {
+            ColorMode::AnimatedRainbow {
+                time: app.time,
+                speed: app.rainbow_speed,
+            }
+        } else {
+            app.color_mode
+        };
+
+        // Update particle system.
+        if app.particles_enabled && !app.paused {
+            // Update emission center to follow the text position.
+            app.particles.set_center(
+                app.rotation_center_x,
+                app.text_baseline_y,
+            );
+            app.particles.set_line_width(app.scene.total_width());
+            app.particles.update(dt, app.renderer.width, app.renderer.height);
+        }
 
         // Clear framebuffer to black.
         app.renderer.clear();
@@ -173,6 +212,15 @@ pub fn tick() {
                 app.renderer.width,
                 app.renderer.height,
                 app.time,
+            );
+        }
+
+        // Render particles behind the text (for depth).
+        if app.particles_enabled {
+            app.particles.render(
+                &mut app.renderer.framebuffer,
+                app.renderer.width,
+                app.renderer.height,
             );
         }
 
@@ -205,7 +253,7 @@ pub fn tick() {
             &screen_glyphs,
             angle,
             app.rotation_center_x,
-            app.color_mode,
+            effective_color_mode,
         );
 
         // --- Render the input field below the title ---
@@ -717,6 +765,115 @@ pub fn click_input_field(x: f32, y: f32) -> bool {
 }
 
 // ============================================================================
+// Particle System Controls
+// ============================================================================
+
+/// Set the particle emission mode.
+/// 0 = Off, 1 = TextLine, 2 = RisingSparks, 3 = RadialBurst, 4 = Ambient
+#[wasm_bindgen]
+pub fn set_particle_mode(mode: u8) {
+    APP.with(|app| {
+        if let Some(a) = app.borrow_mut().as_mut() {
+            let m = match mode {
+                0 => EmissionMode::Off,
+                1 => EmissionMode::TextLine,
+                2 => EmissionMode::RisingSparks,
+                3 => EmissionMode::RadialBurst,
+                4 => EmissionMode::Ambient,
+                _ => EmissionMode::TextLine,
+            };
+            a.particles.set_mode(m);
+            a.particles_enabled = m != EmissionMode::Off;
+        }
+    });
+}
+
+/// Set the particle emission rate (particles per second, 0-500).
+#[wasm_bindgen]
+pub fn set_particle_rate(rate: f32) {
+    APP.with(|app| {
+        if let Some(a) = app.borrow_mut().as_mut() {
+            a.particles.set_emission_rate(rate);
+        }
+    });
+}
+
+/// Toggle particle visibility.
+#[wasm_bindgen]
+pub fn set_particles_enabled(enabled: bool) {
+    APP.with(|app| {
+        if let Some(a) = app.borrow_mut().as_mut() {
+            a.particles_enabled = enabled;
+            if !enabled {
+                a.particles.clear();
+            }
+        }
+    });
+}
+
+/// Check if particles are enabled.
+#[wasm_bindgen]
+pub fn is_particles_enabled() -> bool {
+    APP.with(|app| {
+        let app = app.borrow();
+        app.as_ref().map_or(false, |a| a.particles_enabled)
+    })
+}
+
+/// Get the current active particle count.
+#[wasm_bindgen]
+pub fn get_particle_count() -> usize {
+    APP.with(|app| {
+        let app = app.borrow();
+        app.as_ref().map_or(0, |a| a.particles.count())
+    })
+}
+
+/// Clear all particles immediately.
+#[wasm_bindgen]
+pub fn clear_particles() {
+    APP.with(|app| {
+        if let Some(a) = app.borrow_mut().as_mut() {
+            a.particles.clear();
+        }
+    });
+}
+
+// ============================================================================
+// Animated Rainbow Color Mode
+// ============================================================================
+
+/// Enable/disable animated rainbow color mode.
+/// When enabled, the text color cycles through the HSV spectrum over time.
+#[wasm_bindgen]
+pub fn set_rainbow_mode(enabled: bool) {
+    APP.with(|app| {
+        if let Some(a) = app.borrow_mut().as_mut() {
+            a.rainbow_mode = enabled;
+        }
+    });
+}
+
+/// Set the rainbow animation speed (cycles per second, 0-5).
+#[wasm_bindgen]
+pub fn set_rainbow_speed(speed: f32) {
+    APP.with(|app| {
+        if let Some(a) = app.borrow_mut().as_mut() {
+            a.rainbow_speed = speed.max(0.0).min(5.0);
+        }
+    });
+}
+
+/// Check if rainbow mode is enabled.
+#[wasm_bindgen]
+pub fn is_rainbow_mode() -> bool {
+    APP.with(|app| {
+        let app = app.borrow();
+        app.as_ref().map_or(false, |a| a.rainbow_mode)
+    })
+}
+
+// ============================================================================
 // Native (non-WASM) entry point for testing
 // ============================================================================
 
@@ -1015,5 +1172,135 @@ mod tests {
         set_input_focus(true);
         let handled = handle_key_press("F1");
         assert!(!handled, "Unknown keys should not be handled");
+    }
+
+    // --- Particle system tests ---
+
+    #[test]
+    fn particles_start_enabled_by_default() {
+        init(400, 300).unwrap();
+        assert!(is_particles_enabled());
+    }
+
+    #[test]
+    fn particle_mode_toggle() {
+        init(400, 300).unwrap();
+        set_particle_mode(0); // Off
+        assert!(!is_particles_enabled());
+        set_particle_mode(1); // TextLine
+        assert!(is_particles_enabled());
+    }
+
+    #[test]
+    fn particle_count_increases_with_time() {
+        init(800, 600).unwrap();
+        set_particle_mode(1); // TextLine
+        set_particle_rate(100.0);
+        tick();
+        let count1 = get_particle_count();
+        for _ in 0..10 {
+            tick();
+        }
+        let count2 = get_particle_count();
+        // After more frames, there should be particles (may not be strictly more
+        // due to particle lifetime, but should be > 0).
+        assert!(count2 > 0, "Expected particles after 10 ticks, got {}", count2);
+    }
+
+    #[test]
+    fn particle_clear_removes_all() {
+        init(800, 600).unwrap();
+        set_particle_mode(1);
+        set_particle_rate(100.0);
+        for _ in 0..5 {
+            tick();
+        }
+        clear_particles();
+        assert_eq!(get_particle_count(), 0);
+    }
+
+    #[test]
+    fn particle_radial_burst_mode() {
+        init(800, 600).unwrap();
+        set_particle_mode(3); // RadialBurst
+        set_particle_rate(100.0);
+        for _ in 0..5 {
+            tick();
+        }
+        assert!(get_particle_count() > 0, "Radial burst should emit particles");
+    }
+
+    #[test]
+    fn particle_rising_sparks_mode() {
+        init(800, 600).unwrap();
+        set_particle_mode(2); // RisingSparks
+        set_particle_rate(100.0);
+        for _ in 0..5 {
+            tick();
+        }
+        assert!(get_particle_count() > 0, "Rising sparks should emit particles");
+    }
+
+    #[test]
+    fn particle_ambient_mode() {
+        init(800, 600).unwrap();
+        set_particle_mode(4); // Ambient
+        set_particle_rate(100.0);
+        for _ in 0..5 {
+            tick();
+        }
+        assert!(get_particle_count() > 0, "Ambient should emit particles");
+    }
+
+    // --- Rainbow mode tests ---
+
+    #[test]
+    fn rainbow_mode_starts_disabled() {
+        init(400, 300).unwrap();
+        assert!(!is_rainbow_mode());
+    }
+
+    #[test]
+    fn rainbow_mode_toggle() {
+        init(400, 300).unwrap();
+        set_rainbow_mode(true);
+        assert!(is_rainbow_mode());
+        set_rainbow_mode(false);
+        assert!(!is_rainbow_mode());
+    }
+
+    #[test]
+    fn rainbow_speed_clamped() {
+        init(400, 300).unwrap();
+        set_rainbow_speed(100.0);
+        // Should be clamped to 5.0 — just verify it doesn't panic.
+        tick();
+        set_rainbow_speed(-10.0);
+        tick();
+    }
+
+    #[test]
+    fn rainbow_renders_without_crash() {
+        init(800, 600).unwrap();
+        set_rainbow_mode(true);
+        set_rainbow_speed(1.0);
+        for _ in 0..5 {
+            tick();
+        }
+        assert!(get_framebuffer_len() > 0);
+    }
+
+    #[test]
+    fn particles_and_rainbow_combined() {
+        init(800, 600).unwrap();
+        set_particle_mode(3); // RadialBurst
+        set_particle_rate(50.0);
+        set_rainbow_mode(true);
+        set_rainbow_speed(2.0);
+        for _ in 0..10 {
+            tick();
+        }
+        assert!(get_particle_count() > 0);
+        assert!(get_framebuffer_len() > 0);
     }
 }
