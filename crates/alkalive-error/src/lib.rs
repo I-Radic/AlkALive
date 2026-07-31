@@ -21,6 +21,7 @@
 pub use alkalive_core::ModuleId;
 
 use core::sync::atomic::{AtomicU64, Ordering};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 // ============================================================================
 // Sub-enums (§13.1 / §13.2)
@@ -332,20 +333,36 @@ pub trait ErrorBoundary {
     /// `Err`, the subtree is torn down and a typed [`Failure`] is delivered
     /// to the parent.
     ///
-    /// Wave 10 implements the `Err` → `Failure` path. Panic trapping via
-    /// `std::panic::catch_unwind` is deferred — it requires `UnwindSafe`
-    /// bounds (or `unsafe` assertions) on `op` and `T`, which would widen
-    /// the contract.
+    /// Panics are caught via [`catch_unwind`]; the closure is wrapped in
+    /// [`AssertUnwindSafe`] because it captures `&mut self` (not [`UnwindSafe`]
+    /// by default). This is safe under `#![forbid(unsafe_code)]` because
+    /// [`AssertUnwindSafe`] is a plain wrapper struct that implements
+    /// [`UnwindSafe`] by assertion — no `unsafe` is involved. The boundary
+    /// uses the catch for error recovery only (funneling the panic into a
+    /// typed [`AlkALiveError::Threading`]`(`[`ThreadError::WorkerCrash`]`)`),
+    /// not for resuming normal execution after a panic.
+    ///
+    /// [`catch_unwind`]: std::panic::catch_unwind
+    /// [`AssertUnwindSafe`]: std::panic::AssertUnwindSafe
+    /// [`UnwindSafe`]: std::panic::UnwindSafe
     fn trap<T>(
         &mut self,
         op: impl FnOnce() -> Result<T, AlkALiveError>,
         slot: SlotId,
     ) -> Result<T, Failure> {
-        match op() {
-            Ok(v) => Ok(v),
-            Err(e) => Err(Failure {
+        match catch_unwind(AssertUnwindSafe(op)) {
+            Ok(Ok(v)) => Ok(v),
+            Ok(Err(e)) => Err(Failure {
                 slot,
                 error: e,
+                rect: DirtyRect::default(),
+                span: SpanId(0),
+            }),
+            Err(_panic_payload) => Err(Failure {
+                slot,
+                error: AlkALiveError::Threading(ThreadError::WorkerCrash(
+                    "panic trapped at boundary".to_string(),
+                )),
                 rect: DirtyRect::default(),
                 span: SpanId(0),
             }),
@@ -767,6 +784,48 @@ mod tests {
             "expected LayoutSolve(Infeasible(_)), got {:?}",
             failure.error,
         );
+    }
+
+    // ---- ErrorBoundary::trap panic catching (Gap #2) --------------------
+
+    #[test]
+    fn trap_panic_returns_failure_with_threading_error() {
+        // A panicking closure must not escape the boundary; the panic is
+        // funneled into a Threading(WorkerCrash(_)) Failure carrying the
+        // slot id and the default rect / span sentinels.
+        let mut boundary = TrappingBoundary;
+        let slot = SlotId(3);
+        let result: Result<i32, Failure> =
+            boundary.trap(|| panic!("boom"), slot);
+        let failure = result.unwrap_err();
+        assert_eq!(failure.slot, slot);
+        assert_eq!(failure.rect, DirtyRect::default());
+        assert_eq!(failure.span, SpanId(0));
+        assert!(
+            matches!(
+                failure.error,
+                AlkALiveError::Threading(ThreadError::WorkerCrash(_))
+            ),
+            "expected Threading(WorkerCrash(_)), got {:?}",
+            failure.error,
+        );
+        // The trapped-panic detail string must be the boundary's sentinel
+        // message (not the panic payload's own message, which is opaque
+        // `Box<dyn Any + Send>`).
+        if let AlkALiveError::Threading(ThreadError::WorkerCrash(detail)) = &failure.error {
+            assert!(
+                detail.contains("panic trapped at boundary"),
+                "expected 'panic trapped at boundary' sentinel, got {detail:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn trap_ok_still_works() {
+        // Sanity: the catch_unwind wrap must not break the Ok path.
+        let mut boundary = TrappingBoundary;
+        let result: Result<i32, Failure> = boundary.trap(|| Ok(42), SlotId(1));
+        assert_eq!(result.unwrap(), 42);
     }
 
     // ---- ErrorBoundary::report (no-op) -----------------------------------

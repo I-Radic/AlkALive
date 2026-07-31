@@ -6,8 +6,11 @@
 //! state machine, encapsulation access checks, slot mounting, type soundness
 //! queries, and interface slot lookup. Wave 5 replaces the `Signal::emit` /
 //! `Signal::subscribe` `todo!()` stubs with a last-known-good value buffer
-//! and a unique subscription-id minter; dispatch to subscribers remains
-//! deferred to the Wave 6 runtime integration (observer registry, ADR 014).
+//! and a unique subscription-id minter; the observer-registry gap closes the
+//! dispatch loop — `emit` now fans the value out to every registered
+//! `Listener` callback in registration order. Capability-grant verification
+//! (ADR 018) and integration with the runtime's observer registry
+//! (ADR 014 / §2.6) remain deferred to the runtime-integration wave.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -116,11 +119,63 @@ pub struct Value {
 pub struct MountHandle(pub u64);
 
 /// Opaque listener registered against a [`Signal`].
-#[derive(Debug, Clone)]
+///
+/// Carries an optional callback (`Fn(&T)`) that [`Signal::emit`] invokes
+/// with the emitted value. Listeners built via [`Listener::new`] carry no
+/// callback and are silently skipped on emit — useful for tests and for
+/// subscribers that only need the minted [`Subscription`] id.
+/// [`Listener::with_callback`] installs a callback that fires on every
+/// emission in registration order.
+///
+/// Not `Clone`: the boxed callback (`Box<dyn Fn(&T) + 'static>`) is not
+/// cloneable. [`Signal<T>::clone`] therefore starts the clone with an empty
+/// listener table; subscribers remain bound to the original instance.
 pub struct Listener<T> {
     /// Opaque listener identifier.
     pub id: u64,
+    /// Optional callback invoked with the emitted value on each
+    /// [`Signal::emit`]. `None` for listeners built via [`Listener::new`].
+    #[allow(clippy::type_complexity)] // boxed callback is the canonical shape
+    callback: Option<Box<dyn Fn(&T) + 'static>>,
     _marker: PhantomData<T>,
+}
+
+impl<T> Listener<T> {
+    /// Create a listener with no callback.
+    ///
+    /// `emit` silently skips listeners with no callback. Use this for tests
+    /// or for subscribers that only need the minted [`Subscription`] id (the
+    /// runtime's observer registry / capability-grant verification,
+    /// ADR 014 / ADR 018, will layer on top in a later wave).
+    pub fn new(id: u64) -> Self {
+        Self {
+            id,
+            callback: None,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Create a listener whose `f` is invoked with the emitted value on
+    /// every [`Signal::emit`].
+    pub fn with_callback(id: u64, f: impl Fn(&T) + 'static) -> Self {
+        Self {
+            id,
+            callback: Some(Box::new(f)),
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<T> core::fmt::Debug for Listener<T> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // Don't try to print the callback (it is not `Debug`); surface
+        // whether one is installed so the listener table stays
+        // introspectable from `Signal`'s derived `Debug`.
+        f.debug_struct("Listener")
+            .field("id", &self.id)
+            .field("has_callback", &self.callback.is_some())
+            .finish()
+    }
 }
 
 /// Opaque subscription returned by [`Signal::subscribe`].
@@ -349,18 +404,24 @@ static NEXT_MOUNT_HANDLE: AtomicU64 = AtomicU64::new(1);
 
 /// A typed output signal emitter (ADR 014).
 ///
-/// Wave 5 replaces the prior `todo!()` stubs with a real last-known-good
-/// buffer and a unique subscription-id minter. [`Signal::emit`] stores the
-/// emitted value in an internal [`RefCell<Option<T>>`] (interior mutability
-/// lets `emit` take `&self`, matching the module-internal writer contract).
-/// [`Signal::subscribe`] mints a unique [`Subscription`] from an internal
-/// [`AtomicU64`] counter. Dispatch to registered subscribers — the runtime's
-/// observer registry (ADR 014 / §2.6) and capability-grant verification
-/// (ADR 018) — remains a TODO pending the Wave 6 runtime integration.
+/// Stores the last-known-good emitted value in an internal
+/// [`RefCell<Option<T>>`] (interior mutability lets `emit` take `&self`,
+/// matching the module-internal writer contract) and dispatches each
+/// emission to every registered [`Listener`] callback in registration
+/// order. [`Signal::subscribe`] mints a unique [`Subscription`] from an
+/// internal [`AtomicU64`] counter and records the `(Subscription, Listener)`
+/// pair in an internal listener table.
+///
+/// Capability-grant verification (ADR 018) and integration with the
+/// runtime's observer registry (ADR 014 / §2.6) remain deferred — this
+/// crate owns only the in-process dispatch surface.
 ///
 /// `Clone` is implemented manually (not derived) because [`AtomicU64`] does
-/// not implement `Clone`; the cloned signal loads the current counter value
-/// and the last-known-good value (the latter requires `T: Clone`).
+/// not implement `Clone` and [`Listener<T>`] is not `Clone` (the boxed
+/// callback is not cloneable). The cloned signal loads the current counter
+/// value and the last-known-good value (the latter requires `T: Clone`)
+/// and starts with an empty listener table; subscribers remain bound to
+/// the original instance.
 #[derive(Debug)]
 pub struct Signal<T> {
     /// Last value emitted via [`Signal::emit`]; `None` until the first emit.
@@ -369,6 +430,9 @@ pub struct Signal<T> {
     /// `Subscription(0)` remains a sentinel "no subscription" value (mirrors
     /// the [`NEXT_MOUNT_HANDLE`] mount-handle counter).
     next_subscription_id: AtomicU64,
+    /// Registered `(Subscription, Listener)` pairs, dispatched in
+    /// registration order on every [`Signal::emit`].
+    listeners: RefCell<Vec<(Subscription, Listener<T>)>>,
 }
 
 impl<T: Clone> Clone for Signal<T> {
@@ -376,46 +440,71 @@ impl<T: Clone> Clone for Signal<T> {
         Self {
             last_value: RefCell::new(self.last_value.borrow().clone()),
             next_subscription_id: AtomicU64::new(self.next_subscription_id.load(Ordering::Relaxed)),
+            // Subscribers are bound to the original instance; the clone
+            // starts with an empty listener table (`Listener<T>` is not
+            // `Clone` because its boxed callback is not cloneable).
+            listeners: RefCell::new(Vec::new()),
         }
     }
 }
 
 impl<T> Signal<T> {
-    /// Create a new signal with no last value and the subscription counter
-    /// starting at `1`.
+    /// Create a new signal with no last value, no listeners, and the
+    /// subscription counter starting at `1`.
     pub fn new() -> Self {
         Self {
             last_value: RefCell::new(None),
             next_subscription_id: AtomicU64::new(1),
+            listeners: RefCell::new(Vec::new()),
         }
     }
 
     /// Emit `value` to all subscribers (module-internal writer).
     ///
-    /// Wave 5 stores `value` as the last-known-good emission in the
-    /// internal buffer. Dispatch to registered subscribers is deferred —
-    /// the runtime's observer registry (ADR 014 / §2.6) is not yet wired.
+    /// Stores `value` as the last-known-good emission in the internal
+    /// buffer and dispatches a borrow (`&value`) to every registered
+    /// [`Listener`] callback that carries one, in registration order.
+    /// Listeners built via [`Listener::new`] (no callback) are silently
+    /// skipped.
+    ///
+    /// Capability-grant verification (ADR 018) and integration with the
+    /// runtime's observer registry (ADR 014 / §2.6) remain deferred.
+    ///
+    /// *Reentrancy note*: the listener table is borrowed immutably for the
+    /// duration of the dispatch loop, so a callback that re-enters `emit`
+    /// on the same signal is permitted (its listeners fire synchronously).
+    /// A callback that re-enters `subscribe` on the same signal will panic
+    /// (the table cannot be mutated while shared-borrowed).
     pub fn emit(&self, value: T) {
+        // Dispatch to every registered listener with a callback first,
+        // borrowing `value` immutably so we can still move it into
+        // `last_value` afterwards.
+        {
+            let listeners = self.listeners.borrow();
+            for (_sub, listener) in listeners.iter() {
+                if let Some(ref f) = listener.callback {
+                    f(&value);
+                }
+            }
+        }
+        // Retain the last-known-good emission.
         *self.last_value.borrow_mut() = Some(value);
-        // TODO(observer registry, Wave 6 runtime integration): dispatch
-        // `value` to every registered subscriber via the runtime's observer
-        // registry (ADR 014 / §2.6). Until then we only retain the
-        // last-known-good value.
     }
 
     /// Subscribe `listener`; a capability-gated reader.
     ///
-    /// Wave 5 mints a unique [`Subscription`] id from an internal
-    /// [`AtomicU64`] counter. Capability-grant verification (ADR 018) and
-    /// registration in the runtime's subscriber table are deferred — the
-    /// runtime's observer registry (ADR 014 / §2.6) is not yet wired.
+    /// Mints a unique [`Subscription`] id from an internal [`AtomicU64`]
+    /// counter and records the `(Subscription, listener)` pair in the
+    /// signal's listener table so subsequent [`Signal::emit`] calls can
+    /// dispatch to it.
+    ///
+    /// Capability-grant verification (ADR 018) and registration in the
+    /// runtime's observer registry (ADR 014 / §2.6) remain deferred.
     pub fn subscribe(&self, listener: Listener<T>) -> Subscription {
-        let _ = listener;
-        // TODO(observer registry, Wave 6 runtime integration): register
-        // `listener` in the runtime's observer registry and verify the
-        // caller's capability grant (ADR 018 / ADR 014). Until then we only
-        // mint a unique subscription id.
         let id = self.next_subscription_id.fetch_add(1, Ordering::Relaxed);
+        self.listeners
+            .borrow_mut()
+            .push((Subscription(id), listener));
         Subscription(id)
     }
 }
@@ -473,6 +562,8 @@ pub struct Failure {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+    use std::rc::Rc;
 
     /// Build a [`Module`] in the given state with a minimal boundary owned
     /// by `ModuleId(1)`.
@@ -719,23 +810,69 @@ mod tests {
     #[test]
     fn signal_subscribe_returns_unique_nonzero_ids() {
         let signal: Signal<i32> = Signal::new();
-        let s1 = signal.subscribe(Listener {
-            id: 1,
-            _marker: PhantomData,
-        });
-        let s2 = signal.subscribe(Listener {
-            id: 2,
-            _marker: PhantomData,
-        });
-        let s3 = signal.subscribe(Listener {
-            id: 3,
-            _marker: PhantomData,
-        });
+        let s1 = signal.subscribe(Listener::new(1));
+        let s2 = signal.subscribe(Listener::new(2));
+        let s3 = signal.subscribe(Listener::new(3));
         // Counter starts at 1; Subscription(0) is the sentinel.
         assert!(s1.0 > 0);
         assert!(s2.0 > s1.0);
         assert!(s3.0 > s2.0);
         assert_ne!(s1, s2);
         assert_ne!(s2, s3);
+    }
+
+    // ---- Signal::emit dispatch (Gap #1) ---------------------------------
+
+    #[test]
+    fn signal_emit_dispatches_to_subscribed_callback() {
+        // Create a Signal<i32>, subscribe with a callback that increments
+        // a counter, emit 42, verify counter == 1 and last_value == Some(42).
+        let signal: Signal<i32> = Signal::new();
+        let counter = Rc::new(Cell::new(0u32));
+        let counter_for_cb = counter.clone();
+        signal.subscribe(Listener::with_callback(1, move |_v| {
+            counter_for_cb.set(counter_for_cb.get() + 1);
+        }));
+        assert!(signal.last_value.borrow().is_none(), "no emit yet");
+        signal.emit(42);
+        assert_eq!(counter.get(), 1, "callback should have fired once");
+        assert_eq!(*signal.last_value.borrow(), Some(42));
+    }
+
+    #[test]
+    fn signal_emit_dispatches_to_all_subscribers() {
+        // Subscribe 3 listeners, emit once, verify all 3 received the value.
+        let signal: Signal<i32> = Signal::new();
+        let c1 = Rc::new(Cell::new(0u32));
+        let c2 = Rc::new(Cell::new(0u32));
+        let c3 = Rc::new(Cell::new(0u32));
+        let c1_cb = c1.clone();
+        let c2_cb = c2.clone();
+        let c3_cb = c3.clone();
+        signal.subscribe(Listener::with_callback(1, move |_v| {
+            c1_cb.set(c1_cb.get() + 1);
+        }));
+        signal.subscribe(Listener::with_callback(2, move |_v| {
+            c2_cb.set(c2_cb.get() + 1);
+        }));
+        signal.subscribe(Listener::with_callback(3, move |_v| {
+            c3_cb.set(c3_cb.get() + 1);
+        }));
+        signal.emit(7);
+        assert_eq!(c1.get(), 1, "listener 1 should have fired once");
+        assert_eq!(c2.get(), 1, "listener 2 should have fired once");
+        assert_eq!(c3.get(), 1, "listener 3 should have fired once");
+        assert_eq!(*signal.last_value.borrow(), Some(7));
+    }
+
+    #[test]
+    fn signal_emit_with_no_callback_listener_does_not_panic() {
+        // Subscribe with no callback (Listener::new), emit, verify no panic.
+        let signal: Signal<i32> = Signal::new();
+        signal.subscribe(Listener::new(1));
+        // A no-callback listener must be silently skipped; emit must not
+        // panic and must still retain the last-known-good value.
+        signal.emit(99);
+        assert_eq!(*signal.last_value.borrow(), Some(99));
     }
 }
