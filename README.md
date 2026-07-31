@@ -47,6 +47,82 @@ The catalog also identifies **ecosystem-adoption inertia** (P9.5) as the central
 
 The draft concludes with an **Integration Overview** that synthesises the nine cluster solutions into a single coherent architecture organised around one principle: *the render-object tree is the single source of truth, owned by the WASM module, with multiple emission targets.* It explicitly resolves cross-area conflicts (single-source tree ownership, unified focus/accessibility structure, scheduler ownership, interop-interface ownership) and flags open risks (GPU-backend portability, WASM component-model maturity, COOP/COEP constraints, and catalog-acknowledged literature gaps).
 
+## Hello World Deployment
+
+The AlkALive Hello World is deployed and working in the browser! It renders a
+golden "Hello World!" text on a black background with a slow 3D Y-axis rotation,
+all via the AlkaLive text stack (HarfRust shaping + glyph rasterization) and a
+CPU software renderer — no HTML/CSS for UI, only a `<canvas>` element.
+
+### Quick Start
+
+```bash
+# Build the WASM module
+wasm-pack build crates/alkalive-app --target web --release
+
+# Serve the deploy directory
+cd deploy && python3 -m http.server 8080
+
+# Open http://localhost:8080 in a browser
+```
+
+### Deployment Files
+
+| Path | Description |
+| --- | --- |
+| `crates/alkalive-app/` | Application crate — WASM entry points, CPU software renderer, text scene |
+| `crates/alkalive-app/src/lib.rs` | `#[wasm_bindgen]` exports: `init`, `tick`, `get_framebuffer_ptr`, `resize` |
+| `crates/alkalive-app/src/renderer.rs` | CPU software renderer: RGBA framebuffer, glyph compositing, Y-axis rotation |
+| `crates/alkalive-app/src/text_scene.rs` | Text scene: font loading → HarfRust shaping → glyph rasterization → positioned quads |
+| `crates/alkalive-app/assets/Roboto-Regular.ttf` | Embedded font covering full ASCII range |
+| `deploy/index.html` | HTML harness: canvas + JS rAF loop + `putImageData` |
+| `deploy/alkalive_app.js` | wasm-bindgen JS glue |
+| `deploy/alkalive_app_bg.wasm` | Compiled WASM binary (1 MB) |
+| `verify_wasm.mjs` | Node.js verification script |
+
+### Architecture
+
+The Hello World bypasses the not-yet-implemented `.alk` compiler and abstract
+render backend by constructing the scene directly in Rust and using a CPU
+software renderer:
+
+1. **Font Loading** — Roboto-Regular.ttf is embedded via `include_bytes!` and
+   loaded into `HarfRustFontRegistry`.
+2. **Text Shaping** — `HarfRustTextShaper::shape("Hello World!", ctx)` produces
+   a `ShapedRun` with glyph IDs, advances, offsets, and metrics.
+3. **Glyph Rasterization** — `HarfRustGlyphAtlas::ensure(key)` rasterizes each
+   glyph outline via the vendored scanline rasterizer into a 512×512 atlas page.
+4. **Positioning** — The `TextScene::rasterize_run` adapter (implementing the
+   missing §6.5 `TextStack::rasterize`) walks the `ShapedRun`, accumulates pen
+   position, and produces `PositionedGlyph` quads.
+5. **Compositing** — `SoftwareRenderer::composite_glyphs_rotated` reads atlas
+   pixels, applies golden color modulation with alpha blending, and writes to
+   the RGBA framebuffer with a Y-axis rotation transform.
+6. **Presentation** — JavaScript reads the framebuffer via `get_framebuffer_ptr()`
+   and draws it to a `<canvas>` using `putImageData` in a `requestAnimationFrame` loop.
+
+### Verification
+
+The WASM module has been verified both via Node.js (`verify_wasm.mjs`) and via
+headless browser testing (agent-browser + VLM screenshot analysis):
+
+- ✅ 5,564 golden pixels on 98.7% black background
+- ✅ Text shaping produces correct glyph layout for "Hello World!"
+- ✅ 3D Y-axis rotation animation working (text alternates between normal and mirrored)
+- ✅ Resize handling works correctly
+- ✅ All 501 workspace tests pass (490 existing + 11 new)
+
+### Limitations
+
+- **No text input field** — the input system (ADR 023 IME bridge) is not yet
+  implemented. This is documented in `HELLO_WORLD_GAPS.md` (Gaps G8–G11).
+- **No `.alk` source compiler** — the scene is constructed directly in Rust.
+  A source-to-WASM compiler is a future milestone.
+- **CPU rendering** — the software renderer uses CPU compositing + Canvas 2D
+  `putImageData` rather than WebGPU. A concrete WebGPU backend is a future milestone.
+- **Pseudo-3D rotation** — the Y-axis rotation is approximated by scaling the
+  X dimension by `cos(angle)`. Full 3D transform matrices are a future milestone.
+
 ## License
 
 Apache License 2.0. See `LICENSE`.

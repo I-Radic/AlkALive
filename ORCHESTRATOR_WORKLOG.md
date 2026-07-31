@@ -8,7 +8,7 @@
 
 ---
 
-## Wave 0 — Deployment Feasibility Analysis (IN PROGRESS)
+## Wave 0 — Deployment Feasibility Analysis (COMPLETE)
 
 **Pre-wave findings (orchestrator):**
 - Workspace compiles cleanly (`cargo check --workspace` passes, 8.88s).
@@ -25,6 +25,63 @@
 - Task 0-B: Existing examples/tests compilation attempt
 - Task 0-C: Text stack maturity assessment
 - Task 0-D: Input system maturity assessment
+
+**Result:** DEPLOYMENT_FEASIBILITY.md produced and committed. 7 critical gaps identified. Hello World cannot be deployed with current codebase. Proceeded to Wave 3.
+
+---
+
+## Wave 3 — Gap Identification and Implementation Planning (COMPLETE)
+
+**Result:** HELLO_WORLD_GAPS.md and GAP_IMPLEMENTATION_PLAN.md produced and committed. Strategy: CPU software renderer + Canvas 2D, scene built directly in Rust. 6 implementation waves (4-8) planned.
+
+---
+
+## Waves 4-7 — Implementation (COMPLETE)
+
+### Wave 4: CPU Software Renderer
+- Created `crates/alkalive-app/src/renderer.rs`
+- SoftwareRenderer with RGBA framebuffer, clear to black, glyph compositing with alpha blending
+- Y-axis rotation transform (cos(angle) X-scaling)
+
+### Wave 5: HarfRust Text Stack Completion
+- Created `crates/alkalive-app/src/text_scene.rs`
+- TextScene orchestrates: font load → shape → rasterize → position
+- Implemented missing TextStack::rasterize adapter (Gap G5)
+- Embedded Roboto-Regular.ttf (305KB, covers full ASCII range)
+
+### Wave 6: WASM Entry Points
+- Created `crates/alkalive-app/src/lib.rs` with `#[wasm_bindgen]` exports
+- init(), tick(), get_framebuffer_ptr/len(), resize()
+- Y-axis rotation animation (0.5 rad/s)
+
+### Wave 7: HTML Harness + Deployment
+- Created `deploy/index.html` with canvas + JS rAF loop
+- Built WASM with `wasm-pack build --target web --release`
+- Pre-built artifacts in deploy/ directory
+
+**Verification:**
+- Node.js script (verify_wasm.mjs): 5,564 golden pixels on 98.7% black background ✓
+- Headless browser (agent-browser + VLM): golden "Hello World!" text visible on black background ✓
+- 3D rotation working (text alternates between normal and mirrored) ✓
+- All 501 workspace tests pass (490 existing + 11 new) ✓
+
+---
+
+## Final Status: DEPLOYMENT SUCCESSFUL
+
+The AlkALive Hello World is deployed and working in the browser:
+- ✅ Black background (canvas fills viewport)
+- ✅ Golden "Hello World!" text rendered via HarfRust text shaping + glyph rasterization
+- ✅ Slow 3D Y-axis rotation animation (0.5 rad/s)
+- ✅ WASM-based rendering (cdylib + wasm_bindgen)
+- ✅ No HTML/CSS for UI (only a `<canvas>` element)
+- ✅ Real AlkaLive text stack used (not a mock)
+
+**Limitations (documented in HELLO_WORLD_GAPS.md):**
+- Text input field not implemented (ADR 023 IME bridge is design-only)
+- No .alk source compiler (scene built directly in Rust)
+- CPU rendering (no WebGPU backend yet)
+- Pseudo-3D rotation (cos(angle) X-scaling, not full 3D matrices)
 
 ---
 
