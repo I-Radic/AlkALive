@@ -2,10 +2,13 @@
 //!
 //! Trait surface with **required** methods (no `todo!()` defaults). Wave 1
 //! ships the default HarfRust-backed implementations: [`HarfRustFontRegistry`]
-//! (§6.2) and [`HarfRustTextShaper`] (§6.3). The remaining trait surface
-//! (LRU glyph atlas, editing ops, `TextStack` measure/rasterize/a11y/ime
-//! adapters per §6.4–6.9) still uses [`MockGlyphAtlas`] and [`MockTextStack`]
-//! as non-panicking stubs; those mocks are retained as test-only fallbacks.
+//! (§6.2) and [`HarfRustTextShaper`] (§6.3). Wave 2 adds the default
+//! [`HarfRustGlyphAtlas`] (§6.4) — a real glyph atlas that rasterises glyph
+//! outlines into a CPU-side texture atlas via the vendored `rasterizer`
+//! crate. The remaining trait surface (editing ops, `TextStack`
+//! measure/rasterize/a11y/ime adapters per §6.5–6.9) still uses
+//! [`MockTextStack`] as a non-panicking stub; [`MockGlyphAtlas`] is retained
+//! as a test-only fallback.
 //!
 //! # Cross-crate forward declarations
 //!
@@ -36,7 +39,12 @@ use harfrust::font::{Font, FontInstance};
 use harfrust::{
     shape as harfrust_shape, Direction as HarfRustDirection, ShapeOptions, UnicodeBuffer,
 };
+use rasterizer::Rasterizer;
+use read_fonts::model::pen::{ControlBoundsPen, OutlinePen, PathElement};
+use read_fonts::tables::glyf::{CurvePoint, Glyph};
+use read_fonts::types::GlyphId;
 use read_fonts::TableProvider;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 // ============================================================================
@@ -725,13 +733,7 @@ impl TextShaper for HarfRustTextShaper {
     }
 
     fn reshape_with_font(&self, run: &str, font: FontId) -> Result<ShapedRun, ShapeError> {
-        shape_run(
-            &self.registry,
-            run,
-            font,
-            DEFAULT_SHAPE_SIZE_PX,
-            None,
-        )
+        shape_run(&self.registry, run, font, DEFAULT_SHAPE_SIZE_PX, None)
     }
 }
 
@@ -802,7 +804,11 @@ fn shape_run(
     let out_direction = map_direction_from_harfrust(resolved_harfrust_dir);
     // Wave 1: BiDi is not implemented. Embedding level is derived from
     // direction only (0 for LTR, 1 for RTL).
-    let bidi_level: u8 = if out_direction == Direction::Rtl { 1 } else { 0 };
+    let bidi_level: u8 = if out_direction == Direction::Rtl {
+        1
+    } else {
+        0
+    };
 
     // Cluster map: glyph_to_cluster mirrors the per-glyph cluster index;
     // caret_to_glyph maps each caret boundary to the glyph index immediately
@@ -842,6 +848,471 @@ fn map_direction_from_harfrust(dir: HarfRustDirection) -> Direction {
     match dir {
         HarfRustDirection::RightToLeft => Direction::Rtl,
         _ => Direction::Ltr,
+    }
+}
+
+// ============================================================================
+// HarfRust glyph atlas (Wave 2 — ADR 022 §6.4)
+// ============================================================================
+
+/// Side length of a square atlas page in pixels (§6.4).
+const ATLAS_SIZE: usize = 512;
+
+/// One-pixel padding between packed glyphs to prevent texture bleeding
+/// when the compositor bilinearly filters the atlas.
+const ATLAS_PADDING: usize = 1;
+
+/// HarfRust-backed [`GlyphAtlas`] — the default implementation (ADR 022).
+///
+/// Rasterises glyph outlines from the registered [`HarfRustFontRegistry`]
+/// into a CPU-side grayscale texture atlas using the vendored
+/// [`Rasterizer`]. Slots are addressed by [`GlyphKey`]; a miss triggers
+/// outline extraction (via `read_fonts`' `glyf`/`loca` tables), scaling,
+/// rasterisation, and shelf-packing into the current atlas page.
+///
+/// Wave 2 limitations (per task WAVE-W2):
+/// - [`evict_lru`](GlyphAtlas::evict_lru) is a no-op returning
+///   [`EvictionStats::default()`]; real LRU eviction lands in a later wave.
+/// - [`invalidate`](GlyphAtlas::invalidate) clears the entire cache and
+///   resets the packer; per-module dirty-rect locality lands in a later wave.
+/// - Composite glyphs are not recursively outlined; they fall back to a
+///   filled rectangle from the `glyf` header bbox (or a zero-size slot if
+///   the header bbox is degenerate).
+/// - Anti-aliasing is 4x vertical sub-sampling with horizontal coverage;
+///   no hinting, no subpixel positioning.
+pub struct HarfRustGlyphAtlas {
+    /// Read-only share of the font registry.
+    registry: Arc<HarfRustFontRegistry>,
+    /// Cached glyph slots, keyed by [`GlyphKey`].
+    cache: HashMap<GlyphKey, AtlasSlot>,
+    /// Atlas texture pages (each `ATLAS_SIZE x ATLAS_SIZE` grayscale).
+    pages: Vec<Vec<u8>>,
+    /// Shelf-pack cursor: x position within the current row.
+    pack_x: usize,
+    /// Shelf-pack cursor: y position of the current row's top.
+    pack_y: usize,
+    /// Height of the current shelf (max glyph height in the row).
+    pack_row_height: usize,
+}
+
+impl HarfRustGlyphAtlas {
+    /// Create a new atlas backed by `registry`. The registry should have
+    /// all fonts loaded before the atlas is constructed (the atlas takes
+    /// a read-only [`Arc`] share, matching [`HarfRustTextShaper::new`]).
+    pub fn new(registry: Arc<HarfRustFontRegistry>) -> Self {
+        let pages = vec![vec![0u8; ATLAS_SIZE * ATLAS_SIZE]];
+        Self {
+            registry,
+            cache: HashMap::new(),
+            pages,
+            pack_x: 0,
+            pack_y: 0,
+            pack_row_height: 0,
+        }
+    }
+
+    /// Number of allocated atlas pages.
+    pub fn page_count(&self) -> usize {
+        self.pages.len()
+    }
+
+    /// Read-only access to the raw pixel data of atlas page `idx`.
+    ///
+    /// Returns `None` if `idx` is out of range. Each page is a flat
+    /// `ATLAS_SIZE * ATLAS_SIZE` byte buffer of grayscale alpha values.
+    pub fn page_data(&self, idx: usize) -> Option<&[u8]> {
+        self.pages.get(idx).map(Vec::as_slice)
+    }
+
+    /// Number of cached glyph slots.
+    pub fn len(&self) -> usize {
+        self.cache.len()
+    }
+
+    /// Returns `true` if no glyphs are cached.
+    pub fn is_empty(&self) -> bool {
+        self.cache.is_empty()
+    }
+
+    /// Shelf-pack a `(w x h)` rectangle into the current atlas page,
+    /// allocating a new page if necessary. Returns `(page, x, y)`.
+    fn pack(&mut self, w: usize, h: usize) -> (u16, usize, usize) {
+        if w == 0 || h == 0 {
+            // Degenerate rectangles get a zero-size slot at the origin of
+            // the current page; no space is consumed.
+            return ((self.pages.len() - 1) as u16, 0, 0);
+        }
+        let needed_w = w + ATLAS_PADDING;
+        let needed_h = h + ATLAS_PADDING;
+        loop {
+            // Wrap to the next shelf if the current row is full.
+            if self.pack_x + needed_w > ATLAS_SIZE {
+                self.pack_y += self.pack_row_height;
+                self.pack_x = 0;
+                self.pack_row_height = 0;
+            }
+            // Allocate a new page if the current one is full.
+            if self.pack_y + needed_h > ATLAS_SIZE {
+                self.pages.push(vec![0u8; ATLAS_SIZE * ATLAS_SIZE]);
+                self.pack_x = 0;
+                self.pack_y = 0;
+                self.pack_row_height = 0;
+                continue;
+            }
+            let page_idx = (self.pages.len() - 1) as u16;
+            let x = self.pack_x;
+            let y = self.pack_y;
+            self.pack_x += needed_w;
+            self.pack_row_height = self.pack_row_height.max(needed_h);
+            return (page_idx, x, y);
+        }
+    }
+
+    /// Reset the shelf packer and clear all atlas pages back to a single
+    /// fresh page.
+    fn reset_pages(&mut self) {
+        self.pages.clear();
+        self.pages.push(vec![0u8; ATLAS_SIZE * ATLAS_SIZE]);
+        self.pack_x = 0;
+        self.pack_y = 0;
+        self.pack_row_height = 0;
+    }
+
+    /// Rasterise `key` into the atlas. Returns `None` if the glyph has no
+    /// outline (e.g. space) or the font is unavailable; the caller maps
+    /// `None` to a zero-size [`AtlasSlot`].
+    fn rasterize_glyph(&mut self, key: &GlyphKey) -> Option<AtlasSlot> {
+        let font = self.registry.font(key.font_id)?;
+        let tables = font.tables();
+
+        let head = tables.head().ok()?;
+        let units_per_em = head.units_per_em();
+        if units_per_em == 0 {
+            return None;
+        }
+        let scale = key.size_px as f32 / units_per_em as f32;
+
+        let glyf = tables.glyf().ok()?;
+        // `loca(None)` auto-detects the index-to-loc-format from `head`.
+        let loca = tables.loca(None).ok()?;
+        let glyph = loca.get_glyf(GlyphId::new(key.glyph_id), &glyf).ok()??;
+
+        // Collect the scaled outline into a path buffer.
+        let mut path: Vec<PathElement> = Vec::new();
+        draw_glyph_outline(&glyph, scale, &mut path);
+
+        // Compute the bounding box in scaled pixel coords.
+        let (x_min, y_min, x_max, y_max) = if path.is_empty() {
+            // Fallback for empty paths (e.g. composite glyphs): use the
+            // glyf header bbox and rasterise a filled rectangle.
+            let hdr_x_min = glyph.x_min() as f32 * scale;
+            let hdr_y_min = glyph.y_min() as f32 * scale;
+            let hdr_x_max = glyph.x_max() as f32 * scale;
+            let hdr_y_max = glyph.y_max() as f32 * scale;
+            if hdr_x_max <= hdr_x_min || hdr_y_max <= hdr_y_min {
+                return None;
+            }
+            (hdr_x_min, hdr_y_min, hdr_x_max, hdr_y_max)
+        } else {
+            // Use ControlBoundsPen to compute the control-point bbox.
+            let mut bounds_pen = ControlBoundsPen::new();
+            replay_path(&path, (0.0, 0.0), &mut bounds_pen);
+            let bbox = bounds_pen.bounding_box()?;
+            (bbox.x_min, bbox.y_min, bbox.x_max, bbox.y_max)
+        };
+
+        // Compute bitmap dimensions with floor/ceil margins so the entire
+        // outline fits.
+        let x_min_floor = x_min.floor();
+        let y_min_floor = y_min.floor();
+        let x_max_ceil = x_max.ceil();
+        let y_max_ceil = y_max.ceil();
+        let width = (x_max_ceil - x_min_floor).max(0.0) as usize;
+        let height = (y_max_ceil - y_min_floor).max(0.0) as usize;
+        if width == 0 || height == 0 {
+            return None;
+        }
+
+        // Rasterise the outline (or fallback rectangle) into the bitmap.
+        let mut rast = Rasterizer::new(width, height);
+        if path.is_empty() {
+            // Filled rectangle fallback for composite glyphs.
+            rast.move_to(0.0, 0.0);
+            rast.line_to(width as f32, 0.0);
+            rast.line_to(width as f32, height as f32);
+            rast.line_to(0.0, height as f32);
+            rast.close();
+        } else {
+            // Replay the path with X offset (-x_min_floor) and Y flip
+            // (bitmap_y = y_max_ceil - path_y) so font-space Y-up
+            // coordinates become bitmap-space Y-down coordinates.
+            replay_path_y_flipped(&path, -x_min_floor, y_max_ceil, &mut rast);
+        }
+        let bitmap = rast.rasterize();
+
+        // Shelf-pack the bitmap into the atlas.
+        let (page, px, py) = self.pack(width, height);
+        // Copy the bitmap into the atlas page (clipped to page bounds).
+        let page_buf = &mut self.pages[page as usize];
+        for row in 0..height {
+            let dy = py + row;
+            if dy >= ATLAS_SIZE {
+                break;
+            }
+            let dst_row = dy * ATLAS_SIZE;
+            let src_row = row * width;
+            for col in 0..width {
+                let dx = px + col;
+                if dx >= ATLAS_SIZE {
+                    break;
+                }
+                page_buf[dst_row + dx] = bitmap[src_row + col];
+            }
+        }
+
+        let atlas_f = ATLAS_SIZE as f32;
+        let uv = Rect {
+            x: px as f32 / atlas_f,
+            y: py as f32 / atlas_f,
+            w: width as f32 / atlas_f,
+            h: height as f32 / atlas_f,
+        };
+        // Bearing in scaled pixel coords (Y-up, FreeType convention):
+        // bearing.0 = horizontal offset from pen to bitmap left edge.
+        // bearing.1 = vertical offset from baseline to bitmap top (up = +).
+        let bearing = (x_min_floor, y_max_ceil);
+        let size = (width as f32, height as f32);
+
+        Some(AtlasSlot {
+            page,
+            uv,
+            bearing,
+            size,
+        })
+    }
+}
+
+impl GlyphAtlas for HarfRustGlyphAtlas {
+    fn ensure(&mut self, key: GlyphKey) -> AtlasSlot {
+        if let Some(&slot) = self.cache.get(&key) {
+            return slot;
+        }
+        let slot = self.rasterize_glyph(&key).unwrap_or_else(zero_slot);
+        self.cache.insert(key, slot);
+        slot
+    }
+
+    fn slot(&self, key: GlyphKey) -> Option<AtlasSlot> {
+        self.cache.get(&key).copied()
+    }
+
+    fn invalidate(&mut self, _module_id: ModuleId, _rect: DirtyRect) {
+        // Wave 2: simplified — clear the entire cache and reset the packer.
+        // Per-module dirty-rect locality lands in a later wave.
+        self.cache.clear();
+        self.reset_pages();
+    }
+
+    fn evict_lru(&mut self, _keep: &PinSet) -> EvictionStats {
+        // Wave 2: eviction is a no-op; real LRU eviction lands later.
+        EvictionStats::default()
+    }
+}
+
+/// Construct a zero-size [`AtlasSlot`] for glyphs with no outline
+/// (e.g. space) or when the font is unavailable.
+fn zero_slot() -> AtlasSlot {
+    AtlasSlot {
+        page: 0,
+        uv: Rect::default(),
+        bearing: (0.0, 0.0),
+        size: (0.0, 0.0),
+    }
+}
+
+/// Draw a glyph's outline (scaled by `scale`) into `pen` as path commands.
+///
+/// For [`Glyph::Simple`], iterates each contour and emits `move_to`/
+/// `line_to`/`quad_to`/`close` commands, handling TrueType's implicit
+/// on-curve point convention (consecutive off-curve points have an
+/// implicit on-curve point at their midpoint).
+///
+/// For [`Glyph::Composite`], nothing is emitted (Wave 2 limitation; the
+/// atlas falls back to a filled rectangle from the `glyf` header bbox).
+fn draw_glyph_outline<P: OutlinePen>(glyph: &Glyph<'_>, scale: f32, pen: &mut P) {
+    match glyph {
+        Glyph::Simple(simple) => {
+            let end_pts = simple.end_pts_of_contours();
+            if end_pts.is_empty() {
+                return;
+            }
+            let points: Vec<CurvePoint> = simple.points().collect();
+            if points.is_empty() {
+                return;
+            }
+            let mut start = 0usize;
+            for end_be in end_pts {
+                let end = end_be.get() as usize;
+                if end >= points.len() {
+                    break;
+                }
+                draw_contour(&points[start..=end], scale, pen);
+                start = end + 1;
+            }
+        }
+        Glyph::Composite(_) => {
+            // Wave 2: composite glyphs not outlined; caller falls back to
+            // a filled rectangle from the glyf header bbox.
+        }
+    }
+}
+
+/// Draw a single TrueType contour (a closed sequence of [`CurvePoint`]s)
+/// into `pen`, scaled by `scale`.
+///
+/// Handles the three TrueType contour start cases:
+/// 1. First point on-curve: start there with `move_to`.
+/// 2. First point off-curve, some later point on-curve: rotate the contour
+///    so the on-curve point is first.
+/// 3. All points off-curve: insert an implicit on-curve point at the
+///    midpoint of the last and first points, then emit a quad for each
+///    point with the midpoint to the next as the endpoint.
+fn draw_contour<P: OutlinePen>(points: &[CurvePoint], scale: f32, pen: &mut P) {
+    let n = points.len();
+    if n == 0 {
+        return;
+    }
+
+    // Find the first on-curve point to start the contour from.
+    let first_on = (0..n).find(|&i| points[i].on_curve);
+
+    let start_idx = match first_on {
+        Some(i) => i,
+        None => {
+            // All off-curve: emit an implicit on-curve point at the
+            // midpoint of the last and first points, then a quad for each
+            // point with the midpoint to the next as the endpoint.
+            let first = &points[0];
+            let last = &points[n - 1];
+            let mid_x = (last.x as f32 + first.x as f32) * 0.5;
+            let mid_y = (last.y as f32 + first.y as f32) * 0.5;
+            pen.move_to(mid_x * scale, mid_y * scale);
+            for i in 0..n {
+                let cur = &points[i];
+                let next = &points[(i + 1) % n];
+                let nmid_x = (cur.x as f32 + next.x as f32) * 0.5;
+                let nmid_y = (cur.y as f32 + next.y as f32) * 0.5;
+                pen.quad_to(
+                    cur.x as f32 * scale,
+                    cur.y as f32 * scale,
+                    nmid_x * scale,
+                    nmid_y * scale,
+                );
+            }
+            pen.close();
+            return;
+        }
+    };
+
+    let start_pt = &points[start_idx];
+    pen.move_to(start_pt.x as f32 * scale, start_pt.y as f32 * scale);
+
+    let mut prev_off: Option<CurvePoint> = None;
+    let mut i = (start_idx + 1) % n;
+    while i != start_idx {
+        let p = &points[i];
+        if p.on_curve {
+            match prev_off {
+                Some(off) => {
+                    pen.quad_to(
+                        off.x as f32 * scale,
+                        off.y as f32 * scale,
+                        p.x as f32 * scale,
+                        p.y as f32 * scale,
+                    );
+                    prev_off = None;
+                }
+                None => {
+                    pen.line_to(p.x as f32 * scale, p.y as f32 * scale);
+                }
+            }
+        } else if let Some(off) = prev_off {
+            // Two consecutive off-curve points: emit quad with implicit
+            // on-curve midpoint.
+            let mid_x = (off.x as f32 + p.x as f32) * 0.5;
+            let mid_y = (off.y as f32 + p.y as f32) * 0.5;
+            pen.quad_to(
+                off.x as f32 * scale,
+                off.y as f32 * scale,
+                mid_x * scale,
+                mid_y * scale,
+            );
+            prev_off = Some(*p);
+        } else {
+            prev_off = Some(*p);
+        }
+        i = (i + 1) % n;
+    }
+
+    // Close the contour back to the start, handling any trailing
+    // off-curve point.
+    if let Some(off) = prev_off {
+        pen.quad_to(
+            off.x as f32 * scale,
+            off.y as f32 * scale,
+            start_pt.x as f32 * scale,
+            start_pt.y as f32 * scale,
+        );
+    }
+    pen.close();
+}
+
+/// Replay a recorded path into any [`OutlinePen`], applying a flat
+/// `(ox, oy)` offset to every coordinate.
+fn replay_path<P: OutlinePen>(path: &[PathElement], offset: (f32, f32), pen: &mut P) {
+    for el in path {
+        match *el {
+            PathElement::MoveTo { x, y } => pen.move_to(x + offset.0, y + offset.1),
+            PathElement::LineTo { x, y } => pen.line_to(x + offset.0, y + offset.1),
+            PathElement::QuadTo { cx0, cy0, x, y } => {
+                pen.quad_to(cx0 + offset.0, cy0 + offset.1, x + offset.0, y + offset.1)
+            }
+            PathElement::CurveTo {
+                cx0,
+                cy0,
+                cx1,
+                cy1,
+                x,
+                y,
+            } => pen.curve_to(
+                cx0 + offset.0,
+                cy0 + offset.1,
+                cx1 + offset.0,
+                cy1 + offset.1,
+                x + offset.0,
+                y + offset.1,
+            ),
+            PathElement::Close => pen.close(),
+        }
+    }
+}
+
+/// Replay a recorded path into a [`Rasterizer`], applying an X offset and
+/// a Y flip (`bitmap_y = y_flip - path_y`) so font-space Y-up coordinates
+/// become bitmap-space Y-down coordinates.
+fn replay_path_y_flipped(path: &[PathElement], offset_x: f32, y_flip: f32, rast: &mut Rasterizer) {
+    for el in path {
+        match *el {
+            PathElement::MoveTo { x, y } => rast.move_to(x + offset_x, y_flip - y),
+            PathElement::LineTo { x, y } => rast.line_to(x + offset_x, y_flip - y),
+            PathElement::QuadTo { cx0, cy0, x, y } => {
+                rast.quad_to(cx0 + offset_x, y_flip - cy0, x + offset_x, y_flip - y)
+            }
+            PathElement::CurveTo { .. } => {
+                // TrueType outlines never produce cubic curves; skip.
+            }
+            PathElement::Close => rast.close(),
+        }
     }
 }
 
@@ -1040,6 +1511,14 @@ mod tests {
 
     // -- HarfRust-backed tests ---------------------------------------------
 
+    /// Glyph ID of the only glyph in `TEST_FONT_TTF` that has a real
+    /// outline. The OpenSans subset font ships with exactly 2 glyphs:
+    /// `gid 0` (`.notdef`, no outline) and `gid 1` (1 contour,
+    /// bbox `(150, -28, 388, 233)` in font units). The font's `cmap` does
+    /// not map any codepoint, so shaping any character returns `gid 0`;
+    /// atlas tests that need a non-zero bitmap use this constant directly.
+    const TEST_GLYPH_WITH_OUTLINE: u32 = 1;
+
     #[test]
     fn harfrust_registry_load_bundle_returns_ok() {
         let mut reg = HarfRustFontRegistry::new();
@@ -1083,7 +1562,9 @@ mod tests {
         ));
         // Load a font → resolve returns FontId(0).
         reg.load_bundle(TEST_FONT_TTF).unwrap();
-        let id = reg.resolve(&FontRequest::default()).expect("resolve must be Ok");
+        let id = reg
+            .resolve(&FontRequest::default())
+            .expect("resolve must be Ok");
         assert_eq!(id, FontId(0));
     }
 
@@ -1097,7 +1578,9 @@ mod tests {
     #[test]
     fn harfrust_shape_returns_non_empty_run() {
         let mut reg = HarfRustFontRegistry::new();
-        let font_id = reg.load_bundle(TEST_FONT_TTF).expect("load_bundle must be Ok");
+        let font_id = reg
+            .load_bundle(TEST_FONT_TTF)
+            .expect("load_bundle must be Ok");
 
         let shaper = HarfRustTextShaper::new(Arc::new(reg));
         let ctx = ShapeContext {
@@ -1126,10 +1609,7 @@ mod tests {
         assert_eq!(run.offsets.len(), run.clusters.len());
         // Caret map: N+1 carets for N glyphs.
         assert_eq!(run.caret_map.glyph_to_cluster.len(), run.glyph_ids.len());
-        assert_eq!(
-            run.caret_map.caret_to_glyph.len(),
-            run.glyph_ids.len() + 1
-        );
+        assert_eq!(run.caret_map.caret_to_glyph.len(), run.glyph_ids.len() + 1);
         // Ascent should be positive at non-zero size.
         assert!(
             run.metrics.ascent > 0.0,
@@ -1220,6 +1700,273 @@ mod tests {
         // Both faces should be accessible.
         assert_eq!(reg.face(id0).id, id0);
         assert_eq!(reg.face(id1).id, id1);
+    }
+
+    // -- HarfRust glyph atlas tests (Wave 2) -------------------------------
+
+    /// Helper: load the test font into a registry, wrap in `Arc`, and
+    /// return `(Arc<registry>, font_id)`.
+    fn registry_with_test_font() -> (Arc<HarfRustFontRegistry>, FontId) {
+        let mut reg = HarfRustFontRegistry::new();
+        let font_id = reg
+            .load_bundle(TEST_FONT_TTF)
+            .expect("load_bundle must be Ok");
+        (Arc::new(reg), font_id)
+    }
+
+    #[test]
+    fn harfrust_glyph_atlas_ensure_returns_nonzero_uv() {
+        let (registry, font_id) = registry_with_test_font();
+
+        let mut atlas = HarfRustGlyphAtlas::new(Arc::clone(&registry));
+        let key = GlyphKey {
+            font_id,
+            glyph_id: TEST_GLYPH_WITH_OUTLINE,
+            phase: 0,
+            size_px: 32,
+        };
+        let slot = atlas.ensure(key);
+
+        // The outlined glyph must produce a non-zero UV rect.
+        assert!(
+            slot.uv.w > 0.0 && slot.uv.h > 0.0,
+            "UV rect must be non-zero for outlined glyph, got {:?}",
+            slot.uv
+        );
+        assert!(
+            slot.size.0 > 0.0 && slot.size.1 > 0.0,
+            "size must be non-zero for outlined glyph, got {:?}",
+            slot.size
+        );
+        assert_eq!(slot.page, 0, "first glyph should be on page 0");
+    }
+
+    #[test]
+    fn harfrust_glyph_atlas_writes_nonzero_pixels_to_page() {
+        let (registry, font_id) = registry_with_test_font();
+
+        let mut atlas = HarfRustGlyphAtlas::new(Arc::clone(&registry));
+        let key = GlyphKey {
+            font_id,
+            glyph_id: TEST_GLYPH_WITH_OUTLINE,
+            phase: 0,
+            size_px: 32,
+        };
+        let slot = atlas.ensure(key);
+        assert!(slot.uv.w > 0.0 && slot.uv.h > 0.0);
+
+        // The atlas page must contain at least one non-zero pixel.
+        let page = atlas.page_data(0).expect("page 0 must exist");
+        let nonzero_count = page.iter().filter(|&&a| a > 0).count();
+        assert!(
+            nonzero_count > 0,
+            "atlas page should have at least one non-zero pixel after rasterizing"
+        );
+    }
+
+    #[test]
+    fn harfrust_glyph_atlas_caches_slots() {
+        let (registry, font_id) = registry_with_test_font();
+
+        let mut atlas = HarfRustGlyphAtlas::new(Arc::clone(&registry));
+        let key = GlyphKey {
+            font_id,
+            glyph_id: TEST_GLYPH_WITH_OUTLINE,
+            phase: 0,
+            size_px: 16,
+        };
+
+        let slot1 = atlas.ensure(key);
+        assert_eq!(
+            atlas.len(),
+            1,
+            "cache should have one entry after first ensure"
+        );
+        let slot2 = atlas.ensure(key);
+        assert_eq!(
+            atlas.len(),
+            1,
+            "cache should still have one entry after second ensure (hit)"
+        );
+        assert_eq!(slot1, slot2, "second ensure should return the cached slot");
+        assert_eq!(atlas.slot(key), Some(slot1), "slot lookup should hit");
+    }
+
+    #[test]
+    fn harfrust_glyph_atlas_packs_multiple_glyphs_at_different_sizes() {
+        let (registry, font_id) = registry_with_test_font();
+
+        let mut atlas = HarfRustGlyphAtlas::new(Arc::clone(&registry));
+        // The same glyph at two different sizes produces two distinct
+        // slots (the GlyphKey includes size_px).
+        let key_small = GlyphKey {
+            font_id,
+            glyph_id: TEST_GLYPH_WITH_OUTLINE,
+            phase: 0,
+            size_px: 16,
+        };
+        let key_large = GlyphKey {
+            font_id,
+            glyph_id: TEST_GLYPH_WITH_OUTLINE,
+            phase: 0,
+            size_px: 48,
+        };
+        let slot_small = atlas.ensure(key_small);
+        let slot_large = atlas.ensure(key_large);
+        assert_eq!(atlas.len(), 2);
+        // Both should be non-zero and on the same page.
+        assert!(slot_small.uv.w > 0.0 && slot_small.uv.h > 0.0);
+        assert!(slot_large.uv.w > 0.0 && slot_large.uv.h > 0.0);
+        assert_eq!(slot_small.page, slot_large.page);
+        // The two slots should not overlap (different x or y).
+        assert!(
+            slot_small.uv.x != slot_large.uv.x || slot_small.uv.y != slot_large.uv.y,
+            "two glyphs should be packed at different positions"
+        );
+    }
+
+    #[test]
+    fn harfrust_glyph_atlas_glyph_with_no_outline_returns_zero_slot() {
+        let (registry, font_id) = registry_with_test_font();
+
+        let mut atlas = HarfRustGlyphAtlas::new(Arc::clone(&registry));
+        // Glyph ID 0 is .notdef with no outline in the test font.
+        let key = GlyphKey {
+            font_id,
+            glyph_id: 0,
+            phase: 0,
+            size_px: 16,
+        };
+        let slot = atlas.ensure(key);
+        assert_eq!(slot.uv, Rect::default(), ".notdef should have zero UV");
+        assert_eq!(slot.size, (0.0, 0.0), ".notdef should have zero size");
+        // The zero slot is still cached.
+        assert_eq!(atlas.slot(key), Some(slot));
+    }
+
+    #[test]
+    fn harfrust_glyph_atlas_missing_glyph_returns_zero_slot() {
+        let (registry, font_id) = registry_with_test_font();
+
+        let mut atlas = HarfRustGlyphAtlas::new(Arc::clone(&registry));
+        // Glyph ID 99999 is out of range — should return a zero-size slot.
+        let key = GlyphKey {
+            font_id,
+            glyph_id: 99999,
+            phase: 0,
+            size_px: 16,
+        };
+        let slot = atlas.ensure(key);
+        assert_eq!(
+            slot.uv,
+            Rect::default(),
+            "missing glyph should have zero UV"
+        );
+        assert_eq!(slot.size, (0.0, 0.0), "missing glyph should have zero size");
+        // The zero slot is still cached.
+        assert_eq!(atlas.slot(key), Some(slot));
+    }
+
+    #[test]
+    fn harfrust_glyph_atlas_unknown_font_returns_zero_slot() {
+        let (registry, _font_id) = registry_with_test_font();
+
+        let mut atlas = HarfRustGlyphAtlas::new(Arc::clone(&registry));
+        let key = GlyphKey {
+            font_id: FontId(999), // not registered
+            glyph_id: 0,
+            phase: 0,
+            size_px: 16,
+        };
+        let slot = atlas.ensure(key);
+        assert_eq!(slot.uv, Rect::default());
+        assert_eq!(slot.size, (0.0, 0.0));
+    }
+
+    #[test]
+    fn harfrust_glyph_atlas_invalidates_cache() {
+        let (registry, font_id) = registry_with_test_font();
+
+        let mut atlas = HarfRustGlyphAtlas::new(Arc::clone(&registry));
+        let key = GlyphKey {
+            font_id,
+            glyph_id: TEST_GLYPH_WITH_OUTLINE,
+            phase: 0,
+            size_px: 16,
+        };
+        let _slot = atlas.ensure(key);
+        assert!(!atlas.is_empty(), "cache should be non-empty after ensure");
+        assert_eq!(atlas.page_count(), 1);
+
+        atlas.invalidate(ModuleId(0), DirtyRect);
+        assert!(atlas.is_empty(), "cache should be empty after invalidate");
+        assert_eq!(
+            atlas.page_count(),
+            1,
+            "invalidate should reset to a single fresh page"
+        );
+
+        // The page data should be all zeros after invalidation.
+        let page = atlas.page_data(0).expect("page 0 must exist");
+        assert!(
+            page.iter().all(|&a| a == 0),
+            "page should be cleared after invalidate"
+        );
+
+        // Re-ensuring still works (re-rasterizes into the fresh page).
+        let slot = atlas.ensure(key);
+        assert!(slot.uv.w > 0.0 && slot.uv.h > 0.0);
+    }
+
+    #[test]
+    fn harfrust_glyph_atlas_evict_lru_is_noop() {
+        let (registry, font_id) = registry_with_test_font();
+
+        let mut atlas = HarfRustGlyphAtlas::new(Arc::clone(&registry));
+        let key = GlyphKey {
+            font_id,
+            glyph_id: TEST_GLYPH_WITH_OUTLINE,
+            phase: 0,
+            size_px: 16,
+        };
+        let slot = atlas.ensure(key);
+
+        let stats = atlas.evict_lru(&PinSet::default());
+        assert_eq!(
+            stats,
+            EvictionStats::default(),
+            "evict_lru should be a no-op"
+        );
+        // The slot should still be cached after eviction.
+        assert_eq!(atlas.slot(key), Some(slot), "slot should survive evict_lru");
+    }
+
+    #[test]
+    fn harfrust_glyph_atlas_size_scales_with_size_px() {
+        let (registry, font_id) = registry_with_test_font();
+
+        let mut atlas = HarfRustGlyphAtlas::new(Arc::clone(&registry));
+        let key_small = GlyphKey {
+            font_id,
+            glyph_id: TEST_GLYPH_WITH_OUTLINE,
+            phase: 0,
+            size_px: 16,
+        };
+        let key_large = GlyphKey {
+            font_id,
+            glyph_id: TEST_GLYPH_WITH_OUTLINE,
+            phase: 0,
+            size_px: 64,
+        };
+        let slot_small = atlas.ensure(key_small);
+        let slot_large = atlas.ensure(key_large);
+        // Larger size should produce a larger bitmap.
+        assert!(
+            slot_large.size.0 > slot_small.size.0 && slot_large.size.1 > slot_small.size.1,
+            "larger size_px should produce a larger bitmap: small={:?} large={:?}",
+            slot_small.size,
+            slot_large.size
+        );
     }
 
     // -- Mock tests (retained from Wave 3) ---------------------------------

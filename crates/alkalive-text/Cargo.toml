@@ -13,3 +13,4 @@ path = "src/lib.rs"
 alkalive-core = { workspace = true }
 harfrust = { workspace = true, features = ["std", "experimental_font_api"] }
 read-fonts = { workspace = true }
+rasterizer = { workspace = true }

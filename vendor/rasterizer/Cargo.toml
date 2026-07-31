@@ -1,0 +1,11 @@
+[package]
+name = "rasterizer"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["I-Radic"]
+description = "Minimal scanline glyph rasterizer (no external deps)"
+publish = false
+
+[lib]
+path = "src/lib.rs"
