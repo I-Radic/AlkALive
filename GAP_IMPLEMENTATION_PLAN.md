@@ -1,101 +1,112 @@
-# Gap Implementation Plan
+# Gap Implementation Plan — Hello World Deployment
 
-**Derived from:** `GAP_ANALYSIS.md` (41 gaps: 5 Critical, 14 High, 18 Medium, 4 Low)
-**Goal:** Resolve all Critical, High, and Medium gaps through implementation waves.
+**Goal:** Deploy a browser-rendered "Hello World!" (golden text on black background) via the AlkaLive GPU runtime, using a CPU software renderer and Canvas 2D.
+
+**Strategy:** Construct the scene directly in Rust (bypassing the need for a `.alk` compiler). Use the real AlkaLive text stack (HarfRust shaping + glyph rasterization). Implement a CPU software renderer that composites glyph atlas pixels into an RGBA framebuffer. Present via Canvas 2D `putImageData`.
 
 ---
 
-## Wave A — Cross-Crate Unification & Infrastructure (Critical)
+## Wave 4 — CPU Software Renderer + Glyph Compositing
 
-**Gaps addressed:** C4 (ModuleId duplication), C5 (deny.toml), M18 (README/CI)
-**DoD:** Single canonical ModuleId in alkalive-core, re-exported everywhere; deny.toml fixed; README updated.
+**DoD:** A `SoftwareRenderer` struct that:
+- Allocates an RGBA framebuffer (Vec<u8>)
+- Clears to black
+- Composites glyph atlas pixels at given positions with color modulation
+- Exposes framebuffer pointer for WASM export
 
-Tasks:
-- A1: Make alkalive-core the canonical ModuleId owner; add alkalive-core as dep to layout/render/text/error/test; replace local ModuleId definitions.
-- A2: Fix deny.toml to deny-by-default; install cargo-deny.
-- A3: Update README.md with current state (8,125 lines, 121 tests, 0 todo!()).
-- A4: Add .github/workflows/ci.yml with build/test/clippy/fmt gates.
+**Tasks:**
+1. Create `crates/alkalive-app/` crate with `Cargo.toml` (cdylib + rlib, depends on alkalive-text, alkalive-render)
+2. Implement `SoftwareRenderer` in `crates/alkalive-app/src/renderer.rs`
+3. Implement glyph compositing: read atlas page pixels, apply golden tint, alpha-blend into framebuffer
+4. Unit tests for framebuffer operations
 
-## Wave B — Runtime Crate & Frame Loop (Critical)
+---
 
-**Gaps addressed:** C1 (runtime empty), C2 (no frame loop), C3 (compile discards data)
-**DoD:** alkalive-runtime has Runtime/FrameLoop/BootstrapSequence; compile() populates CompiledGraph.
+## Wave 5 — HarfRust Text Stack Completion + ASCII Font
 
-Tasks:
-- B1: Implement Runtime struct + BootstrapSequence enum + BootstrapError in alkalive-runtime.
-- B2: Implement FrameLoop concrete driver (tick → layout → compile → commit → submit).
-- B3: Populate CompiledGraph with merged/reordered/batched passes; implement occlusion-cull stub.
-- B4: Add MockBackend impl in alkalive-render (for headless testing).
-- B5: Add tests for bootstrap phases and frame loop tick.
+**DoD:** A `TextScene` struct that:
+- Loads an ASCII font into `HarfRustFontRegistry`
+- Shapes "Hello World!" via `HarfRustTextShaper`
+- Rasterizes glyphs via `HarfRustGlyphAtlas`
+- Produces positioned glyph quads ready for compositing
 
-## Wave C — Error Handling & Recovery (High)
+**Tasks:**
+1. Source and embed a compact ASCII TTF font (e.g., a subset of DejaVu Sans or similar open-source font)
+2. Implement `HarfRustTextStack::rasterize(run, atlas) -> GlyphQuadBatch` — walks ShapedRun, calls atlas.ensure per glyph, accumulates pen position, emits Quads
+3. Implement `TextScene::new(font_bytes, text, size, color) -> TextScene` — orchestrates registry → shaper → atlas → quads
+4. Unit tests for text scene construction
 
-**Gaps addressed:** H3 (panic trapping), H12 (DomError mismatch), H13 (ComponentTest), H14 (TracePlayer), M15 (RecoveryStrategy), M16 (ErrorBoundary)
-**DoD:** All 8 AlkALiveError variants match spec; 5 RecoveryStrategy impls; ComponentTest + TracePlayer concrete impls.
+---
 
-Tasks:
-- C1: Fix DomError in alkalive-error to 6-variant mirror of alkalive-dom.
-- C2: Add FullReloadRecovery, ShaderPassthroughRecovery, FontFallbackRecovery, WorkerRetryRecovery.
-- C3: Implement SimpleComponentTest in alkalive-test.
-- C4: Implement SimpleTracePlayer in alkalive-test.
-- C5: Add tests for each RecoveryStrategy + ComponentTest + TracePlayer.
+## Wave 6 — WASM Entry Points + Frame Loop
 
-## Wave D — Input System Completion (High)
+**DoD:** A `cdylib` WASM module with `#[wasm_bindgen]` exports:
+- `init(width, height)` — creates renderer + text scene
+- `tick()` — renders one frame (clear + composite text)
+- `get_framebuffer_ptr() -> *const u8` — returns framebuffer pointer
+- `get_framebuffer_len() -> usize` — returns framebuffer length
+- `resize(width, height)` — resizes framebuffer
 
-**Gaps addressed:** H6 (precise_pick), H7 (grab arbitration), H8 (dispatch no-op), H9 (InputError), M13 (invalidate), M14 (GestureState)
-**DoD:** dispatch routes events; grab arbitration works; InputError variants produced.
+**Tasks:**
+1. Add `wasm-bindgen` dependency to `alkalive-app`
+2. Implement WASM entry points in `crates/alkalive-app/src/lib.rs`
+3. Build with `wasm-pack build --target web`
+4. Verify WASM artifact is produced
 
-Tasks:
-- D1: Implement grab registry + arbitration in FocusManagerImpl.
-- D2: Implement dispatch with event routing + InputError normalisation.
-- D3: Implement scoped invalidate (per LayoutScope, not clear-all).
-- D4: Enrich SimpleGestureState to produce Commit/Cancel/Grab outcomes.
-- D5: Add tests for grab arbitration, dispatch routing, InputError production.
+---
 
-## Wave E — Layout & Styling Completion (High/Medium)
+## Wave 7 — HTML Harness + Deployment
 
-**Gaps addressed:** H2 (solver ignores params), H5 (animation), M2 (assert_local), M7 (LayoutSolution wiring), M10-M12 (style)
-**DoD:** Solver uses DirtySet + MeasuredRun; animation interpolates keyframes; style clamps values.
+**DoD:** A `deploy/` directory with:
+- `index.html` — canvas + WASM loader + rAF loop
+- `alkalive_app.js` — JS glue from wasm-pack
+- `alkalive_app_bg.wasm` — compiled WASM
+- `hello-world.png` — optional fallback
 
-Tasks:
-- E1: CassowarySolver: scope to DirtySet, invoke MeasuredRun for Text nodes, return Partial/Unsatisfiable.
-- E2: Animation::tick: sample keyframes, apply easing, honour Interpolation, gate on state.
-- E3: Add clamping constructors for Color/Opacity/LineWidth.
-- E4: Add Animation::new() validating constructor.
-- E5: Add tests for solver Partial/Unsatisfiable, animation interpolation, clamping.
+**Tasks:**
+1. Create `deploy/index.html` with canvas filling viewport
+2. JS: fetch WASM, call `init()`, rAF loop calling `tick()` + `putImageData`
+3. Copy build artifacts to `deploy/`
+4. Serve via local HTTP server and verify rendering
 
-## Wave F — IPC & Performance (High/Medium)
+---
 
-**Gaps addressed:** H1 (WorkerPool), H10 (SAB socket), H11 (MemoryPools), M3 (LocalIPCSocket capacity)
-**DoD:** LocalWorkerPool + LocalScheduler impls; 5 MemoryPool impls; backpressure enforcement.
+## Wave 8 — Verification + Rotation Enhancement
 
-Tasks:
-- F1: Implement LocalWorkerPool + LocalTaskHandle + LocalScheduler in alkalive-ipc.
-- F2: Add capacity/backpressure enforcement to LocalIPCSocket.
-- F3: Add SAB/Atlas/Pipeline/Attachment/Instance MemoryPool impls in alkalive-perf.
-- F4: Add FrameBudgetWatchdog impl.
-- F5: Add tests for worker pool, backpressure, memory pool caps.
+**DoD:**
+- Headless browser test confirms non-blank canvas (pixel check)
+- Golden text is visible on black background
+- Y-axis rotation pseudo-3D effect added (scale X by cos(angle))
 
-## Wave G — Medium/Low Gap Resolution
+**Tasks:**
+1. Write headless browser test (puppeteer or similar)
+2. Verify canvas has non-black pixels where text should be
+3. Add rotation: modulate glyph X-scale by cos(time)
+4. Re-verify
 
-**Gaps addressed:** M4-M9, M16-M17, L1-L4
-**DoD:** All Medium gaps resolved or formally deferred; Low gaps documented.
+---
 
-Tasks:
-- G1: Fix SlotError::TypeMismatch to carry (Type, Type).
-- G2: Add Language field to ShapeContext.
-- G3: Enrich MockTextStack with parameterizable behavior.
-- G4: Add shader-compile-failure fallback to passthrough.
-- G5: Add EaseIn/EaseOut/EaseInOut easings.
-- G6: Add DeviceKindSet helpers (contains/insert/iter).
-- G7: Fix SimpleTestHarness to compute real fingerprints.
+## Dependency Graph
 
-## Wave H — Final Verification & Traceability
+```
+Wave 4 (Software Renderer)
+  ↓
+Wave 5 (Text Stack + Font)  ← depends on Wave 4 (needs framebuffer to composite into)
+  ↓
+Wave 6 (WASM Entry Points)  ← depends on Wave 4 + 5
+  ↓
+Wave 7 (HTML Harness)       ← depends on Wave 6
+  ↓
+Wave 8 (Verification)       ← depends on Wave 7
+```
 
-**DoD:** cargo test --workspace passes; wasm32 build passes; trace matrix complete.
+Waves 4 and 5 can be partially parallelized: Wave 5's text stack work (font embedding, HarfRustTextStack) is independent of Wave 4's renderer. They converge in Wave 6.
 
-Tasks:
-- H1: Run full workspace test suite.
-- H2: Run wasm32 build.
-- H3: Produce traceability matrix (spec requirement → code location).
-- H4: Update README with final status.
+---
+
+## Constraints
+
+- `#![forbid(unsafe_code)]` must be preserved in all existing crates. The `alkalive-app` crate MAY use `unsafe` only for WASM extern functions (unavoidable for `wasm_bindgen` pointer exports), clearly documented and minimized.
+- No new ADRs contradicting existing ones.
+- All existing tests must continue to pass.
+- The deployment must work in a modern browser without special flags (no WebGPU requirement).
