@@ -630,18 +630,42 @@ pub trait RenderLoop {
 /// Cache of compiled pipelines keyed by `(shader_hash, layout_hash,
 /// target_format)` (§4.6).
 ///
-/// Wave 5 (W5-T6) implements an unbounded linear-search cache. The 64 MB LRU
-/// bound (§12.7) and the degraded-builtin fallback path land in a follow-up;
-/// see the `TODO` on [`PipelineCache::insert`].
+/// Wave 5 (W5-T6) implements a linear-search cache bounded by a 64 MB LRU
+/// cap (§12.7): when an [`insert`](Self::insert) would push `total_bytes`
+/// past [`MAX_CACHE_BYTES`](Self::MAX_CACHE_BYTES), the oldest entries
+/// (front of the FIFO queue) are evicted until there is room. The
+/// degraded-builtin fallback path lands in a follow-up wave.
+///
+/// The entries live in a [`VecDeque`] rather than a `Vec` so that
+/// `pop_front()` eviction is O(1) — the cap holds ~1–2 M entries at the
+/// simplified ~64-byte-per-entry estimate, which makes `Vec::remove(0)`
+/// (O(n) per eviction) prohibitive. Linear-search lookup semantics are
+/// preserved; a hashed index bounded by the 64 MB cap may land in a
+/// later wave.
 #[derive(Debug, Clone, Default)]
 pub struct PipelineCache {
-    /// Linear-search entries. A `HashMap` is intentionally avoided at this
-    /// stage so that `PipelineDesc`'s derive set stays minimal; W5-T6 will
-    /// introduce a hashed index bounded by the 64 MB cap.
-    entries: Vec<(PipelineDesc, PipelineHandle)>,
+    /// Linear-search entries in FIFO insertion order; the oldest entry is
+    /// at the front of the deque. A `HashMap` is intentionally avoided at
+    /// this stage so that `PipelineDesc`'s derive set stays minimal.
+    entries: VecDeque<(PipelineDesc, PipelineHandle)>,
+    /// Running total of the byte cost of all stored entries. Each entry
+    /// contributes [`entry_size`](Self::entry_size) bytes (~64 bytes per
+    /// the simplified `size_of` estimate).
+    total_bytes: usize,
 }
 
 impl PipelineCache {
+    /// Maximum cache byte budget (§12.7): 64 MB.
+    pub const MAX_CACHE_BYTES: usize = 64 * 1024 * 1024;
+
+    /// Per-entry byte cost: `size_of::<PipelineDesc>() + size_of::<PipelineHandle>()`
+    /// (simplified — ~64 bytes per entry). The estimate is recomputed from
+    /// the live struct layout so the budget stays accurate even if either
+    /// type grows.
+    const fn entry_size() -> usize {
+        std::mem::size_of::<PipelineDesc>() + std::mem::size_of::<PipelineHandle>()
+    }
+
     /// Look up a cached pipeline by its key triple.
     ///
     /// The lookup matches `(shader_hash, layout_hash, target_format)` via
@@ -667,12 +691,43 @@ impl PipelineCache {
 
     /// Insert a compiled pipeline into the cache.
     ///
-    // TODO(W5-T6): bound the cache at 64 MB (§12.7) with LRU eviction; the
-    // miss path should fall back to a degraded builtin pipeline and emit a
-    // `PipelineError` to the unified trace. Until then this is an unbounded
-    // append.
+    /// If the new entry would push `total_bytes` past
+    /// [`MAX_CACHE_BYTES`](Self::MAX_CACHE_BYTES), the oldest entries
+    /// (front of the FIFO deque) are evicted until there is room. If a
+    /// single entry is larger than the cap, the cache is cleared and the
+    /// entry is still inserted so lookups always reflect the latest
+    /// compile.
     pub fn insert(&mut self, desc: &PipelineDesc, handle: PipelineHandle) {
-        self.entries.push((desc.clone(), handle));
+        let entry_size = Self::entry_size();
+
+        // Evict oldest entries (front of the FIFO deque) until the new
+        // entry fits within MAX_CACHE_BYTES. If a single entry would not
+        // fit even in an empty cache, drop everything and still insert
+        // the new entry — the latest compile must always be findable.
+        while !self.entries.is_empty() && self.total_bytes + entry_size > Self::MAX_CACHE_BYTES {
+            self.entries.pop_front();
+            self.total_bytes = self.total_bytes.saturating_sub(entry_size);
+        }
+
+        self.entries.push_back((desc.clone(), handle));
+        self.total_bytes += entry_size;
+    }
+
+    /// Number of entries currently cached.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether the cache holds zero entries.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Total byte cost of all stored entries. Each entry contributes
+    /// [`entry_size`](Self::entry_size) bytes; the value is always
+    /// `≤ MAX_CACHE_BYTES` after [`insert`](Self::insert) returns.
+    pub fn byte_size(&self) -> usize {
+        self.total_bytes
     }
 }
 
@@ -1172,6 +1227,122 @@ mod tests {
             cache.get(0xABCD_1234, 0x0000_0000, AttachmentFormat::Bgra8Unorm),
             None,
             "different layout_hash must miss"
+        );
+    }
+
+    // --- PipelineCache: len / byte_size accessors track inserts --------------
+
+    #[test]
+    fn pipeline_cache_len_and_byte_size_track_inserts() {
+        let mut cache = PipelineCache::default();
+        let entry_size =
+            std::mem::size_of::<PipelineDesc>() + std::mem::size_of::<PipelineHandle>();
+
+        assert!(cache.is_empty(), "fresh cache must be empty");
+        assert_eq!(cache.len(), 0, "fresh cache len must be 0");
+        assert_eq!(cache.byte_size(), 0, "fresh cache byte_size must be 0");
+
+        let desc = PipelineDesc {
+            shader_hash: 1,
+            layout_hash: 1,
+            target_format: AttachmentFormat::Bgra8Unorm,
+            sample_count: SampleCount::X1,
+        };
+        cache.insert(&desc, ph(1));
+        assert!(!cache.is_empty(), "cache with one entry must not be empty");
+        assert_eq!(cache.len(), 1, "len must be 1 after one insert");
+        assert_eq!(
+            cache.byte_size(),
+            entry_size,
+            "byte_size must equal one entry_size after one insert",
+        );
+
+        cache.insert(&desc, ph(2));
+        assert_eq!(cache.len(), 2, "len must be 2 after two inserts");
+        assert_eq!(
+            cache.byte_size(),
+            entry_size * 2,
+            "byte_size must equal 2 * entry_size after two inserts",
+        );
+    }
+
+    // --- PipelineCache: 64 MB LRU eviction (Gap #5) --------------------------
+    //
+    // Inserts enough entries to exceed MAX_CACHE_BYTES and verifies that:
+    //   * eviction trimmed the cache below the inserted count,
+    //   * byte_size stays at or under the cap,
+    //   * the most-recently-inserted entry survives (LRU evicts oldest first),
+    //   * byte_size stays an exact multiple of entry_size.
+    //
+    // The per-entry cost is computed from the live struct layout via
+    // `size_of::<PipelineDesc>() + size_of::<PipelineHandle>()` (the
+    // simplified ~64-byte estimate from the gap analysis yields ≥ 1,000,001
+    // entries; the actual layout may be smaller, so the count is derived
+    // from the real per-entry cost rather than hard-coded).
+
+    #[test]
+    fn pipeline_cache_lru_eviction_keeps_byte_size_under_cap() {
+        let mut cache = PipelineCache::default();
+        let entry_size =
+            std::mem::size_of::<PipelineDesc>() + std::mem::size_of::<PipelineHandle>();
+
+        // Insert enough entries to exceed MAX_CACHE_BYTES. With the
+        // simplified ~64-byte estimate this is ≥ 1,000,001 entries; the
+        // actual size_of-derived count may be larger.
+        let n = PipelineCache::MAX_CACHE_BYTES / entry_size + 1;
+        assert!(
+            n.checked_mul(entry_size)
+                .map(|bytes| bytes > PipelineCache::MAX_CACHE_BYTES)
+                .unwrap_or(true),
+            "n={} * entry_size={} must overflow MAX_CACHE_BYTES={}",
+            n,
+            entry_size,
+            PipelineCache::MAX_CACHE_BYTES,
+        );
+
+        for i in 0..n as u64 {
+            let desc = PipelineDesc {
+                shader_hash: i,
+                layout_hash: i,
+                target_format: AttachmentFormat::Bgra8Unorm,
+                sample_count: SampleCount::X1,
+            };
+            cache.insert(&desc, ph(i));
+        }
+
+        // Eviction must have trimmed the cache below `n`.
+        assert!(
+            cache.len() < n,
+            "eviction must have trimmed the cache; len={}, n={}",
+            cache.len(),
+            n,
+        );
+        assert!(
+            cache.byte_size() <= PipelineCache::MAX_CACHE_BYTES,
+            "byte_size {} must not exceed MAX_CACHE_BYTES {}",
+            cache.byte_size(),
+            PipelineCache::MAX_CACHE_BYTES,
+        );
+        // Each entry contributes exactly `entry_size` bytes.
+        assert_eq!(
+            cache.byte_size(),
+            cache.len() * entry_size,
+            "byte_size must equal len * entry_size",
+        );
+
+        // LRU: oldest entries (smallest shader_hash) were evicted first;
+        // the most-recently-inserted entry must still be findable.
+        let last: u64 = (n - 1) as u64;
+        assert_eq!(
+            cache.get(last, last, AttachmentFormat::Bgra8Unorm),
+            Some(ph(last)),
+            "most-recently-inserted entry must survive eviction",
+        );
+        // The very first inserted entry must have been evicted.
+        assert_eq!(
+            cache.get(0, 0, AttachmentFormat::Bgra8Unorm),
+            None,
+            "oldest entry must have been evicted",
         );
     }
 

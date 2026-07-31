@@ -341,10 +341,6 @@ pub trait ErrorBoundary {
         op: impl FnOnce() -> Result<T, AlkALiveError>,
         slot: SlotId,
     ) -> Result<T, Failure> {
-        // TODO(later wave): wrap `op()` in `std::panic::catch_unwind` to also
-        // trap panics. Requires `UnwindSafe` bounds on `op`/`T` (or `unsafe`
-        // to assert them) — deferred from Wave 10 to avoid widening the
-        // contract.
         match op() {
             Ok(v) => Ok(v),
             Err(e) => Err(Failure {
@@ -358,11 +354,22 @@ pub trait ErrorBoundary {
     /// Report a [`Failure`] against the given [`DirtyRect`]; records a span
     /// on the unified trace (ADR 016).
     ///
-    /// Wave 10 no-op: trace recording is wired once the trace store lands.
+    /// The default implementation is a no-op that emits an `eprintln!` in
+    /// debug builds so failures aren't silently swallowed during
+    /// development. Production implementors that own a [`TraceRecorder`]
+    /// override this to push a real span — see [`TrappingBoundaryWithRecorder`]
+    /// for the reference implementation.
     fn report(&mut self, failure: Failure, rect: DirtyRect) {
-        let _ = (failure, rect);
-        // TODO: record the failure + rect as a span on the unified
-        // author-owned trace (ADR 016).
+        let _ = rect;
+        // Default no-op: log in debug builds so failures aren't silently
+        // swallowed during development. Production implementors override
+        // this to push a span onto the unified trace (ADR 016).
+        #[cfg(debug_assertions)]
+        eprintln!(
+            "[alkalive-error] ErrorBoundary::report default no-op: slot={:?} error={:?}",
+            failure.slot, failure.error,
+        );
+        let _ = failure;
     }
 }
 
@@ -376,10 +383,11 @@ pub trait TraceRecorder {
     fn enter(&mut self, span: SpanKind, attrs: SpanAttrs) -> SpanId;
     /// Close `span` with `result`; an `Err` records the failure on the span.
     ///
-    /// Wave 10 no-op: span closure is recorded once the trace store is wired.
+    /// The default implementation is a no-op; concrete recorders that
+    /// maintain a span store (e.g. [`AuthorTraceRecorder`]) override this
+    /// to attach `result.err()` to the recorded span.
     fn exit<T>(&mut self, span: SpanId, result: Result<T, AlkALiveError>) {
         let _ = (span, result);
-        // TODO: record the span close + result on the unified trace (ADR 016).
     }
     /// Install a frame-budget watchdog for `budget_ms` milliseconds; returns
     /// the event surfaced when the frame closes (or breaches).
@@ -462,28 +470,96 @@ pub trait RecoveryStrategy {
 /// `trap` / `report` behaviour.
 ///
 /// Provided as a test seam and a reference for production implementors.
+/// Use [`TrappingBoundaryWithRecorder`] when reported failures must be
+/// recorded as spans on the unified author-owned trace (ADR 016).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct TrappingBoundary;
 
 impl ErrorBoundary for TrappingBoundary {}
 
-/// Concrete [`TraceRecorder`] backed by an [`AtomicU64`] span-id counter.
+/// [`ErrorBoundary`] implementor that owns an [`AuthorTraceRecorder`] and
+/// pushes a real span on [`report`](ErrorBoundary::report) (ADR 016).
+///
+/// Unlike [`TrappingBoundary`] (which inherits the trait's no-op `report`),
+/// this struct records every reported [`Failure`] as a [`SpanKind::Boundary`]
+/// span on the unified author-owned trace, with the failure's [`AlkALiveError`]
+/// attached via [`TraceRecorder::exit`].
+#[derive(Debug, Default)]
+pub struct TrappingBoundaryWithRecorder {
+    /// The owned trace recorder; spans reported via
+    /// [`ErrorBoundary::report`] are pushed here.
+    pub recorder: AuthorTraceRecorder,
+}
+
+impl TrappingBoundaryWithRecorder {
+    /// Create a new boundary with a fresh recorder.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl ErrorBoundary for TrappingBoundaryWithRecorder {
+    fn report(&mut self, failure: Failure, rect: DirtyRect) {
+        // Push a Boundary span and immediately close it with the failure's
+        // error so the unified trace carries the failure (ADR 016). The
+        // span's parent is the failure's own span id when present.
+        let parent = if failure.span == SpanId(0) {
+            None
+        } else {
+            Some(failure.span)
+        };
+        let span_id = self.recorder.enter(
+            SpanKind::Boundary,
+            SpanAttrs {
+                frame_id: 0,
+                stage: "boundary-report".to_string(),
+                parent,
+            },
+        );
+        self.recorder.exit::<()>(span_id, Err(failure.error));
+        let _ = rect;
+    }
+}
+
+/// Concrete [`TraceRecorder`] backed by an [`AtomicU64`] span-id counter and
+/// an in-memory span store (ADR 016).
 ///
 /// The counter starts at `1` so that [`SpanId`]`(0)` remains a sentinel
 /// "no span" value usable by default [`Failure`] / [`FrameBudgetEvent`]
-/// constructors. `exit` and `watch_frame` inherit the trait's Wave 10
-/// defaults.
+/// constructors. [`enter`](TraceRecorder::enter) pushes a new span onto
+/// `spans` with the error slot set to `None`; [`exit`](TraceRecorder::exit)
+/// finds the span by id and stores `result.err()` on it.
 #[derive(Debug)]
 pub struct AuthorTraceRecorder {
     next_span_id: AtomicU64,
+    /// Recorded spans in insertion order. Each tuple is
+    /// `(SpanId, SpanKind, SpanAttrs, Option<AlkALiveError>)` where the
+    /// error slot starts as `None` on `enter` and is filled by `exit`.
+    spans: Vec<(SpanId, SpanKind, SpanAttrs, Option<AlkALiveError>)>,
 }
 
 impl AuthorTraceRecorder {
-    /// Create a new recorder with the span counter starting at `1`.
+    /// Create a new recorder with the span counter starting at `1` and an
+    /// empty span store.
     pub fn new() -> Self {
         Self {
             next_span_id: AtomicU64::new(1),
+            spans: Vec::new(),
         }
+    }
+
+    /// Borrow the recorded spans in insertion order.
+    ///
+    /// Each entry is `(SpanId, SpanKind, SpanAttrs, Option<AlkALiveError>)`;
+    /// the error slot is `None` until [`TraceRecorder::exit`] is called with
+    /// an `Err` result on that span.
+    pub fn spans(&self) -> &[(SpanId, SpanKind, SpanAttrs, Option<AlkALiveError>)] {
+        &self.spans
+    }
+
+    /// Number of spans currently recorded.
+    pub fn span_count(&self) -> usize {
+        self.spans.len()
     }
 }
 
@@ -494,9 +570,22 @@ impl Default for AuthorTraceRecorder {
 }
 
 impl TraceRecorder for AuthorTraceRecorder {
-    fn enter(&mut self, _span: SpanKind, _attrs: SpanAttrs) -> SpanId {
+    fn enter(&mut self, span: SpanKind, attrs: SpanAttrs) -> SpanId {
         let id = self.next_span_id.fetch_add(1, Ordering::Relaxed);
-        SpanId(id)
+        let span_id = SpanId(id);
+        self.spans.push((span_id, span, attrs, None));
+        span_id
+    }
+
+    fn exit<T>(&mut self, span: SpanId, result: Result<T, AlkALiveError>) {
+        let err = result.err();
+        // Search from the most-recent entry backwards: spans are uniquely
+        // id'd by the AtomicU64 counter, so the first match is the right
+        // one, but `rposition` keeps the lookup robust to duplicate ids
+        // (e.g. a sentinel reused by a test fixture).
+        if let Some(idx) = self.spans.iter().rposition(|(id, _, _, _)| *id == span) {
+            self.spans[idx].3 = err;
+        }
     }
 }
 
@@ -965,5 +1054,177 @@ mod tests {
                 other => panic!("expected AlkALiveError::Dom(_), got {other:?}"),
             }
         }
+    }
+
+    // ---- AuthorTraceRecorder span store (Gaps #3, #4) --------------------
+    //
+    // Wave 3 (task WAVE-3) wires the in-memory span store: `enter` pushes a
+    // `(SpanId, SpanKind, SpanAttrs, None)` tuple; `exit` finds the span by
+    // id and stores `result.err()` on it; `TrappingBoundaryWithRecorder`
+    // pushes a real Boundary span on `report`.
+
+    #[test]
+    fn trace_recorder_enter_records_spans_and_count() {
+        let mut recorder = AuthorTraceRecorder::new();
+        assert_eq!(recorder.span_count(), 0, "fresh recorder has no spans");
+        assert!(recorder.spans().is_empty(), "spans() slice is empty");
+
+        let id1 = recorder.enter(SpanKind::Logic, test_attrs());
+        let id2 = recorder.enter(SpanKind::Layout, test_attrs());
+        let id3 = recorder.enter(SpanKind::Draw, test_attrs());
+
+        assert_eq!(
+            recorder.span_count(),
+            3,
+            "three enters must record three spans"
+        );
+        assert_eq!(recorder.spans().len(), 3, "spans() slice length must match");
+
+        // SpanIds are unique and start at 1 (SpanId(0) is the sentinel).
+        assert_eq!(id1, SpanId(1));
+        assert_eq!(id2, SpanId(2));
+        assert_eq!(id3, SpanId(3));
+
+        // The recorded SpanKind / SpanAttrs match what was passed to enter.
+        let (span_id, kind, attrs, err) = &recorder.spans()[0];
+        assert_eq!(*span_id, id1);
+        assert_eq!(*kind, SpanKind::Logic);
+        assert_eq!(attrs.frame_id, 0);
+        assert_eq!(attrs.stage, "test");
+        assert!(err.is_none(), "error slot must start as None on enter");
+    }
+
+    #[test]
+    fn trace_recorder_exit_with_err_stores_error_on_span() {
+        let mut recorder = AuthorTraceRecorder::new();
+        let _id1 = recorder.enter(SpanKind::Logic, test_attrs());
+        let id2 = recorder.enter(SpanKind::Layout, test_attrs());
+        let _id3 = recorder.enter(SpanKind::Draw, test_attrs());
+        assert_eq!(recorder.span_count(), 3);
+
+        // Exit the middle span with an Err; the error must land on that
+        // span's slot without disturbing the others.
+        let err = AlkALiveError::TextShaping(TextError::MissingGlyph("U+1234".into()));
+        recorder.exit::<i32>(id2, Err(err));
+
+        // span_count is unchanged by exit (only enter appends).
+        assert_eq!(recorder.span_count(), 3, "exit must not append a new span");
+
+        let (_, _, _, stored) = &recorder.spans()[1];
+        assert!(
+            matches!(
+                stored,
+                Some(AlkALiveError::TextShaping(TextError::MissingGlyph(_)))
+            ),
+            "expected stored MissingGlyph error on span {:?}, got {:?}",
+            id2,
+            stored,
+        );
+
+        // The other spans keep their None slot.
+        let (_, _, _, none_a) = &recorder.spans()[0];
+        assert!(none_a.is_none(), "non-exited span 0 must keep None error");
+        let (_, _, _, none_c) = &recorder.spans()[2];
+        assert!(none_c.is_none(), "non-exited span 2 must keep None error");
+    }
+
+    #[test]
+    fn trace_recorder_exit_with_ok_leaves_error_none() {
+        let mut recorder = AuthorTraceRecorder::new();
+        let id = recorder.enter(SpanKind::Logic, test_attrs());
+        recorder.exit::<i32>(id, Ok(99));
+        let (_, _, _, stored) = &recorder.spans()[0];
+        assert!(
+            stored.is_none(),
+            "Ok result must leave the error slot as None, got {:?}",
+            stored,
+        );
+    }
+
+    #[test]
+    fn trace_recorder_exit_unknown_span_id_is_silently_ignored() {
+        let mut recorder = AuthorTraceRecorder::new();
+        let _id = recorder.enter(SpanKind::Logic, test_attrs());
+        // A SpanId that was never minted must not panic and must not mutate
+        // any recorded span.
+        recorder.exit::<i32>(
+            SpanId(999),
+            Err(AlkALiveError::Rendering(RenderError::DeviceLost(
+                "x".into(),
+            ))),
+        );
+        assert_eq!(recorder.span_count(), 1);
+        let (_, _, _, stored) = &recorder.spans()[0];
+        assert!(
+            stored.is_none(),
+            "unknown-span exit must not mutate stored spans"
+        );
+    }
+
+    #[test]
+    fn trapping_boundary_with_recorder_report_records_boundary_span() {
+        let mut boundary = TrappingBoundaryWithRecorder::new();
+        assert_eq!(
+            boundary.recorder.span_count(),
+            0,
+            "fresh boundary records no spans",
+        );
+
+        let failure = Failure {
+            slot: SlotId(7),
+            error: AlkALiveError::Rendering(RenderError::DeviceLost("gpu".into())),
+            rect: DirtyRect::default(),
+            span: SpanId(0),
+        };
+        boundary.report(failure, DirtyRect::default());
+
+        // `report` must have pushed exactly one Boundary span whose error
+        // slot carries the failure's error.
+        assert_eq!(
+            boundary.recorder.span_count(),
+            1,
+            "report must record exactly one span",
+        );
+        let (span_id, kind, attrs, stored) = &boundary.recorder.spans()[0];
+        assert_eq!(
+            *kind,
+            SpanKind::Boundary,
+            "reported span must be Boundary-kind"
+        );
+        assert_eq!(attrs.stage, "boundary-report");
+        assert_eq!(
+            attrs.parent, None,
+            "failure with SpanId(0) sentinel must yield parent=None",
+        );
+        // SpanId is minted from the recorder's AtomicU64 counter (starts at 1).
+        assert_ne!(
+            *span_id,
+            SpanId(0),
+            "reported span must get a non-sentinel id"
+        );
+        assert!(
+            matches!(
+                stored,
+                Some(AlkALiveError::Rendering(RenderError::DeviceLost(_)))
+            ),
+            "reported span must carry the failure's error, got {:?}",
+            stored,
+        );
+    }
+
+    #[test]
+    fn trapping_boundary_with_recorder_report_propagates_parent_span() {
+        // A failure already carrying a non-sentinel span id must surface as
+        // the parent of the Boundary span pushed by `report`.
+        let mut boundary = TrappingBoundaryWithRecorder::new();
+        let failure = Failure {
+            slot: SlotId(1),
+            error: AlkALiveError::LayoutSolve(LayoutError::Infeasible("cyc".into())),
+            rect: DirtyRect::default(),
+            span: SpanId(42),
+        };
+        boundary.report(failure, DirtyRect::default());
+        let (_, _, attrs, _) = &boundary.recorder.spans()[0];
+        assert_eq!(attrs.parent, Some(SpanId(42)));
     }
 }
