@@ -52,6 +52,24 @@ allow-wildcard-paths = true
 allow-workspace = true
 allow = [
     { name = "alkalive-core" },  # internal; activates whitelist mode
+    # HarfRust (vendored under vendor/harfrust/) transitive dependencies.
+    # These are the sole external registry deps allowed, required by the
+    # vendored HarfRust text shaping library (ADR 022).
+    { name = "harfrust" },           # vendored (workspace member)
+    { name = "read-fonts" },         # harfrust dep: OpenType font reading
+    { name = "font-types" },         # read-fonts dep: font type definitions
+    { name = "bitflags" },           # harfrust dep: bitflag macros
+    { name = "bytemuck" },           # harfrust dep: byte casting
+    { name = "bytemuck_derive" },    # bytemuck proc-macro
+    { name = "smallvec" },           # harfrust dep: small vector optimization
+    { name = "core_maths" },         # harfrust optional dep: libm for no_std
+    { name = "icu_properties" },     # harfrust optional dep: ICU properties
+    { name = "icu_normalizer" },     # harfrust optional dep: ICU normalizer
+    { name = "proc-macro2" },        # bytemuck_derive dep
+    { name = "quote" },              # bytemuck_derive dep
+    { name = "syn" },                # bytemuck_derive dep
+    { name = "unicode-ident" },      # proc-macro2 dep
+    { name = "once_cell" },          # read-fonts dep
 ]
 # Broad deny of known transitive trust hazards (TLS stacks, HTTP clients).
 deny = [
