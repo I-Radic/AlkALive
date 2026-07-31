@@ -816,6 +816,76 @@ pub enum RenderError {
 }
 
 // ===========================================================================
+// §6 text-stack glue (Wave 3 / task WAVE-W3)
+// ===========================================================================
+//
+// Wave 3 wires the render crate to `alkalive-text`: the render side now
+// accepts a fully-shaped `alkalive_text::ShapedRun` and converts it into
+// placeholder draw calls. The `GlyphQuadBatch` type is re-exported from
+// `alkalive-text` so downstream consumers see a single canonical batch
+// carrier across the §4↔§6 boundary (the rendering-ABI ADR §4.7 will
+// eventually unify the rest of the text-stack types the same way).
+
+/// Batched glyph quads emitted by the text stack (§6.5).
+///
+/// Re-exported from `alkalive-text` so the render crate and the text crate
+/// share a single canonical batch carrier. The compositor (ADR 003) batches
+/// glyph quads across modules into a single instanced draw; that batching
+/// logic lands in a later wave.
+pub use alkalive_text::GlyphQuadBatch;
+
+use alkalive_text::{GlyphAtlas, GlyphKey, ShapedRun};
+
+/// Convert a shaped text run into placeholder draw calls (Wave 3 glue).
+///
+/// Each glyph in `shaped.glyph_ids` becomes one placeholder [`DrawCall`]:
+/// a zero-handle pipeline, an empty bind-group set, and a single-instance
+/// range `0..1`. The `atlas` is consulted via [`GlyphAtlas::slot`] (the
+/// only `&self` method on the trait) so the residency check is exercised
+/// and the parameter is meaningfully consumed; the result is not yet wired
+/// into the placeholder [`DrawCall`] — real GPU submission (instanced
+/// batching, atlas UV wiring, scissor tagging, pipeline selection) lands in
+/// a later wave.
+///
+/// This is a glue function — keep it minimal. The signature accepts a
+/// `&dyn GlyphAtlas` so callers can pass any atlas implementation without
+/// needing a mutable borrow (the Wave 3 placeholder only reads).
+///
+/// # Panics
+///
+/// Never. A shape run with zero glyphs yields an empty `Vec<DrawCall>`.
+pub fn glyph_run_to_draw_calls(shaped: &ShapedRun, atlas: &dyn GlyphAtlas) -> Vec<DrawCall> {
+    shaped
+        .glyph_ids
+        .iter()
+        .map(|&glyph_id| {
+            // Build a read-only atlas lookup key. `size_px` is not carried
+            // on `ShapedRun` (it lives on `ShapeContext`, which the shaper
+            // consumes internally); the Wave 3 placeholder uses `0` since
+            // the residency result is not yet wired into the DrawCall.
+            let key = GlyphKey {
+                font_id: shaped.font_id,
+                glyph_id,
+                phase: 0,
+                size_px: 0,
+            };
+            // Touch the atlas so the parameter is used and the residency
+            // check is exercised; the result is intentionally discarded —
+            // the placeholder DrawCall carries no UV data yet.
+            let _resident = atlas.slot(key).is_some();
+            DrawCall {
+                pipeline: PipelineHandle { value: 0 },
+                vertices: VertexBinding,
+                indices: None,
+                bindings: Box::new([]),
+                instances: 0..1,
+                scissor: None,
+            }
+        })
+        .collect()
+}
+
+// ===========================================================================
 // Wave 5 tests (W5-T8)
 // ===========================================================================
 
@@ -1155,5 +1225,100 @@ mod tests {
         let id = builder.finish();
         // id.value only needs to be a valid u64; increment behaviour is covered above.
         let _ = id;
+    }
+
+    // --- glyph_run_to_draw_calls (Wave 3 / task WAVE-W3) -----------------------
+
+    /// Build a minimal 3-glyph `ShapedRun` for the placeholder draw-call
+    /// test. The render crate does not depend on HarfRust directly (it
+    /// consumes the already-shaped `ShapedRun` from `alkalive-text`), so
+    /// the fixture is constructed by hand from public `alkalive_text`
+    /// types.
+    fn shaped_run_3_glyphs() -> ShapedRun {
+        use alkalive_text::{ClusterMap, Direction, FontId, RunMetrics};
+        ShapedRun {
+            glyph_ids: Box::new([1, 2, 3]),
+            advances: Box::new([10.0, 20.0, 30.0]),
+            offsets: Box::new([(0.0, 0.0), (0.0, 0.0), (0.0, 0.0)]),
+            clusters: Box::new([0, 1, 2]),
+            caret_map: ClusterMap::default(),
+            metrics: RunMetrics {
+                total_advance: 60.0,
+                ..RunMetrics::default()
+            },
+            bidi_level: 0,
+            font_id: FontId(0),
+            direction: Direction::default(),
+        }
+    }
+
+    /// `glyph_run_to_draw_calls` emits exactly one placeholder [`DrawCall`]
+    /// per glyph in the shaped run, regardless of atlas residency (Wave 3).
+    #[test]
+    fn glyph_run_to_draw_calls_one_per_glyph() {
+        let shaped = shaped_run_3_glyphs();
+        // `MockGlyphAtlas::slot` always returns `None` — the placeholder
+        // path must still emit a DrawCall per glyph.
+        let atlas = alkalive_text::MockGlyphAtlas;
+        let calls = glyph_run_to_draw_calls(&shaped, &atlas);
+
+        assert_eq!(
+            calls.len(),
+            3,
+            "expected one placeholder DrawCall per glyph, got {} calls",
+            calls.len(),
+        );
+        // Every placeholder DrawCall carries the zero-handle pipeline, no
+        // indices, an empty bind-group set, and a single-instance range —
+        // the real GPU submission will replace these in a later wave.
+        for (i, dc) in calls.iter().enumerate() {
+            assert_eq!(
+                dc.pipeline,
+                PipelineHandle { value: 0 },
+                "placeholder draw call {i} must use the zero-handle pipeline",
+            );
+            assert!(dc.indices.is_none(), "placeholder draw call {i} has no indices");
+            assert!(
+                dc.bindings.is_empty(),
+                "placeholder draw call {i} has no bind groups",
+            );
+            assert_eq!(dc.instances, 0..1, "placeholder draw call {i} spans one instance");
+            assert!(dc.scissor.is_none(), "placeholder draw call {i} has no scissor");
+        }
+    }
+
+    /// `glyph_run_to_draw_calls` over an empty shaped run yields an empty
+    /// `Vec<DrawCall>` — no panics, no placeholder entries (Wave 3).
+    #[test]
+    fn glyph_run_to_draw_calls_empty_run_yields_no_calls() {
+        use alkalive_text::{ClusterMap, Direction, FontId, RunMetrics};
+        let shaped = ShapedRun {
+            glyph_ids: Box::new([]),
+            advances: Box::new([]),
+            offsets: Box::new([]),
+            clusters: Box::new([]),
+            caret_map: ClusterMap::default(),
+            metrics: RunMetrics::default(),
+            bidi_level: 0,
+            font_id: FontId(0),
+            direction: Direction::default(),
+        };
+        let atlas = alkalive_text::MockGlyphAtlas;
+        let calls = glyph_run_to_draw_calls(&shaped, &atlas);
+        assert!(
+            calls.is_empty(),
+            "empty shaped run must yield no draw calls, got {calls:?}",
+        );
+    }
+
+    /// `GlyphQuadBatch` is re-exported from `alkalive-text` so the render
+    /// crate and the text crate share one canonical batch carrier (Wave 3).
+    #[test]
+    fn glyph_quad_batch_re_export_constructs() {
+        // If the re-export is broken (e.g. a future rename in
+        // `alkalive-text`), this line fails to compile.
+        let batch = GlyphQuadBatch::default();
+        assert!(batch.quads.is_empty());
+        assert!(batch.font_ids.is_empty());
     }
 }

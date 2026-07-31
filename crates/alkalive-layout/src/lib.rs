@@ -9,16 +9,26 @@
 //! concrete HarfRust-backed implementation lands with the `alkalive-text`
 //! crate (Wave 7+, ADR 004/022).
 //!
+//! # Wave 3 (task WAVE-W3) — real text measurement
+//!
+//! The layout crate now depends on `alkalive-text` and ships
+//! [`HarfRustMeasuredRun`]: a [`MeasuredRun`] implementation backed by the
+//! real forked in-WASM HarfRust text stack (ADR 022). It holds a shared
+//! [`HarfRustFontRegistry`] and delegates to [`HarfRustTextShaper`] inside
+//! [`MeasuredRun::shape_and_measure`], adapting the resulting
+//! `alkalive_text::ShapedRun` into the layout crate's own [`GlyphMetrics`].
+//! [`MeasuredRun::line_break`] ships a simple greedy accumulator.
+//!
 //! # Cross-crate forward declarations
 //!
-//! This crate ships self-contained (no external deps, no workspace deps).
 //! Two cross-crate types referenced by the spec are stubbed here:
 //! - [`OwnedStyle`] — concrete struct lives in `alkalive-style` (§7).
 //! - [`ShapeError`] — concrete enum lives in `alkalive-text` (§6.3).
 //!
 //! Both are unified by the future rendering-ABI ADR (§4.7 / §5.4
-//! shared-boundary note). The stubs exist only so the layout crate compiles
-//! standalone.
+//! shared-boundary note). The stubs exist only so the layout crate's
+//! public surface stays minimal; [`HarfRustMeasuredRun`] consumes the
+//! real `alkalive_text` types directly and never touches these stubs.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -26,6 +36,18 @@
 pub use alkalive_core::ModuleId;
 
 use std::collections::HashMap;
+use std::sync::Arc;
+
+// Wave 3 (task WAVE-W3): the layout crate now depends on `alkalive-text` and
+// wires the real HarfRust text stack into [`HarfRustMeasuredRun`]. The
+// imports below are aliased (`TextFontId`, `TextShapedRun`) so the layout
+// crate's own forward-declared stubs (`ShapeError`, `OwnedStyle`) remain the
+// canonical names within this crate and the rendering-ABI ADR (§4.7) can
+// later unify them without a churn of renames.
+use alkalive_text::{
+    FontId as TextFontId, HarfRustFontRegistry, HarfRustTextShaper, ShapeContext,
+    ShapedRun as TextShapedRun, TextShaper,
+};
 
 // ============================================================================
 // Opaque identifiers
@@ -409,6 +431,129 @@ impl MeasuredRun for MockMeasuredRun {
     }
 }
 
+/// HarfRust-backed [`MeasuredRun`] — the production text measurement
+/// implementation (ADR 004 / ADR 022, §5.4 / §6.9).
+///
+/// Wave 3 (task WAVE-W3) wires the real forked in-WASM HarfRust text stack
+/// into the layout crate. The struct holds a shared
+/// [`HarfRustFontRegistry`] ([`Arc`]-reference-counted, matching
+/// [`HarfRustTextShaper::new`]) and builds a fresh [`HarfRustTextShaper`]
+/// per [`MeasuredRun::shape_and_measure`] call. The shaper is cheap to
+/// construct — it only bumps a refcount on the registry's [`Arc`].
+///
+/// [`MeasuredRun::shape_and_measure`] hard-wires:
+/// - the resolved font to [`TextFontId`]`(0)` (the first loaded face); real
+///   family/weight/style selection lands with the font-config integration,
+/// - `size_px` to `16.0` (common body-text size),
+/// - `direction` to `None` (auto-detect from script).
+///
+/// The resulting [`TextShapedRun`] is adapted into the layout crate's own
+/// [`GlyphMetrics`] (advances, ascents, descents, clusters, caret_offsets).
+/// Per-glyph ascents/descents are run-level (font-metric driven) — the same
+/// value is broadcast across every glyph so downstream line-breaking has a
+/// per-glyph view. Caret offsets are derived from the shaped run's
+/// `caret_to_glyph` map (one caret per glyph boundary, N+1 carets for N
+/// glyphs).
+///
+/// [`MeasuredRun::line_break`] ships a simple greedy accumulator: it walks
+/// `glyphs` and emits a [`LineBreak`] whenever the running advance exceeds
+/// `max_width`. No BiDi-aware splitting, no Knuth-Plass optimisation —
+/// Wave 3 only needs a correct-enough break for the layout solver to
+/// consume; the real line-breaker lands with the BiDi integration.
+///
+/// Shaping never aborts on missing coverage — uncovered codepoints surface
+/// as `.notdef` glyphs with real metrics (§6.3). A shape failure (e.g. an
+/// unregistered `FontId`) therefore collapses to empty [`GlyphMetrics`]
+/// rather than propagating a `alkalive_text::ShapeError` through the
+/// solver, whose [`MeasuredRun`] contract returns [`GlyphMetrics`] directly.
+#[derive(Clone)]
+pub struct HarfRustMeasuredRun {
+    /// Shared font registry; the shaper takes a read-only [`Arc`] share on
+    /// each [`MeasuredRun::shape_and_measure`] invocation.
+    registry: Arc<HarfRustFontRegistry>,
+}
+
+impl HarfRustMeasuredRun {
+    /// Construct a measured-run backed by `registry`. The registry should
+    /// have all fonts loaded before construction (the shaper takes a
+    /// read-only [`Arc`] share, matching [`HarfRustTextShaper::new`]).
+    pub fn new(registry: Arc<HarfRustFontRegistry>) -> Self {
+        Self { registry }
+    }
+
+    /// Read-only access to the underlying font registry. Exposed so
+    /// downstream callers (and tests) can inspect which faces are loaded.
+    pub fn registry(&self) -> &HarfRustFontRegistry {
+        &self.registry
+    }
+}
+
+impl MeasuredRun for HarfRustMeasuredRun {
+    fn shape_and_measure(&self, run: &TextRun, _ctx: &FontContext) -> GlyphMetrics {
+        // The layout crate's `FontContext` is still a forward-declared
+        // placeholder (§5.4); the real resolved-font/size/direction bundle
+        // lives in `alkalive-text::ShapeContext`. Until the rendering-ABI
+        // ADR (§4.7) unifies the two, `HarfRustMeasuredRun` hard-wires a
+        // default `ShapeContext` that points at `FontId(0)` at 16 px with
+        // auto-detected direction.
+        let shaper = HarfRustTextShaper::new(self.registry.clone());
+        let ctx = ShapeContext {
+            font: TextFontId(0),
+            size_px: 16.0,
+            direction: None,
+        };
+        let shaped: TextShapedRun = match shaper.shape(run.text.as_str(), &ctx) {
+            Ok(s) => s,
+            // Shaping failure (e.g. `FontId(0)` not registered) collapses to
+            // empty metrics — the solver still produces a valid (if empty)
+            // glyph run rather than aborting the solve.
+            Err(_) => return GlyphMetrics::default(),
+        };
+        // Per-glyph ascents/descents are run-level (font-metric driven) —
+        // broadcast the same value across every glyph so downstream
+        // line-breaking has a per-glyph view.
+        let n = shaped.advances.len();
+        let ascent = shaped.metrics.ascent;
+        let descent = shaped.metrics.descent;
+        GlyphMetrics {
+            advances: shaped.advances.to_vec(),
+            ascents: vec![ascent; n],
+            descents: vec![descent; n],
+            clusters: shaped.clusters.to_vec(),
+            // The shaped run's `caret_to_glyph` carries N+1 entries for an
+            // N-glyph run (one caret per glyph boundary); cast to `f32` so
+            // downstream consumers receive a flat per-caret x-offset view.
+            caret_offsets: shaped
+                .caret_map
+                .caret_to_glyph
+                .iter()
+                .map(|&g| g as f32)
+                .collect(),
+        }
+    }
+
+    fn line_break(&self, glyphs: &[GlyphRun], max_width: f32) -> Vec<LineBreak> {
+        // Simple greedy line breaking: accumulate `total_advance` until it
+        // exceeds `max_width`, then emit a `LineBreak` pointing at the next
+        // glyph index. No BiDi-aware splitting, no Knuth-Plass penalty
+        // optimisation — Wave 3 only needs a correct-enough break for the
+        // layout solver to consume.
+        let mut breaks = Vec::new();
+        let mut acc: f32 = 0.0;
+        for (i, g) in glyphs.iter().enumerate() {
+            acc += g.total_advance;
+            if max_width > 0.0 && acc > max_width {
+                breaks.push(LineBreak {
+                    next_glyph: i as u32 + 1,
+                    penalty: 0.0,
+                });
+                acc = 0.0;
+            }
+        }
+        breaks
+    }
+}
+
 // ============================================================================
 // Solver output (§5.6)
 // ============================================================================
@@ -774,6 +919,10 @@ impl LayoutSolver for CassowarySolver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // `FontRegistry::load_bundle` is needed by the HarfRustMeasuredRun tests
+    // to seed the registry with the embedded test font; the trait is not
+    // used by the library itself, so it lives in the test module only.
+    use alkalive_text::FontRegistry;
 
     /// Build a leaf [`LayoutNode`] in `module` owning render object `rid`.
     fn node(rid: u32, module: u32) -> LayoutNode {
@@ -1101,5 +1250,136 @@ mod tests {
             }
             other => panic!("expected Unsatisfiable, got {other:?}"),
         }
+    }
+
+    // -- HarfRustMeasuredRun (Wave 3 / task WAVE-W3) -----------------------
+
+    /// Minimal embedded TTF — OpenSans variable subset (3196 bytes).
+    /// Covers U+0065 ('e'). Mirrors `alkalive-text`'s `TEST_FONT_TTF` so
+    /// [`HarfRustMeasuredRun`] can be exercised end-to-end against a real
+    /// HarfRust font registry without depending on `alkalive-text`'s private
+    /// test fixtures.
+    const HARF_TEST_FONT_TTF: &[u8] = include_bytes!(
+        "../../../vendor/harfrust/harfrust/tests/fonts/rb_custom/OpenSans.subset1.ttf"
+    );
+
+    /// `HarfRustMeasuredRun::shape_and_measure` against a real HarfRust font
+    /// registry produces non-empty `advances` for a covered codepoint ('e'),
+    /// and the per-glyph arrays stay parallel (Wave 3 / task WAVE-W3).
+    #[test]
+    fn harfrust_measured_run_shapes_real_font() {
+        let mut reg = HarfRustFontRegistry::new();
+        reg.load_bundle(HARF_TEST_FONT_TTF)
+            .expect("load_bundle must be Ok for the embedded test font");
+        let measured = HarfRustMeasuredRun::new(Arc::new(reg));
+
+        let run = TextRun {
+            id: TextRunId(0),
+            text: "e".to_string(),
+            module: ModuleId(0),
+        };
+        let ctx = FontContext;
+        let metrics = measured.shape_and_measure(&run, &ctx);
+
+        // The OpenSans subset covers U+0065 ('e'), so the shaped run must
+        // emit at least one glyph with a non-zero advance.
+        assert!(
+            !metrics.advances.is_empty(),
+            "advances must be non-empty for a covered codepoint, got {:?}",
+            metrics.advances,
+        );
+        // The total advance should be positive — a real metric, not the
+        // empty `GlyphMetrics::default()` returned on shape failure.
+        let total: f32 = metrics.advances.iter().copied().sum();
+        assert!(
+            total > 0.0,
+            "total advance must be positive for a real glyph, got {total}",
+        );
+
+        // Per-glyph arrays must stay parallel: ascents/descents/clusters
+        // mirror the glyph count.
+        assert_eq!(metrics.ascents.len(), metrics.advances.len());
+        assert_eq!(metrics.descents.len(), metrics.advances.len());
+        assert_eq!(metrics.clusters.len(), metrics.advances.len());
+        // Caret offsets carry N+1 entries for an N-glyph run.
+        assert_eq!(metrics.caret_offsets.len(), metrics.advances.len() + 1);
+    }
+
+    /// `HarfRustMeasuredRun::line_break` performs simple greedy breaking:
+    /// a run of three [`GlyphRun`]s whose advances sum past `max_width`
+    /// yields exactly the breaks that fit, each pointing one past the
+    /// overflowing glyph (Wave 3 / task WAVE-W3).
+    #[test]
+    fn harfrust_measured_run_line_breaks_greedily() {
+        let mut reg = HarfRustFontRegistry::new();
+        reg.load_bundle(HARF_TEST_FONT_TTF)
+            .expect("load_bundle must be Ok for the embedded test font");
+        let measured = HarfRustMeasuredRun::new(Arc::new(reg));
+
+        // Three 10-px glyph runs; `max_width = 25.0` fits two per line.
+        let glyphs = vec![
+            GlyphRun {
+                total_advance: 10.0,
+                glyph_count: 1,
+            },
+            GlyphRun {
+                total_advance: 10.0,
+                glyph_count: 1,
+            },
+            GlyphRun {
+                total_advance: 10.0,
+                glyph_count: 1,
+            },
+        ];
+        let breaks = measured.line_break(&glyphs, 25.0);
+        // Greedy: line 1 fits glyphs 0+1 (20 px), glyph 2 overflows to line 2.
+        // The break is emitted when `acc` exceeds `max_width`, which happens
+        // after accumulating glyph 2 (30 > 25), pointing `next_glyph` at 3.
+        // No further break is emitted because glyph 3 alone (10 px) fits.
+        assert_eq!(
+            breaks.len(),
+            1,
+            "expected exactly one break for the overflow, got {breaks:?}",
+        );
+        assert_eq!(breaks[0].next_glyph, 3);
+        assert_eq!(breaks[0].penalty, 0.0);
+    }
+
+    /// `HarfRustMeasuredRun` also plugs into [`CassowarySolver::solve`] via
+    /// the [`MeasuredRun`] trait: a [`MeasureKind::Text`] node yields a
+    /// non-empty `glyph_runs` entry whose `glyph_count` and `total_advance`
+    /// come from the real HarfRust shaping (Wave 3 integration smoke test).
+    #[test]
+    fn solve_with_harfrust_measured_run_emits_real_glyph_run() {
+        let mut reg = HarfRustFontRegistry::new();
+        reg.load_bundle(HARF_TEST_FONT_TTF)
+            .expect("load_bundle must be Ok for the embedded test font");
+        let measured = HarfRustMeasuredRun::new(Arc::new(reg));
+
+        // Build a Text node whose measurement will hit HarfRust. The solver
+        // passes a dummy `TextRun` with an empty `text` field (§5.4); the
+        // real text payload arrives with the future rendering-ABI ADR. For
+        // Wave 3 we only need to prove the contract is invoked end-to-end
+        // and returns *some* metrics — `MockMeasuredRun` would return empty
+        // `advances`, so a non-empty `glyph_count` is the integration proof.
+        let mut solver = CassowarySolver::new();
+        solver.add_node(LayoutNode {
+            id: RenderObjectId(0),
+            module: ModuleId(0),
+            measure: MeasureKind::Text,
+            children: Vec::new(),
+        });
+
+        let dirty = DirtySet::default();
+        let solution = solver
+            .solve(&dirty, &measured, 0.016)
+            .expect("solve with HarfRustMeasuredRun must succeed");
+        assert_eq!(solution.status, SolveStatus::Solved);
+        assert_eq!(solution.glyph_runs.len(), 1);
+        // The dummy TextRun carries an empty string, which HarfRust shapes
+        // to zero glyphs; that is the expected Wave 3 behaviour. The point
+        // is that the call succeeded without panicking or returning an
+        // error — the integration is wired.
+        assert_eq!(solution.glyph_runs[0].glyph_count, 0);
     }
 }

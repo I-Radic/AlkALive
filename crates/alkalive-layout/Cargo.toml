@@ -11,3 +11,4 @@ path = "src/lib.rs"
 
 [dependencies]
 alkalive-core = { workspace = true }
+alkalive-text = { workspace = true }
