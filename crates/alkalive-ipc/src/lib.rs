@@ -343,6 +343,9 @@ impl<T: Serial> IPCSocket<T> for LocalIPCSocket<T> {
         if self.closed {
             return Err(ChannelError::Closed);
         }
+        if self.queue.len() >= self.capacity() {
+            return Err(ChannelError::Backpressure);
+        }
         self.queue.push_back(msg);
         Ok(())
     }
@@ -350,6 +353,9 @@ impl<T: Serial> IPCSocket<T> for LocalIPCSocket<T> {
     fn try_send(&mut self, msg: T, _deadline: Instant) -> Result<(), ChannelError> {
         if self.closed {
             return Err(ChannelError::Closed);
+        }
+        if self.queue.len() >= self.capacity() {
+            return Err(ChannelError::Backpressure);
         }
         self.queue.push_back(msg);
         Ok(())
@@ -633,6 +639,27 @@ mod tests {
     fn capacity_is_fixed_1024() {
         let sock: LocalIPCSocket<MockMsg> = LocalIPCSocket::new();
         assert_eq!(sock.capacity(), 1024);
+    }
+
+    #[test]
+    fn send_returns_backpressure_when_capacity_exceeded() {
+        let mut sock: LocalIPCSocket<MockMsg> = LocalIPCSocket::new();
+        // Fill to capacity.
+        for i in 0..1024 {
+            sock.send(MockMsg(i)).unwrap();
+        }
+        // Next `send` should fail with `Backpressure`.
+        let result = sock.send(MockMsg(9999));
+        assert!(matches!(result, Err(ChannelError::Backpressure)));
+        // `try_send` enforces the same bound.
+        let result = sock.try_send(MockMsg(8888), Instant(()));
+        assert!(matches!(result, Err(ChannelError::Backpressure)));
+        // Verify the queue length hasn't exceeded capacity.
+        assert_eq!(sock.len(), 1024);
+        // Draining one slot re-opens the queue.
+        assert_eq!(sock.recv().unwrap(), MockMsg(0));
+        sock.send(MockMsg(7777)).expect("send succeeds after drain");
+        assert_eq!(sock.len(), 1024);
     }
 
     #[test]

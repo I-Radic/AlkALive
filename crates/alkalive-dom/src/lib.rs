@@ -182,6 +182,15 @@ pub struct DomBridgeImpl {
     routes: Vec<Route>,
 }
 
+/// HTML-escape a string for safe interpolation into HTML text content and attributes.
+fn escape_html(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#x27;")
+}
+
 impl DomBridgeImpl {
     /// Construct an empty `DomBridgeImpl` (no title, no meta, no routes).
     pub fn new() -> Self {
@@ -237,13 +246,13 @@ impl DomBridge for DomBridgeImpl {
         let mut text = String::new();
         text.push_str("<!DOCTYPE html><html><head>");
         text.push_str("<title>");
-        text.push_str(&self.title);
+        text.push_str(&escape_html(&self.title));
         text.push_str("</title>");
         for (name, content) in &self.meta {
             text.push_str("<meta name=\"");
-            text.push_str(name);
+            text.push_str(&escape_html(name));
             text.push_str("\" content=\"");
-            text.push_str(content);
+            text.push_str(&escape_html(content));
             text.push_str("\">");
         }
         text.push_str("</head><body></body></html>");
@@ -394,6 +403,37 @@ mod tests {
             .text
             .contains("<meta name=\"description\" content=\"Snapshot test\">"));
         assert!(html.text.ends_with("</html>"));
+    }
+
+    /// `serve_snapshot` HTML-escapes the title and meta name/content so
+    /// that attacker-controlled metadata cannot break out of the
+    /// `<title>` element or the `<meta>` attributes (SEC-01).
+    #[test]
+    fn serve_snapshot_escapes_html_in_title_and_meta() {
+        let mut bridge = DomBridgeImpl::new();
+        bridge
+            .set_title("</title><script>alert(1)</script>".to_string())
+            .unwrap();
+        bridge
+            .set_meta(
+                "description".to_string(),
+                "\"><img onerror=alert(1) src=x>".to_string(),
+            )
+            .unwrap();
+        let html = bridge
+            .serve_snapshot(
+                Route {
+                    path: "/".to_string(),
+                    name: None,
+                },
+                SerialisableState { bytes: vec![] },
+            )
+            .unwrap();
+        // Verify the script tag is escaped
+        assert!(!html.text.contains("<script>"));
+        assert!(html.text.contains("&lt;script&gt;"));
+        assert!(!html.text.contains("<img onerror"));
+        assert!(html.text.contains("&quot;&gt;"));
     }
 
     /// Interface-surface test: construct a `DomBridgeImpl` and exercise

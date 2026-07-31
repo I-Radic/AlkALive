@@ -48,6 +48,31 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 // ============================================================================
+// Security limits (SEC-03 / SEC-04)
+// ============================================================================
+
+/// Hard upper bound on a single font bundle's byte length accepted by
+/// [`HarfRustFontRegistry::load_bundle`] (SEC-03).
+///
+/// 50 MiB is well above any realistic single-face OpenType bundle (the
+/// largest legitimate fonts — e.g. CJK mega-families — are a few MiB),
+/// while capping unbounded WASM-heap allocations from untrusted input.
+/// Inputs exceeding this are rejected with
+/// [`FontLoadError::TableDecodeFailed`] carrying a synthetic `SIZE` tag
+/// before any parser touches the bytes.
+pub const MAX_FONT_SIZE: usize = 50 * 1024 * 1024;
+
+/// Hard upper bound on the byte length of a text run accepted by
+/// [`HarfRustTextShaper::shape`] (SEC-04).
+///
+/// 1 MiB is far above any plausible single shaped run (a full novel is
+/// ~1–2 MiB of UTF-8), while preventing resource exhaustion in HarfRust's
+/// shaping buffer. Inputs exceeding this are rejected with
+/// [`ShapeError::InvalidUtf8`] (reused — there is no `TooLong` variant and
+/// adding one would change the public enum ABI) before shaping begins.
+pub const MAX_TEXT_LENGTH: usize = 1024 * 1024;
+
+// ============================================================================
 // Forward-declared cross-crate placeholders
 // ============================================================================
 
@@ -732,6 +757,16 @@ impl FontRegistry for HarfRustFontRegistry {
     }
 
     fn load_bundle(&mut self, bytes: &[u8]) -> Result<FontId, FontLoadError> {
+        // SEC-03: reject oversized bundles before parsing to cap WASM-heap
+        // allocation from untrusted input. The synthetic `SIZE` tag makes
+        // the rejection distinguishable from a genuine `sfnt` parse failure
+        // in downstream diagnostics.
+        if bytes.len() > MAX_FONT_SIZE {
+            return Err(FontLoadError::TableDecodeFailed {
+                font_id: FontId::default(),
+                table: Tag(*b"SIZE"),
+            });
+        }
         let font = Font::new(bytes.to_vec(), 0).map_err(|_| FontLoadError::TableDecodeFailed {
             font_id: FontId::default(),
             table: Tag(*b"sfnt"),
@@ -867,6 +902,14 @@ impl HarfRustTextShaper {
 
 impl TextShaper for HarfRustTextShaper {
     fn shape(&self, run: &str, ctx: &ShapeContext) -> Result<ShapedRun, ShapeError> {
+        // SEC-04: reject oversized text runs before shaping to prevent
+        // resource exhaustion in HarfRust's shaping buffer. `InvalidUtf8`
+        // is reused (there is no `TooLong` variant and adding one would
+        // change the public enum ABI); the rejection fires on byte length,
+        // so any valid UTF-8 ≤ MAX_TEXT_LENGTH still shapes normally.
+        if run.len() > MAX_TEXT_LENGTH {
+            return Err(ShapeError::InvalidUtf8);
+        }
         shape_run(&self.registry, run, ctx.font, ctx.size_px, ctx.direction)
     }
 
@@ -1699,6 +1742,30 @@ mod tests {
         assert!(reg.is_empty(), "registry should remain empty on failure");
     }
 
+    /// SEC-03: a bundle strictly larger than [`MAX_FONT_SIZE`] is rejected
+    /// before the parser is ever invoked, with a synthetic `SIZE` tag so
+    /// the failure is distinguishable from a genuine `sfnt` decode error.
+    #[test]
+    fn load_bundle_rejects_oversized_font() {
+        let mut registry = HarfRustFontRegistry::new();
+        let oversized = vec![0u8; MAX_FONT_SIZE + 1];
+        let result = registry.load_bundle(&oversized);
+        assert!(result.is_err());
+        assert!(
+            matches!(
+                result,
+                Err(FontLoadError::TableDecodeFailed { ref table, .. })
+                    if table.0 == *b"SIZE",
+            ),
+            "oversized bundle should produce TableDecodeFailed with SIZE tag, got {:?}",
+            result
+        );
+        assert!(
+            registry.is_empty(),
+            "registry should remain empty on oversized rejection"
+        );
+    }
+
     #[test]
     fn harfrust_registry_resolve_returns_first_font() {
         let mut reg = HarfRustFontRegistry::new();
@@ -1919,6 +1986,24 @@ mod tests {
         assert_eq!(run.metrics.total_advance, 0.0);
         // Even an empty run carries font metrics.
         assert!(run.metrics.ascent > 0.0);
+    }
+
+    /// SEC-04: a text run whose byte length strictly exceeds
+    /// [`MAX_TEXT_LENGTH`] is rejected before shaping begins. The error
+    /// reuses [`ShapeError::InvalidUtf8`] (no `TooLong` variant exists;
+    /// adding one would change the public enum ABI).
+    #[test]
+    fn shape_rejects_oversized_text() {
+        let registry = HarfRustFontRegistry::new();
+        let shaper = HarfRustTextShaper::new(Arc::new(registry));
+        let oversized = "e".repeat(MAX_TEXT_LENGTH + 1);
+        let result = shaper.shape(&oversized, &ShapeContext::default());
+        assert!(result.is_err());
+        assert!(
+            matches!(result, Err(ShapeError::InvalidUtf8)),
+            "oversized text should produce InvalidUtf8, got {:?}",
+            result
+        );
     }
 
     #[test]

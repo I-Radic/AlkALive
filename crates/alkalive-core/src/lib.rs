@@ -448,6 +448,15 @@ impl<T: Clone> Clone for Signal<T> {
     }
 }
 
+/// Maximum number of listeners a single [`Signal`] will register.
+///
+/// `subscribe` enforces this cap to deny a malicious module the ability to
+/// register unbounded listeners (which would make `emit` dispatch
+/// arbitrarily slow). Once a signal holds `MAX_SUBSCRIBERS` listeners,
+/// further `subscribe` calls return the sentinel `Subscription(0)` ("no
+/// subscription") and do not register the listener.
+pub const MAX_SUBSCRIBERS: usize = 1024;
+
 impl<T> Signal<T> {
     /// Create a new signal with no last value, no listeners, and the
     /// subscription counter starting at `1`.
@@ -500,7 +509,19 @@ impl<T> Signal<T> {
     ///
     /// Capability-grant verification (ADR 018) and registration in the
     /// runtime's observer registry (ADR 014 / §2.6) remain deferred.
+    ///
+    /// *Capacity*: to prevent a malicious module from registering unbounded
+    /// listeners (which would make [`Signal::emit`] dispatch arbitrarily
+    /// slow), `subscribe` enforces [`MAX_SUBSCRIBERS`]. Once the signal
+    /// holds that many listeners, further calls return the sentinel
+    /// `Subscription(0)` ("no subscription") and do not register the
+    /// listener.
     pub fn subscribe(&self, listener: Listener<T>) -> Subscription {
+        let listeners = self.listeners.borrow();
+        if listeners.len() >= MAX_SUBSCRIBERS {
+            return Subscription(0); // sentinel: subscription rejected
+        }
+        drop(listeners); // release borrow before mutable borrow
         let id = self.next_subscription_id.fetch_add(1, Ordering::Relaxed);
         self.listeners
             .borrow_mut()
@@ -819,6 +840,20 @@ mod tests {
         assert!(s3.0 > s2.0);
         assert_ne!(s1, s2);
         assert_ne!(s2, s3);
+    }
+
+    #[test]
+    fn signal_subscribe_rejects_excess_subscribers() {
+        let signal: Signal<i32> = Signal::new();
+        // Register MAX_SUBSCRIBERS listeners
+        for i in 0..MAX_SUBSCRIBERS {
+            signal.subscribe(Listener::new(i as u64));
+        }
+        // Next subscription should return sentinel Subscription(0)
+        let sub = signal.subscribe(Listener::new(MAX_SUBSCRIBERS as u64));
+        assert_eq!(sub, Subscription(0));
+        // Verify listener count didn't exceed the limit
+        assert_eq!(signal.listeners.borrow().len(), MAX_SUBSCRIBERS);
     }
 
     // ---- Signal::emit dispatch (Gap #1) ---------------------------------
