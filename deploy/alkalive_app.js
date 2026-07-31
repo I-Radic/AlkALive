@@ -1,6 +1,31 @@
 /* @ts-self-types="./alkalive_app.d.ts" */
 
 /**
+ * Check if redo is available.
+ * @returns {boolean}
+ */
+export function can_redo() {
+    const ret = wasm.can_redo();
+    return ret !== 0;
+}
+
+/**
+ * Check if undo is available.
+ * @returns {boolean}
+ */
+export function can_undo() {
+    const ret = wasm.can_undo();
+    return ret !== 0;
+}
+
+/**
+ * Clear all undo/redo history.
+ */
+export function clear_history() {
+    wasm.clear_history();
+}
+
+/**
  * Clear the input field text.
  */
 export function clear_input() {
@@ -331,6 +356,24 @@ export function paste_clipboard() {
 }
 
 /**
+ * Redo the last undone change. Returns true if redo was performed.
+ * @returns {boolean}
+ */
+export function redo() {
+    const ret = wasm.redo();
+    return ret !== 0;
+}
+
+/**
+ * Get the redo stack depth.
+ * @returns {number}
+ */
+export function redo_depth() {
+    const ret = wasm.redo_depth();
+    return ret >>> 0;
+}
+
+/**
  * Resize the framebuffer.
  * @param {number} width
  * @param {number} height
@@ -506,6 +549,24 @@ export function tick() {
  */
 export function toggle_input_focus() {
     wasm.toggle_input_focus();
+}
+
+/**
+ * Undo the last text change. Returns true if undo was performed.
+ * @returns {boolean}
+ */
+export function undo() {
+    const ret = wasm.undo();
+    return ret !== 0;
+}
+
+/**
+ * Get the undo stack depth.
+ * @returns {number}
+ */
+export function undo_depth() {
+    const ret = wasm.undo_depth();
+    return ret >>> 0;
 }
 function __wbg_get_imports() {
     const import0 = {

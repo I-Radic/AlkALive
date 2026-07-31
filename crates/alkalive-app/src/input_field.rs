@@ -31,6 +31,17 @@ pub const MAX_INPUT_LEN: usize = 200;
 /// Cursor blink period in seconds.
 pub const CURSOR_BLINK_PERIOD: f32 = 1.06;
 
+/// Maximum number of undo history entries (prevents unbounded memory growth).
+pub const MAX_HISTORY: usize = 100;
+
+/// A snapshot of the input field state for undo/redo.
+#[derive(Clone, Debug)]
+struct TextState {
+    text: String,
+    cursor: usize,
+    anchor: usize,
+}
+
 /// An editable text input field rendered by the AlkALive text stack.
 pub struct InputField {
     /// The text buffer.
@@ -52,6 +63,12 @@ pub struct InputField {
     dirty: bool,
     /// Internal clipboard for copy/cut/paste (simple in-WASM clipboard).
     clipboard: String,
+    /// Undo history stack (past states).
+    undo_stack: Vec<TextState>,
+    /// Redo history stack (states that were undone).
+    redo_stack: Vec<TextState>,
+    /// Whether to suppress history recording (during undo/redo operations).
+    suppress_history: bool,
 }
 
 impl InputField {
@@ -72,7 +89,106 @@ impl InputField {
             cached_shaped: None,
             dirty: true,
             clipboard: String::new(),
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            suppress_history: false,
         }
+    }
+
+    /// Push the current state onto the undo stack (called before mutations).
+    /// Clears the redo stack (standard behavior — new action invalidates redo).
+    fn push_history(&mut self) {
+        if self.suppress_history {
+            return;
+        }
+        let state = TextState {
+            text: self.text.clone(),
+            cursor: self.cursor,
+            anchor: self.anchor,
+        };
+        self.undo_stack.push(state);
+        // Enforce max history size (drop oldest).
+        if self.undo_stack.len() > MAX_HISTORY {
+            self.undo_stack.remove(0);
+        }
+        // Clear redo stack — new action invalidates redo history.
+        self.redo_stack.clear();
+    }
+
+    /// Undo the last text change. Restores the previous state.
+    /// Returns true if undo was performed.
+    pub fn undo(&mut self) -> bool {
+        if self.undo_stack.is_empty() {
+            return false;
+        }
+        // Save current state to redo stack.
+        let current = TextState {
+            text: self.text.clone(),
+            cursor: self.cursor,
+            anchor: self.anchor,
+        };
+        self.redo_stack.push(current);
+
+        // Restore previous state.
+        let prev = self.undo_stack.pop().unwrap();
+        self.suppress_history = true;
+        self.text = prev.text;
+        self.cursor = prev.cursor;
+        self.anchor = prev.anchor;
+        self.dirty = true;
+        self.suppress_history = false;
+        true
+    }
+
+    /// Redo the last undone change. Restores the state that was undone.
+    /// Returns true if redo was performed.
+    pub fn redo(&mut self) -> bool {
+        if self.redo_stack.is_empty() {
+            return false;
+        }
+        // Save current state to undo stack.
+        let current = TextState {
+            text: self.text.clone(),
+            cursor: self.cursor,
+            anchor: self.anchor,
+        };
+        self.undo_stack.push(current);
+
+        // Restore the redone state.
+        let next = self.redo_stack.pop().unwrap();
+        self.suppress_history = true;
+        self.text = next.text;
+        self.cursor = next.cursor;
+        self.anchor = next.anchor;
+        self.dirty = true;
+        self.suppress_history = false;
+        true
+    }
+
+    /// Check if undo is available (undo stack is non-empty).
+    pub fn can_undo(&self) -> bool {
+        !self.undo_stack.is_empty()
+    }
+
+    /// Check if redo is available (redo stack is non-empty).
+    pub fn can_redo(&self) -> bool {
+        !self.redo_stack.is_empty()
+    }
+
+    /// Get the undo stack depth (number of undoable operations).
+    pub fn undo_depth(&self) -> usize {
+        self.undo_stack.len()
+    }
+
+    /// Get the redo stack depth (number of redoable operations).
+    pub fn redo_depth(&self) -> usize {
+        self.redo_stack.len()
+    }
+
+    /// Clear all undo/redo history.
+    pub fn clear_history(&mut self) {
+        self.undo_stack.clear();
+        self.redo_stack.clear();
     }
 
     /// Returns true if there is an active selection (anchor != cursor).
@@ -155,6 +271,7 @@ impl InputField {
         if !self.has_selection() {
             return String::new();
         }
+        self.push_history();
         let selected = self.selected_text().to_string();
         self.clipboard = selected.clone();
         // Delete the selected range.
@@ -172,6 +289,7 @@ impl InputField {
         if self.clipboard.is_empty() {
             return;
         }
+        self.push_history();
         // Clone the clipboard content to avoid borrow issues.
         let to_paste = self.clipboard.clone();
         // Delete active selection first.
@@ -212,6 +330,7 @@ impl InputField {
         if self.text.len() >= MAX_INPUT_LEN {
             return;
         }
+        self.push_history();
         // If there's a selection, delete it first (replace).
         if self.has_selection() {
             self.delete_selection();
@@ -229,6 +348,7 @@ impl InputField {
         if remaining == 0 {
             return;
         }
+        self.push_history();
         // If there's a selection, delete it first (replace).
         if self.has_selection() {
             self.delete_selection();
@@ -248,12 +368,14 @@ impl InputField {
     /// If there is an active selection, deletes the selection instead.
     pub fn backspace(&mut self) {
         if self.has_selection() {
+            self.push_history();
             self.delete_selection();
             return;
         }
         if self.cursor == 0 {
             return;
         }
+        self.push_history();
         // Find the start of the previous UTF-8 character.
         let prev_char_start = self.text[..self.cursor]
             .char_indices()
@@ -270,12 +392,14 @@ impl InputField {
     /// If there is an active selection, deletes the selection instead.
     pub fn delete_forward(&mut self) {
         if self.has_selection() {
+            self.push_history();
             self.delete_selection();
             return;
         }
         if self.cursor >= self.text.len() {
             return;
         }
+        self.push_history();
         let next_char_end = self.text[self.cursor..]
             .char_indices()
             .nth(1)
@@ -380,9 +504,25 @@ impl InputField {
 
     /// Clear all text.
     pub fn clear(&mut self) {
+        if self.text.is_empty() {
+            return;
+        }
+        self.push_history();
         self.text.clear();
         self.cursor = 0;
         self.anchor = 0;
+        self.dirty = true;
+    }
+
+    /// Set the text content directly (with undo history).
+    pub fn set_text(&mut self, text: &str) {
+        if self.text == text {
+            return;
+        }
+        self.push_history();
+        self.text = text.to_string();
+        self.cursor = self.text.len();
+        self.anchor = self.cursor;
         self.dirty = true;
     }
 
@@ -1059,5 +1199,174 @@ mod tests {
         let pos = field.hit_test(10000.0);
         // Without a shaped run, returns 0.
         assert_eq!(pos, 0);
+    }
+
+    // --- Undo/Redo tests ---
+
+    #[test]
+    fn undo_empty_does_nothing() {
+        let mut field = InputField::new("");
+        assert!(!field.can_undo());
+        assert!(!field.undo());
+    }
+
+    #[test]
+    fn redo_empty_does_nothing() {
+        let mut field = InputField::new("");
+        assert!(!field.can_redo());
+        assert!(!field.redo());
+    }
+
+    #[test]
+    fn undo_reverts_insert_char() {
+        let mut field = InputField::new("");
+        field.insert_char('H');
+        field.insert_char('i');
+        assert_eq!(field.text, "Hi");
+        assert!(field.can_undo());
+        field.undo();
+        assert_eq!(field.text, "H");
+        field.undo();
+        assert_eq!(field.text, "");
+    }
+
+    #[test]
+    fn redo_reapplies_undone_change() {
+        let mut field = InputField::new("");
+        field.insert_char('H');
+        field.insert_char('i');
+        field.undo();
+        field.undo();
+        assert_eq!(field.text, "");
+        assert!(field.can_redo());
+        field.redo();
+        assert_eq!(field.text, "H");
+        field.redo();
+        assert_eq!(field.text, "Hi");
+    }
+
+    #[test]
+    fn new_action_clears_redo_stack() {
+        let mut field = InputField::new("");
+        field.insert_char('A');
+        field.insert_char('B');
+        field.undo(); // Back to "A"
+        assert!(field.can_redo());
+        field.insert_char('C'); // New action — should clear redo
+        assert!(!field.can_redo());
+        assert_eq!(field.text, "AC");
+    }
+
+    #[test]
+    fn undo_reverts_backspace() {
+        let mut field = InputField::new("");
+        field.insert_str("Hello");
+        field.backspace();
+        assert_eq!(field.text, "Hell");
+        field.undo();
+        assert_eq!(field.text, "Hello");
+    }
+
+    #[test]
+    fn undo_reverts_clear() {
+        let mut field = InputField::new("");
+        field.insert_str("Hello");
+        field.clear();
+        assert!(field.text.is_empty());
+        field.undo();
+        assert_eq!(field.text, "Hello");
+    }
+
+    #[test]
+    fn undo_reverts_cut() {
+        let mut field = InputField::new("");
+        field.insert_str("Hello World");
+        field.select_all();
+        field.cut_selection();
+        assert!(field.text.is_empty());
+        field.undo();
+        assert_eq!(field.text, "Hello World");
+    }
+
+    #[test]
+    fn undo_reverts_paste() {
+        let mut field = InputField::new("");
+        field.insert_str("Hello");
+        field.select_all();
+        field.cut_selection();
+        field.paste();
+        assert_eq!(field.text, "Hello");
+        field.undo(); // Undo paste
+        assert!(field.text.is_empty());
+    }
+
+    #[test]
+    fn undo_reverts_set_text() {
+        let mut field = InputField::new("");
+        field.insert_str("Original");
+        field.set_text("Replaced");
+        assert_eq!(field.text, "Replaced");
+        field.undo();
+        assert_eq!(field.text, "Original");
+    }
+
+    #[test]
+    fn undo_depth_tracks_operations() {
+        let mut field = InputField::new("");
+        assert_eq!(field.undo_depth(), 0);
+        field.insert_char('A');
+        assert_eq!(field.undo_depth(), 1);
+        field.insert_char('B');
+        assert_eq!(field.undo_depth(), 2);
+        field.undo();
+        assert_eq!(field.undo_depth(), 1);
+    }
+
+    #[test]
+    fn clear_history_removes_all() {
+        let mut field = InputField::new("");
+        field.insert_char('A');
+        field.insert_char('B');
+        assert!(field.can_undo());
+        field.clear_history();
+        assert!(!field.can_undo());
+        assert!(!field.can_redo());
+    }
+
+    #[test]
+    fn multiple_undo_redo_cycle() {
+        let mut field = InputField::new("");
+        field.insert_char('A');
+        field.insert_char('B');
+        field.insert_char('C');
+        assert_eq!(field.text, "ABC");
+        field.undo();
+        assert_eq!(field.text, "AB");
+        field.undo();
+        assert_eq!(field.text, "A");
+        field.undo();
+        assert_eq!(field.text, "");
+        field.redo();
+        assert_eq!(field.text, "A");
+        field.redo();
+        assert_eq!(field.text, "AB");
+        field.redo();
+        assert_eq!(field.text, "ABC");
+    }
+
+    #[test]
+    fn undo_preserves_cursor_and_anchor() {
+        let mut field = InputField::new("");
+        field.insert_char('H');
+        field.insert_char('e');
+        field.insert_char('l');
+        field.insert_char('l');
+        field.insert_char('o');
+        // Cursor at end (5), anchor at end (5)
+        assert_eq!(field.cursor, 5);
+        field.undo();
+        assert_eq!(field.text, "Hell");
+        // After undo, cursor should be at end of "Hell" (4)
+        assert_eq!(field.cursor, 4);
     }
 }

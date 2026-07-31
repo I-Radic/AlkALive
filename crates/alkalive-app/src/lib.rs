@@ -721,6 +721,14 @@ pub fn handle_key_press(key: &str) -> bool {
                     a.input_field.paste();
                     true
                 }
+                "Ctrl+z" | "Meta+z" => {
+                    a.input_field.undo();
+                    true
+                }
+                "Ctrl+y" | "Meta+y" | "Ctrl+Shift+z" | "Meta+Shift+z" => {
+                    a.input_field.redo();
+                    true
+                }
                 "Enter" => {
                     // Enter could submit the form in the future.
                     true
@@ -757,10 +765,7 @@ pub fn get_input_text() -> String {
 pub fn set_input_text(text: &str) {
     APP.with(|app| {
         if let Some(a) = app.borrow_mut().as_mut() {
-            a.input_field.text = text.to_string();
-            a.input_field.cursor = a.input_field.text.len();
-            a.input_field.anchor = a.input_field.cursor;
-            a.input_field.mark_dirty();
+            a.input_field.set_text(text);
         }
     });
 }
@@ -856,6 +861,82 @@ pub fn set_clipboard(text: &str) {
     APP.with(|app| {
         if let Some(a) = app.borrow_mut().as_mut() {
             a.input_field.set_clipboard(text);
+        }
+    });
+}
+
+// ============================================================================
+// Undo/Redo Operations
+// ============================================================================
+
+/// Undo the last text change. Returns true if undo was performed.
+#[wasm_bindgen]
+pub fn undo() -> bool {
+    APP.with(|app| {
+        if let Some(a) = app.borrow_mut().as_mut() {
+            if a.input_field.focused {
+                return a.input_field.undo();
+            }
+        }
+        false
+    })
+}
+
+/// Redo the last undone change. Returns true if redo was performed.
+#[wasm_bindgen]
+pub fn redo() -> bool {
+    APP.with(|app| {
+        if let Some(a) = app.borrow_mut().as_mut() {
+            if a.input_field.focused {
+                return a.input_field.redo();
+            }
+        }
+        false
+    })
+}
+
+/// Check if undo is available.
+#[wasm_bindgen]
+pub fn can_undo() -> bool {
+    APP.with(|app| {
+        let app = app.borrow();
+        app.as_ref().map_or(false, |a| a.input_field.can_undo())
+    })
+}
+
+/// Check if redo is available.
+#[wasm_bindgen]
+pub fn can_redo() -> bool {
+    APP.with(|app| {
+        let app = app.borrow();
+        app.as_ref().map_or(false, |a| a.input_field.can_redo())
+    })
+}
+
+/// Get the undo stack depth.
+#[wasm_bindgen]
+pub fn undo_depth() -> usize {
+    APP.with(|app| {
+        let app = app.borrow();
+        app.as_ref().map_or(0, |a| a.input_field.undo_depth())
+    })
+}
+
+/// Get the redo stack depth.
+#[wasm_bindgen]
+pub fn redo_depth() -> usize {
+    APP.with(|app| {
+        let app = app.borrow();
+        app.as_ref().map_or(0, |a| a.input_field.redo_depth())
+    })
+}
+
+/// Clear all undo/redo history.
+#[wasm_bindgen]
+pub fn clear_history() {
+    APP.with(|app| {
+        if let Some(a) = app.borrow_mut().as_mut() {
+            a.input_field.clear_history();
         }
     });
 }
