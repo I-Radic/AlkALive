@@ -20,8 +20,10 @@ AlkALive is an exploratory project investigating a **custom, module- and object-
 | `GAP_IMPLEMENTATION_PLAN.md` | **Gap Implementation Plan** — implementation waves (A–…) derived from the Gap Analysis, resolving all Critical/High/Medium gaps with Definition-of-Done criteria per wave. |
 | `Cargo.toml` | **Rust workspace** — 13 crates (`alkalive-{core,runtime,render,layout,text,style,input,dom,a11y,ipc,perf,error,test}`), edition 2021, wasm-release profile. |
 | `rust-toolchain.toml` | **Toolchain pin** — Rust 1.97.1 + wasm32-unknown-unknown + clippy + rustfmt. |
-| `deny.toml` | **cargo-deny** — enforces ADR 018 (capability-scoped imports; no external registry deps by default — the 13 workspace crates are auto-allowed, every other crate is denied unless explicitly allowlisted). |
-| `crates/` | **Crate source** — real implementations (no `todo!()` remaining). 11,321 lines and 215 tests across 13 crates. All 41 gap-analysis findings addressed (5 Critical, 14 High, 18 Medium, 4 Low). |
+| `deny.toml` | **cargo-deny** — enforces ADR 018 (deny-by-default; HarfRust transitive deps allowlisted). |
+| `crates/` | **Crate source** — real implementations (no `todo!()` remaining). 49,544 lines and 471 tests across 13 crates + 2 vendored crates. HarfRust text stack fully integrated (ADR 022). |
+| `vendor/harfrust/` | **HarfRust** — vendored git subtree from `harfbuzz/harfrust` (MIT). Real text shaping, font loading, glyph metrics. |
+| `vendor/rasterizer/` | **Rasterizer** — vendored scanline rasterizer (MIT, no external deps). Converts TrueType outlines to grayscale bitmaps for the glyph atlas. |
 
 ## The catalog
 
