@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AlkALive Hello World</title>
+  <style>body{margin:0;overflow:hidden}canvas{display:block;width:100vw;height:100vh}#ime{position:absolute;left:-9999px;opacity:0}</style>
+</head>
+<body>
+  <canvas id="canvas"></canvas>
+  <input id="ime" type="text">
+  <script type="module">
+    import init from './pkg/alkalive_runtime_wasm.js';
+    const wasm = await init('./pkg/alkalive_runtime_wasm_bg.wasm');
+    const canvas = document.getElementById('canvas');
+    const ime = document.getElementById('ime');
+    await wasm.start(canvas, ime);
+  </script>
+</body>
+</html>
