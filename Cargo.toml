@@ -16,6 +16,7 @@ members = [
     "crates/alkalive-test",
     "crates/alkalive-compiler",
     "crates/alkalive-app",
+    "crates/alkalive-backend-wgpu",
     "vendor/harfrust/harfrust",
     "vendor/rasterizer",
 ]

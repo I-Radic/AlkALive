@@ -1,0 +1,51 @@
+[package]
+name = "alkalive-backend-wgpu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "AlkALive GPU rendering backend — WebGL2/WebGPU canvas renderer for WASM"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# Internal workspace crates — text shaping + glyph atlas, and scene IR.
+alkalive-text = { workspace = true }
+alkalive-compiler = { workspace = true }
+
+# bytemuck for typed byte reinterpretation of vertex/uniform buffers.
+bytemuck = { version = "1", features = ["derive"] }
+
+# wasm-bindgen + web-sys for browser DOM/Canvas/WebGL2 bindings.
+# These compile on native too (the types are referenced) but the GPU
+# runtime calls are only meaningful on wasm32.
+wasm-bindgen = { workspace = true }
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    "HtmlCanvasElement",
+    "Window",
+    "Document",
+    "Element",
+    "Gpu",
+    "GpuCanvasContext",
+    "GpuDevice",
+    "GpuQueue",
+    "WebGl2RenderingContext",
+    "WebGlBuffer",
+    "WebGlProgram",
+    "WebGlShader",
+    "WebGlTexture",
+    "WebGlUniformLocation",
+    "WebGlVertexArrayObject",
+    "console",
+    "Performance",
+] }
+
+[features]
+default = []
+# Enable real wgpu dependency (currently unused — the crate uses raw WebGL2
+# via web-sys as the GPU backend, which is simpler and works in every
+# browser without extra deps). Kept here so the crate name
+# `alkalive-backend-wgpu` keeps its intent for future migration to wgpu.
+wgpu-backend = []

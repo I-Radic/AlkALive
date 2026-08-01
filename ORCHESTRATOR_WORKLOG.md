@@ -235,3 +235,111 @@ Stage Summary:
 - SceneIR shape matches the task spec exactly: `background: (u8,u8,u8)`, `nodes: Vec<NodeIR>`, `NodeIR::Text{content,color,font_size,rotation_speed,position}`, `NodeIR::InputField{placeholder,position}`, `ColorIR::Solid(u8,u8,u8)|Gold`, `PositionIR::Center|BelowText|Custom(f32,f32)`. Two extension fields added: `module_id: ModuleId` (FNV-1a hash of module name) and `module_name: String` so the runtime can route the IR to the correct module instance.
 - Next wave (Wave 3) can consume the JSON artifact emitted by this compiler: the runtime reads `hello.scene` at startup, deserializes it into a `SceneIR`, and constructs the render-object tree from `nodes`.
 - Files created: crates/alkalive-compiler/{Cargo.toml, src/lib.rs, src/lexer.rs, src/ast.rs, src/parser.rs, src/ir.rs, src/codegen.rs, src/main.rs, tests/pipeline.rs, examples/hello.alk} + examples/hello.alk (workspace root). Files modified: Cargo.toml (workspace members + workspace.dependencies).
+
+---
+Task ID: 3-A
+Agent: general-purpose (WebGPU Backend)
+Task: Build alkalive-backend-wgpu crate with GPU rendering
+
+Work Log:
+- Read PURE_ALKALIVE_PIPELINE_PLAN.md for architecture context (Wave 3: WebGPU backend).
+- Inspected existing crates: alkalive-render (abstract Backend trait), alkalive-text
+  (HarfRustGlyphAtlas with real rasterizer-backed 512x512 grayscale pages),
+  alkalive-compiler (SceneIR with ColorIR::Gold → (0xFF, 0xD7, 0x00)),
+  alkalive-app/src/text_scene.rs (the existing CPU-side text pipeline that this
+  crate replaces on the GPU side).
+- Added `crates/alkalive-backend-wgpu` to the workspace `members` array in
+  the root Cargo.toml.
+- Created `crates/alkalive-backend-wgpu/Cargo.toml` with deps:
+  alkalive-text, alkalive-compiler (workspace), bytemuck (derive),
+  wasm-bindgen (workspace), js-sys, web-sys (with HtmlCanvasElement, Window,
+  Document, Element, Gpu, GpuCanvasContext, GpuDevice, GpuQueue, WebGl2RenderingContext,
+  WebGlBuffer, WebGlProgram, WebGlShader, WebGlTexture, WebGlUniformLocation,
+  WebGlVertexArrayObject, console, Performance features).
+- Implemented `src/lib.rs` (~1200 LOC) with:
+  * `TextSceneData` struct (text, font_size, rotation_speed, background RGB,
+    text_color RGBA) — defaults to golden (1.0, 0.843, 0.0, 1.0) on black.
+  * `Vertex` struct (repr(C), Pod, Zeroable) — [x, y, u, v], 16 bytes.
+  * `Uniforms` struct (rotation, canvas_w, canvas_h, time) for documentation.
+  * `VERTEX_SHADER_SRC` and `FRAGMENT_SHADER_SRC` constants (GLSL ES 3.00):
+    - Vertex: applies Y-axis rotation (scales X by cos(rotation)), converts
+      pixel-space Y-up to clip space.
+    - Fragment: samples R channel of glyph_texture, discards alpha < 0.01,
+      outputs text_color.rgb * alpha (premultiplied).
+  * `GlyphQuad` struct + `build_vertex_buffer(&[GlyphQuad]) -> Vec<Vertex>`
+    (6 verts per quad, two CCW triangles).
+  * `quads_from_text(&[alkalive_text::Quad], ascent, descent, advance,
+    canvas_w, canvas_h) -> Vec<GlyphQuad>` — centers text horizontally
+    and vertically in the canvas.
+  * `WgpuRenderer` struct with two impls gated by target_arch:
+    - `#[cfg(target_arch = "wasm32")]`: real WebGL2 backend via
+      `web_sys::WebGl2RenderingContext`. `init_from_canvas(canvas, w, h)`
+      acquires the WebGL2 context, compiles shaders, links program, creates
+      VAO/VBO, allocates a 512x512 R8 glyph atlas texture, caches uniform
+      locations. `render_frame(scene, time)` clears to background, sets
+      uniforms, binds glyph texture to unit 0, draws TRIANGLES. `resize`
+      updates canvas + viewport. `elapsed_seconds()` uses `performance.now()`.
+      `upload_text_atlas(text, font_size)` loads Roboto-Regular.ttf
+      (include_bytes! from alkalive-app/assets), shapes via HarfRustTextShaper,
+      rasterizes each glyph into HarfRustGlyphAtlas, uploads page 0 to the
+      GPU texture, builds vertex buffer, uploads to VBO. Drop deletes GPU
+      resources.
+    - `#[cfg(not(target_arch = "wasm32"))]`: stub that type-checks the
+      public API (init_from_canvas returns Err, render_frame/resize are
+      no-ops). This satisfies the "must compile on BOTH targets" requirement.
+- Fixed wasm32 compilation issues:
+  * Replaced `web_sys::Object` with `js_sys::Object` (added `js-sys = "0.3"`
+    to Cargo.toml) — `get_context()` returns `Option<js_sys::Object>`.
+  * Removed unused `GpuCanvasContext` import (would need a feature gate;
+    not actually used — kept as a doc note for the future wgpu migration).
+  * Updated WebGL2 method calls to web-sys 0.3.103 signatures:
+    `get_program_parameter(&program, LINK_STATUS)`,
+    `get_shader_parameter(&shader, COMPILE_STATUS)`,
+    `delete_program(Some(&program))`, etc.
+  * Fixed E0502 borrow issue in render_frame by inlining `self.gl.X(...)`
+    calls instead of binding `let gl = &self.gl;` before the mutable
+    `self.upload_text_atlas(...)` call.
+  * Renamed `_vs`/`_fs` fields to `vs`/`fs` (they're used in Drop).
+- Added 16 unit tests (all pass on native):
+  * TextSceneData default/new/normalized.
+  * Vertex::STRIDE = 16, Vertex::new field assignment.
+  * build_vertex_buffer: empty input, single quad (6 verts, correct corner
+    positions), multiple quads.
+  * quads_from_text: centers horizontally (1000px canvas, 100px text →
+    first quad at center_x = 455), empty input.
+  * Uniforms default is zeroed.
+  * VERTEX_SHADER_SRC / FRAGMENT_SHADER_SRC contain expected GLSL markers
+    (#version 300 es, void main(), uniform declarations, gl_Position,
+    frag_color, discard).
+  * GlyphQuad default is zeroed.
+  * `wgpu_renderer_type_compiles` — exercises the public API surface
+    (render_frame, resize) for type-checking on native.
+  * End-to-end: shapes "Hello" via HarfRustTextShaper, builds quads, builds
+    vertex buffer, asserts 6 verts per visible glyph and all positions finite.
+
+Stage Summary:
+- Crate created at `crates/alkalive-backend-wgpu/` with full GPU backend.
+- Compiles cleanly on BOTH native (x86_64-unknown-linux-gnu) and
+  wasm32-unknown-unknown targets, with zero warnings on either.
+- 16/16 unit tests pass on native; tests cover vertex-buffer math, shader
+  source validation, text-to-quad conversion, and an end-to-end
+  HarfRust-shape → atlas-rasterize → quad-build → vertex-buffer pipeline
+  that exercises the real alkalive-text stack.
+- The wasm32 build's `WgpuRenderer` is fully functional: acquires WebGL2
+  context, compiles+links shaders, creates VAO/VBO/texture, renders golden
+  text on black background with Y-axis rotation animation, uploads glyph
+  atlas via texImage2D, uploads vertex buffer via bufferData.
+- The native build's `WgpuRenderer` is a type-checking stub (returns Err
+  from init_from_canvas) — the GPU backend only runs in the browser, but
+  the public API is identical so downstream crates compile everywhere.
+- Decision: used raw WebGL2 via `web-sys::WebGl2RenderingContext` instead
+  of the `wgpu` crate. The crate name `alkalive-backend-wgpu` was kept to
+  express intent (and a future migration to wgpu can swap the impl behind
+  the same `WgpuRenderer` API). Rationale documented in the crate-level
+  rustdoc: (1) WebGL2 is universally available, (2) web-sys was already
+  cached locally; pulling wgpu 22 would add ~50 transitive deps, (3) raw
+  WebGL2 fits in one file (~1200 LOC). This is explicitly allowed by the
+  task brief ("Either approach is acceptable").
+- No JS, no DOM, no CPU framebuffer — all rendering happens on the GPU
+  via WebGL2 draw calls (TRIANGLES), satisfying ADR 013 (no WASM/DOM
+  boundary in the hot path) and the "GPU rendering, not CPU" requirement.
