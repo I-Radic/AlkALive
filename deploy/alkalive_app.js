@@ -129,6 +129,16 @@ export function double_click_input(x, y) {
 }
 
 /**
+ * Duplicate the selected text (or entire text if no selection).
+ * Returns true if duplication was performed.
+ * @returns {boolean}
+ */
+export function duplicate_text() {
+    const ret = wasm.duplicate_text();
+    return ret !== 0;
+}
+
+/**
  * Find the next match. Returns true if found.
  * @returns {boolean}
  */
@@ -741,10 +751,41 @@ export function tick() {
 }
 
 /**
+ * Transform selected text or entire text to lowercase.
+ */
+export function to_lowercase() {
+    wasm.to_lowercase();
+}
+
+/**
+ * Transform selected text or entire text to UPPERCASE.
+ */
+export function to_uppercase() {
+    wasm.to_uppercase();
+}
+
+/**
+ * Toggle case of selected text or entire text.
+ */
+export function toggle_case() {
+    wasm.toggle_case();
+}
+
+/**
  * Toggle input field focus.
  */
 export function toggle_input_focus() {
     wasm.toggle_input_focus();
+}
+
+/**
+ * Transpose the characters around the cursor (swap them).
+ * Returns true if transposed.
+ * @returns {boolean}
+ */
+export function transpose_chars() {
+    const ret = wasm.transpose_chars();
+    return ret !== 0;
 }
 
 /**

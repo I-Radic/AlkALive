@@ -568,6 +568,164 @@ impl InputField {
         self.dirty = true;
     }
 
+    // ========================================================================
+    // Advanced Editing: Duplicate, Transpose, Transform Case
+    // ========================================================================
+
+    /// Duplicate the selected text (or the current line if no selection).
+    /// Inserts a copy right after the selection/cursor.
+    /// Returns true if duplication was performed.
+    pub fn duplicate(&mut self) -> bool {
+        if self.text.is_empty() {
+            return false;
+        }
+        self.push_history();
+
+        if self.has_selection() {
+            // Duplicate the selected text.
+            let (start, end) = self.selection_range();
+            let selected = self.text[start..end].to_string();
+            self.text.insert_str(end, &selected);
+            self.cursor = end + selected.len();
+            self.anchor = end;
+        } else {
+            // Duplicate the entire text (single-line = whole line).
+            let text_clone = self.text.clone();
+            self.text.push_str(&text_clone);
+            self.cursor = self.text.len();
+            self.anchor = self.cursor;
+        }
+        self.dirty = true;
+        true
+    }
+
+    /// Transpose the characters around the cursor (swap them).
+    /// Ctrl+T behavior. If cursor is at end, swaps the last two chars.
+    /// Returns true if transposed.
+    pub fn transpose_chars(&mut self) -> bool {
+        if self.text.len() < 2 {
+            return false;
+        }
+        self.push_history();
+
+        // If cursor is at end, move it back one char so we swap the last two.
+        if self.cursor >= self.text.len() {
+            let prev_start = self.text[..self.cursor]
+                .char_indices()
+                .last()
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            self.cursor = prev_start;
+        }
+
+        if self.cursor == 0 {
+            return false;
+        }
+
+        // Find the two characters to swap: char before cursor and char at cursor.
+        let prev_char_start = self.text[..self.cursor]
+            .char_indices()
+            .last()
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+
+        // The current char (at cursor position) ends at the next char boundary.
+        let curr_char_end = self.text[self.cursor..]
+            .char_indices()
+            .nth(1)
+            .map(|(i, _)| self.cursor + i)
+            .unwrap_or(self.text.len());
+
+        if prev_char_start >= self.cursor || self.cursor >= curr_char_end || curr_char_end > self.text.len() {
+            return false;
+        }
+
+        // Extract the two chars.
+        let char_a = &self.text[prev_char_start..self.cursor];
+        let char_b = &self.text[self.cursor..curr_char_end];
+
+        // Swap them.
+        let new_segment = format!("{}{}", char_b, char_a);
+        self.text.replace_range(prev_char_start..curr_char_end, &new_segment);
+        self.cursor = curr_char_end;
+        self.anchor = self.cursor;
+        self.dirty = true;
+        true
+    }
+
+    /// Transform the selected text or entire text to UPPERCASE.
+    pub fn to_uppercase(&mut self) {
+        if self.text.is_empty() {
+            return;
+        }
+        self.push_history();
+        if self.has_selection() {
+            let (start, end) = self.selection_range();
+            let upper: String = self.text[start..end].to_uppercase();
+            self.text.replace_range(start..end, &upper);
+            self.cursor = start + upper.len();
+            self.anchor = start;
+        } else {
+            self.text = self.text.to_uppercase();
+            self.cursor = self.text.len();
+            self.anchor = self.cursor;
+        }
+        self.dirty = true;
+    }
+
+    /// Transform the selected text or entire text to lowercase.
+    pub fn to_lowercase(&mut self) {
+        if self.text.is_empty() {
+            return;
+        }
+        self.push_history();
+        if self.has_selection() {
+            let (start, end) = self.selection_range();
+            let lower: String = self.text[start..end].to_lowercase();
+            self.text.replace_range(start..end, &lower);
+            self.cursor = start + lower.len();
+            self.anchor = start;
+        } else {
+            self.text = self.text.to_lowercase();
+            self.cursor = self.text.len();
+            self.anchor = self.cursor;
+        }
+        self.dirty = true;
+    }
+
+    /// Toggle case of selected text or entire text.
+    pub fn toggle_case(&mut self) {
+        if self.text.is_empty() {
+            return;
+        }
+        self.push_history();
+        let transform = |s: &str| -> String {
+            s.chars()
+                .map(|c| {
+                    if c.is_uppercase() {
+                        c.to_lowercase().next().unwrap_or(c)
+                    } else if c.is_lowercase() {
+                        c.to_uppercase().next().unwrap_or(c)
+                    } else {
+                        c
+                    }
+                })
+                .collect()
+        };
+        if self.has_selection() {
+            let (start, end) = self.selection_range();
+            let toggled = transform(&self.text[start..end]);
+            self.text.replace_range(start..end, &toggled);
+            self.cursor = start + toggled.len();
+            self.anchor = start;
+        } else {
+            self.text = transform(&self.text);
+            self.cursor = self.text.len();
+            self.anchor = self.cursor;
+        }
+        self.dirty = true;
+    }
+
     /// Returns true if there is an active selection (anchor != cursor).
     pub fn has_selection(&self) -> bool {
         self.anchor != self.cursor
@@ -2189,5 +2347,135 @@ mod tests {
         field.cursor_home();
         field.goto_next_word();
         assert_eq!(&field.text[field.cursor..field.cursor + 5], "World");
+    }
+
+    // --- Advanced editing tests ---
+
+    #[test]
+    fn duplicate_selected_text() {
+        let mut field = InputField::new("");
+        field.insert_str("Hello World");
+        field.select_all();
+        field.duplicate();
+        assert_eq!(field.text, "Hello WorldHello World");
+    }
+
+    #[test]
+    fn duplicate_no_selection_duplicates_all() {
+        let mut field = InputField::new("");
+        field.insert_str("Hello");
+        field.duplicate();
+        assert_eq!(field.text, "HelloHello");
+    }
+
+    #[test]
+    fn duplicate_empty_returns_false() {
+        let mut field = InputField::new("");
+        assert!(!field.duplicate());
+    }
+
+    #[test]
+    fn duplicate_can_undo() {
+        let mut field = InputField::new("");
+        field.insert_str("Hello");
+        field.duplicate();
+        assert_eq!(field.text, "HelloHello");
+        field.undo();
+        assert_eq!(field.text, "Hello");
+    }
+
+    #[test]
+    fn transpose_chars_swaps() {
+        let mut field = InputField::new("");
+        field.insert_str("ab");
+        // Cursor at end (2). Transpose should swap 'a' and 'b'.
+        field.transpose_chars();
+        assert_eq!(field.text, "ba");
+    }
+
+    #[test]
+    fn transpose_at_start_returns_false() {
+        let mut field = InputField::new("");
+        field.insert_str("Hello");
+        field.cursor_home();
+        assert!(!field.transpose_chars());
+    }
+
+    #[test]
+    fn transpose_can_undo() {
+        let mut field = InputField::new("");
+        field.insert_str("ab");
+        field.transpose_chars();
+        assert_eq!(field.text, "ba");
+        field.undo();
+        assert_eq!(field.text, "ab");
+    }
+
+    #[test]
+    fn to_uppercase_entire_text() {
+        let mut field = InputField::new("");
+        field.insert_str("Hello World");
+        field.to_uppercase();
+        assert_eq!(field.text, "HELLO WORLD");
+    }
+
+    #[test]
+    fn to_uppercase_selection() {
+        let mut field = InputField::new("");
+        field.insert_str("Hello World");
+        // Select "World"
+        field.cursor = 6;
+        field.anchor = 6;
+        field.cursor_right_extend();
+        field.cursor_right_extend();
+        field.cursor_right_extend();
+        field.cursor_right_extend();
+        field.cursor_right_extend();
+        field.to_uppercase();
+        assert_eq!(field.text, "Hello WORLD");
+    }
+
+    #[test]
+    fn to_lowercase_entire_text() {
+        let mut field = InputField::new("");
+        field.insert_str("HELLO WORLD");
+        field.to_lowercase();
+        assert_eq!(field.text, "hello world");
+    }
+
+    #[test]
+    fn toggle_case_entire_text() {
+        let mut field = InputField::new("");
+        field.insert_str("Hello World");
+        field.toggle_case();
+        assert_eq!(field.text, "hELLO wORLD");
+    }
+
+    #[test]
+    fn toggle_case_back_and_forth() {
+        let mut field = InputField::new("");
+        field.insert_str("Hello");
+        field.toggle_case();
+        assert_eq!(field.text, "hELLO");
+        field.toggle_case();
+        assert_eq!(field.text, "Hello");
+    }
+
+    #[test]
+    fn uppercase_can_undo() {
+        let mut field = InputField::new("");
+        field.insert_str("Hello");
+        field.to_uppercase();
+        assert_eq!(field.text, "HELLO");
+        field.undo();
+        assert_eq!(field.text, "Hello");
+    }
+
+    #[test]
+    fn uppercase_unicode() {
+        let mut field = InputField::new("");
+        field.insert_str("héllo");
+        field.to_uppercase();
+        assert_eq!(field.text, "HÉLLO");
     }
 }

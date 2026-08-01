@@ -1213,6 +1213,66 @@ pub fn delete_word_forward() {
     });
 }
 
+// ============================================================================
+// Advanced Editing: Duplicate, Transpose, Case Transform
+// ============================================================================
+
+/// Duplicate the selected text (or entire text if no selection).
+/// Returns true if duplication was performed.
+#[wasm_bindgen]
+pub fn duplicate_text() -> bool {
+    APP.with(|app| {
+        if let Some(a) = app.borrow_mut().as_mut() {
+            a.input_field.duplicate()
+        } else {
+            false
+        }
+    })
+}
+
+/// Transpose the characters around the cursor (swap them).
+/// Returns true if transposed.
+#[wasm_bindgen]
+pub fn transpose_chars() -> bool {
+    APP.with(|app| {
+        if let Some(a) = app.borrow_mut().as_mut() {
+            a.input_field.transpose_chars()
+        } else {
+            false
+        }
+    })
+}
+
+/// Transform selected text or entire text to UPPERCASE.
+#[wasm_bindgen]
+pub fn to_uppercase() {
+    APP.with(|app| {
+        if let Some(a) = app.borrow_mut().as_mut() {
+            a.input_field.to_uppercase();
+        }
+    });
+}
+
+/// Transform selected text or entire text to lowercase.
+#[wasm_bindgen]
+pub fn to_lowercase() {
+    APP.with(|app| {
+        if let Some(a) = app.borrow_mut().as_mut() {
+            a.input_field.to_lowercase();
+        }
+    });
+}
+
+/// Toggle case of selected text or entire text.
+#[wasm_bindgen]
+pub fn toggle_case() {
+    APP.with(|app| {
+        if let Some(a) = app.borrow_mut().as_mut() {
+            a.input_field.toggle_case();
+        }
+    });
+}
+
 /// Toggle the input field visibility.
 #[wasm_bindgen]
 pub fn set_input_enabled(enabled: bool) {
