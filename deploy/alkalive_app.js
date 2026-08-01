@@ -133,6 +133,24 @@ export function find_prev() {
 }
 
 /**
+ * Get the byte count (UTF-8 encoded length).
+ * @returns {number}
+ */
+export function get_byte_count() {
+    const ret = wasm.get_byte_count();
+    return ret >>> 0;
+}
+
+/**
+ * Get the character count (Unicode scalar values).
+ * @returns {number}
+ */
+export function get_char_count() {
+    const ret = wasm.get_char_count();
+    return ret >>> 0;
+}
+
+/**
  * Get the clipboard content.
  * @returns {string}
  */
@@ -155,6 +173,15 @@ export function get_clipboard() {
  */
 export function get_current_match() {
     const ret = wasm.get_current_match();
+    return ret >>> 0;
+}
+
+/**
+ * Get the cursor position as a character index.
+ * @returns {number}
+ */
+export function get_cursor_position() {
+    const ret = wasm.get_cursor_position();
     return ret >>> 0;
 }
 
@@ -221,6 +248,15 @@ export function get_input_text() {
 }
 
 /**
+ * Get the line count.
+ * @returns {number}
+ */
+export function get_line_count() {
+    const ret = wasm.get_line_count();
+    return ret >>> 0;
+}
+
+/**
  * Get the total number of search matches.
  * @returns {number}
  */
@@ -270,6 +306,15 @@ export function get_selected_text() {
  */
 export function get_width() {
     const ret = wasm.get_width();
+    return ret >>> 0;
+}
+
+/**
+ * Get the word count.
+ * @returns {number}
+ */
+export function get_word_count() {
+    const ret = wasm.get_word_count();
     return ret >>> 0;
 }
 
@@ -423,6 +468,32 @@ export function redo() {
 export function redo_depth() {
     const ret = wasm.redo_depth();
     return ret >>> 0;
+}
+
+/**
+ * Replace all matches with the replacement text.
+ * Returns the number of replacements made.
+ * @param {string} replacement
+ * @returns {number}
+ */
+export function replace_all_text(replacement) {
+    const ptr0 = passStringToWasm0(replacement, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.replace_all_text(ptr0, len0);
+    return ret >>> 0;
+}
+
+/**
+ * Replace the currently selected match with the replacement text.
+ * Returns true if a replacement was made.
+ * @param {string} replacement
+ * @returns {boolean}
+ */
+export function replace_text(replacement) {
+    const ptr0 = passStringToWasm0(replacement, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.replace_text(ptr0, len0);
+    return ret !== 0;
 }
 
 /**

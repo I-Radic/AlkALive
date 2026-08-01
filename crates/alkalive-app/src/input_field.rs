@@ -305,6 +305,97 @@ impl InputField {
         self.cursor = self.text.len();
     }
 
+    // ========================================================================
+    // Replace / Replace All
+    // ========================================================================
+
+    /// Replace the currently selected match with the replacement text.
+    /// Returns true if a replacement was made.
+    /// After replacing, selects the next match (if any).
+    pub fn replace(&mut self, replacement: &str) -> bool {
+        if !self.has_selection() {
+            return false;
+        }
+        self.push_history();
+        let (start, end) = self.selection_range();
+        self.text.replace_range(start..end, replacement);
+        self.cursor = start + replacement.len();
+        self.anchor = self.cursor;
+        self.dirty = true;
+
+        // Re-run search to update matches, then find next.
+        if self.is_searching() {
+            let query = self.search_query.clone();
+            self.search(&query);
+            // search() selects the first match; advance to next.
+            if !self.search_matches.is_empty() {
+                self.find_next();
+            }
+        }
+        true
+    }
+
+    /// Replace all matches with the replacement text.
+    /// Returns the number of replacements made.
+    pub fn replace_all(&mut self, replacement: &str) -> usize {
+        if self.search_matches.is_empty() {
+            return 0;
+        }
+        self.push_history();
+        let count = self.search_matches.len();
+
+        // Replace from end to start to avoid offset shifting.
+        let query_len = self.search_query.len();
+        let mut text = self.text.clone();
+        for &(start, _end) in self.search_matches.iter().rev() {
+            text.replace_range(start..start + query_len, replacement);
+        }
+        self.text = text;
+        self.cursor = 0;
+        self.anchor = 0;
+        self.dirty = true;
+
+        // Clear search since matches are now invalid.
+        self.clear_search();
+        count
+    }
+
+    // ========================================================================
+    // Text Statistics
+    // ========================================================================
+
+    /// Get the character count (Unicode scalar values).
+    pub fn char_count(&self) -> usize {
+        self.text.chars().count()
+    }
+
+    /// Get the byte count (UTF-8 encoded length).
+    pub fn byte_count(&self) -> usize {
+        self.text.len()
+    }
+
+    /// Get the word count (sequences of alphanumeric characters).
+    pub fn word_count(&self) -> usize {
+        if self.text.is_empty() {
+            return 0;
+        }
+        self.text.split_whitespace().count()
+    }
+
+    /// Get the line count (number of lines, at least 1).
+    /// For single-line input, this is always 1 unless there are newlines.
+    pub fn line_count(&self) -> usize {
+        if self.text.is_empty() {
+            return 1;
+        }
+        self.text.lines().count().max(1)
+    }
+
+    /// Get the cursor position as a character index (not byte offset).
+    pub fn cursor_char_position(&self) -> usize {
+        self.text[..self.cursor.min(self.text.len())].chars().count()
+    }
+
     /// Returns true if there is an active selection (anchor != cursor).
     pub fn has_selection(&self) -> bool {
         self.anchor != self.cursor
@@ -1622,5 +1713,158 @@ mod tests {
         let mut field = InputField::new("");
         field.select_line();
         assert!(!field.has_selection());
+    }
+
+    // --- Replace / Replace All tests ---
+
+    #[test]
+    fn replace_requires_selection() {
+        let mut field = InputField::new("");
+        field.insert_str("Hello World");
+        // No selection — replace should return false.
+        assert!(!field.replace("Hi"));
+        assert_eq!(field.text, "Hello World");
+    }
+
+    #[test]
+    fn replace_replaces_selected_match() {
+        let mut field = InputField::new("");
+        field.insert_str("Hello World");
+        field.search("World");
+        assert!(field.has_selection());
+        assert!(field.replace("Universe"));
+        assert_eq!(field.text, "Hello Universe");
+    }
+
+    #[test]
+    fn replace_all_replaces_all_matches() {
+        let mut field = InputField::new("");
+        field.insert_str("aaa aaa aaa");
+        field.search("aaa");
+        let count = field.replace_all("bbb");
+        assert_eq!(count, 3);
+        assert_eq!(field.text, "bbb bbb bbb");
+    }
+
+    #[test]
+    fn replace_all_no_matches_returns_zero() {
+        let mut field = InputField::new("");
+        field.insert_str("Hello World");
+        field.search("xyz");
+        let count = field.replace_all("test");
+        assert_eq!(count, 0);
+        assert_eq!(field.text, "Hello World");
+    }
+
+    #[test]
+    fn replace_all_clears_search() {
+        let mut field = InputField::new("");
+        field.insert_str("Hello Hello");
+        field.search("Hello");
+        field.replace_all("Hi");
+        assert!(!field.is_searching());
+        assert_eq!(field.match_count(), 0);
+    }
+
+    #[test]
+    fn replace_advances_to_next_match() {
+        let mut field = InputField::new("");
+        field.insert_str("aaa bbb aaa");
+        field.search("aaa");
+        // First match selected.
+        field.replace("ccc");
+        // After replace, should advance to next match (the second "aaa").
+        assert!(field.has_selection());
+        assert_eq!(field.selected_text(), "aaa");
+    }
+
+    #[test]
+    fn replace_all_with_empty_replacement_deletes() {
+        let mut field = InputField::new("");
+        field.insert_str("Hello World Hello");
+        field.search("Hello");
+        let count = field.replace_all("");
+        assert_eq!(count, 2);
+        assert_eq!(field.text, " World ");
+    }
+
+    // --- Text statistics tests ---
+
+    #[test]
+    fn char_count_counts_unicode() {
+        let mut field = InputField::new("");
+        field.insert_str("Hello");
+        assert_eq!(field.char_count(), 5);
+        field.clear();
+        field.insert_str("你好");
+        assert_eq!(field.char_count(), 2);
+    }
+
+    #[test]
+    fn byte_count_counts_utf8() {
+        let mut field = InputField::new("");
+        field.insert_str("Hello");
+        assert_eq!(field.byte_count(), 5);
+        field.clear();
+        field.insert_str("你好");
+        assert_eq!(field.byte_count(), 6); // 3 bytes per CJK char
+    }
+
+    #[test]
+    fn word_count_counts_words() {
+        let mut field = InputField::new("");
+        field.insert_str("Hello World");
+        assert_eq!(field.word_count(), 2);
+        field.clear();
+        field.insert_str("One");
+        assert_eq!(field.word_count(), 1);
+    }
+
+    #[test]
+    fn word_count_empty_returns_zero() {
+        let field = InputField::new("");
+        assert_eq!(field.word_count(), 0);
+    }
+
+    #[test]
+    fn word_count_only_spaces_returns_zero() {
+        let mut field = InputField::new("");
+        field.insert_str("   ");
+        assert_eq!(field.word_count(), 0);
+    }
+
+    #[test]
+    fn line_count_single_line() {
+        let mut field = InputField::new("");
+        field.insert_str("Hello World");
+        assert_eq!(field.line_count(), 1);
+    }
+
+    #[test]
+    fn line_count_empty_returns_one() {
+        let field = InputField::new("");
+        assert_eq!(field.line_count(), 1);
+    }
+
+    #[test]
+    fn cursor_char_position() {
+        let mut field = InputField::new("");
+        field.insert_str("Hello");
+        // Cursor at end (byte 5, char 5).
+        assert_eq!(field.cursor_char_position(), 5);
+        // Move cursor to start.
+        field.cursor_home();
+        assert_eq!(field.cursor_char_position(), 0);
+    }
+
+    #[test]
+    fn cursor_char_position_unicode() {
+        let mut field = InputField::new("");
+        field.insert_str("你好World");
+        // Cursor at end — 7 chars (2 CJK + 5 ASCII).
+        assert_eq!(field.cursor_char_position(), 7);
+        // Move left once (should be at char 6).
+        field.cursor_left();
+        assert_eq!(field.cursor_char_position(), 6);
     }
 }

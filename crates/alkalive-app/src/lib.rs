@@ -1046,6 +1046,85 @@ pub fn select_line() {
     });
 }
 
+// ============================================================================
+// Replace / Replace All Operations
+// ============================================================================
+
+/// Replace the currently selected match with the replacement text.
+/// Returns true if a replacement was made.
+#[wasm_bindgen]
+pub fn replace_text(replacement: &str) -> bool {
+    APP.with(|app| {
+        if let Some(a) = app.borrow_mut().as_mut() {
+            a.input_field.replace(replacement)
+        } else {
+            false
+        }
+    })
+}
+
+/// Replace all matches with the replacement text.
+/// Returns the number of replacements made.
+#[wasm_bindgen]
+pub fn replace_all_text(replacement: &str) -> usize {
+    APP.with(|app| {
+        if let Some(a) = app.borrow_mut().as_mut() {
+            a.input_field.replace_all(replacement)
+        } else {
+            0
+        }
+    })
+}
+
+// ============================================================================
+// Text Statistics
+// ============================================================================
+
+/// Get the character count (Unicode scalar values).
+#[wasm_bindgen]
+pub fn get_char_count() -> usize {
+    APP.with(|app| {
+        let app = app.borrow();
+        app.as_ref().map_or(0, |a| a.input_field.char_count())
+    })
+}
+
+/// Get the byte count (UTF-8 encoded length).
+#[wasm_bindgen]
+pub fn get_byte_count() -> usize {
+    APP.with(|app| {
+        let app = app.borrow();
+        app.as_ref().map_or(0, |a| a.input_field.byte_count())
+    })
+}
+
+/// Get the word count.
+#[wasm_bindgen]
+pub fn get_word_count() -> usize {
+    APP.with(|app| {
+        let app = app.borrow();
+        app.as_ref().map_or(0, |a| a.input_field.word_count())
+    })
+}
+
+/// Get the line count.
+#[wasm_bindgen]
+pub fn get_line_count() -> usize {
+    APP.with(|app| {
+        let app = app.borrow();
+        app.as_ref().map_or(1, |a| a.input_field.line_count())
+    })
+}
+
+/// Get the cursor position as a character index.
+#[wasm_bindgen]
+pub fn get_cursor_position() -> usize {
+    APP.with(|app| {
+        let app = app.borrow();
+        app.as_ref().map_or(0, |a| a.input_field.cursor_char_position())
+    })
+}
+
 /// Toggle the input field visibility.
 #[wasm_bindgen]
 pub fn set_input_enabled(enabled: bool) {
