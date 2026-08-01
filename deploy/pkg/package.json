@@ -1,0 +1,20 @@
+{
+  "name": "alkalive-runtime-wasm",
+  "type": "module",
+  "collaborators": [
+    "I-Radic"
+  ],
+  "description": "AlkALive pure runtime — WASM entry point with GPU rendering",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "files": [
+    "alkalive_runtime_wasm_bg.wasm",
+    "alkalive_runtime_wasm.js",
+    "alkalive_runtime_wasm.d.ts"
+  ],
+  "main": "alkalive_runtime_wasm.js",
+  "types": "alkalive_runtime_wasm.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}
