@@ -1,0 +1,35 @@
+[package]
+name = "alkalive-compiler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "AlkALive compiler frontend — lexes/parses .alk source files and lowers them to a runtime-consumable SceneIR"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "alkalive-compiler"
+path = "src/main.rs"
+required-features = ["cli"]
+
+[dependencies]
+# Internal workspace crate. The library surface uses `alkalive_core::ModuleId`
+# to attach a stable identifier to each compiled `SceneIR`.
+alkalive-core = { workspace = true }
+
+# `serde_json` is an *optional* dependency used exclusively by the CLI binary
+# (`src/main.rs`) to emit a pretty-printed JSON artifact. It is gated behind
+# the `cli` feature, so the library can be built with **zero external
+# dependencies** via `--no-default-features`. The library also provides a
+# manual `SceneIR::to_json()` for zero-dependency consumers and in-library
+# unit tests.
+serde_json = { version = "1", optional = true }
+
+[features]
+default = ["cli"]
+# Enables the `serde_json` dependency and the `alkalive-compiler` binary.
+# When disabled, the crate builds as a pure-Rust library with no external
+# dependencies (only `alkalive-core`, which is an internal workspace crate).
+cli = ["dep:serde_json"]

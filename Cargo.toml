@@ -14,6 +14,7 @@ members = [
     "crates/alkalive-perf",
     "crates/alkalive-error",
     "crates/alkalive-test",
+    "crates/alkalive-compiler",
     "crates/alkalive-app",
     "vendor/harfrust/harfrust",
     "vendor/rasterizer",
@@ -41,6 +42,7 @@ alkalive-ipc    = { path = "crates/alkalive-ipc" }
 alkalive-perf   = { path = "crates/alkalive-perf" }
 alkalive-error  = { path = "crates/alkalive-error" }
 alkalive-test   = { path = "crates/alkalive-test" }
+alkalive-compiler = { path = "crates/alkalive-compiler" }
 alkalive-runtime = { path = "crates/alkalive-runtime" }
 harfrust = { path = "vendor/harfrust/harfrust", default-features = false }
 wasm-bindgen = "0.2"

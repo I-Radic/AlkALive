@@ -1,0 +1,25 @@
+// AlkALive Hello World scene.
+//
+// This is the canonical example source file for the `alkalive-compiler`
+// crate. Compile it with:
+//
+//   cargo run --bin alkalive-compiler -- compile examples/hello.alk -o /tmp/hello.scene
+//
+// The output is a JSON artifact describing the scene IR that the
+// AlkALive runtime will consume (Wave 5 of the Pure AlkALive Pipeline).
+
+module HelloWorld {
+  scene {
+    background: #000000
+    text "Hello World!" {
+      color: gold
+      font-size: 64
+      rotation: y-axis 0.5
+      position: center
+    }
+    input-field {
+      placeholder: "Type here..."
+      position: below text
+    }
+  }
+}

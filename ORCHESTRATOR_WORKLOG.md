@@ -196,3 +196,42 @@ Stage Summary:
 - Test Coverage: STRONG on unit tests (33 tests, all key APIs exercised). WEAK on end-to-end: no test verifies shape("Hello") → ensure(atlas) → correct visible pixels. Test font covers only 'e'.
 - VERDICT: Shaping YES, glyph rasterization YES (per-glyph), end-to-end rendering NO. Three blockers: (1) no font covering ASCII embedded for the demo, (2) HarfRustTextShaper doesn't impl TextStack so no GlyphQuadBatch production, (3) render crate's glyph_run_to_draw_calls is a placeholder and there's no WebGPU backend to submit DrawCalls anyway. Text stack is the most mature crate (~80% of the way there); the remaining 20% is wiring to the (still abstract) render backend.
 
+
+---
+Task ID: 2-A
+Agent: general-purpose (Compiler Frontend)
+Task: Build alkalive-compiler crate with lexer, parser, codegen, and CLI
+
+Work Log:
+- Read DEPLOYMENT_FAILURE_ANALYSIS.md (G1: no compiler crate exists; G9: no .alk source file; G11: no [[bin]] target), PURE_ALKALIVE_PIPELINE_PLAN.md (Wave 2 DoD: parse .alk -> SceneIR; [[bin]] target invokable as `cargo run -- compile hello.alk -o hello.scene`), and SPECIFICATION.md §2 (grammar overview, module/scene/text node shape).
+- Read workspace Cargo.toml (14 members, workspace.dependencies section, wasm-release profile) and crates/alkalive-core/src/lib.rs (ModuleId(pub u64) struct with Debug/Clone/Copy/PartialEq/Eq/Hash derives — suitable for embedding in SceneIR).
+- Created crates/alkalive-compiler/ directory with Cargo.toml, src/{lib,lexer,ast,parser,ir,codegen,main}.rs, tests/pipeline.rs, and examples/hello.alk.
+- Added `crates/alkalive-compiler` to workspace `members` and `alkalive-compiler = { path = "crates/alkalive-compiler" }` to `[workspace.dependencies]` in the root Cargo.toml.
+- Cargo.toml design: lib + [[bin]] target `alkalive-compiler`. `serde_json` is an OPTIONAL dependency gated behind a `cli` feature (default-enabled). The [[bin]] target has `required-features = ["cli"]`. This means: `cargo build` (default features) → builds lib + bin with serde_json; `cargo build --lib --no-default-features` → builds lib with ZERO external deps (only `alkalive-core`, an internal workspace crate). Verified via `cargo tree --no-default-features`: only `alkalive-core` appears.
+- Lexer (src/lexer.rs): Token{kind, value, line, col} + TokenKind enum with 10 keyword variants (Module, Scene, Text, InputField, Color, FontSize, Rotation, Position, Background, Placeholder) + literal variants (Ident, String, Number, HexColor) + punctuation (LBrace, RBrace, Colon, Dot) + Newline + Eof. Identifiers allow internal hyphens so `input-field`, `font-size`, `y-axis` lex as single tokens. Strings support `\"`, `\\`, `\n`, `\t`, `\r`, `\0` escapes and multi-byte UTF-8. Numbers support integers, decimals, and leading sign. Hex colors require exactly 6 hex digits (#RRGGBB). `//` line comments and whitespace are skipped; newlines are emitted as tokens. 24 lexer unit tests.
+- AST (src/ast.rs): ModuleDecl, SceneDecl, NodeDecl (Text/InputField enum), TextNode, InputFieldNode, RotationDecl, Color (Hex/Named), PositionDecl (Center/Below/Custom). All nodes carry line/col for diagnostics. 4 AST unit tests.
+- Parser (src/parser.rs): recursive-descent Parser with peek/advance/expect/skip_newlines helpers. Grammar: module -> scene -> (background | text "..." {props} | input-field {props}). Property dispatch by keyword: color/font-size/rotation/position/placeholder. Position values: `center` | `below <ref>` | `<x> <y>`. `below text` accepts the `text` keyword as a node reference. ParseError carries line/col/message. 25 parser unit tests including full hello.alk source.
+- IR (src/ir.rs): SceneIR{module_id: ModuleId, module_name, background: (u8,u8,u8), nodes: Vec<NodeIR>} + NodeIR (Text/InputField) + ColorIR (Solid/Gold) + PositionIR (Center/BelowText/Custom). `mint_module_id()` uses FNV-1a 64-bit hash of the module name (deterministic, stable across runs). `to_json()` provides a zero-dependency manual JSON serializer for library consumers and tests. 12 IR unit tests.
+- Codegen (src/codegen.rs): `lower(&ModuleDecl) -> Result<SceneIR, CodegenError>`. Applies defaults: background=(0,0,0), text color=Gold, font_size=32.0, rotation_speed=0.0, position=Center, placeholder="". Validates: module must have a scene; font-size must be positive+finite; rotation_speed must be finite; `below text` requires a preceding text node in the same scene; named colors only accept `gold` (others error); custom position coords must be finite. `compile(src)` convenience function chains lex+parse+lower. `CompileError` enum wraps Parse+Codegen errors. 18 codegen unit tests.
+- lib.rs: re-exports the full public API (tokenize, parse, lower, compile, all AST/IR types, Lexer, Parser, Token, TokenKind, errors). `#![forbid(unsafe_code)]` + `#![warn(missing_docs)]`. 4 integration tests including a doctest.
+- CLI binary (src/main.rs): `alkalive-compiler compile <input.alk> -o <output.scene>`. Reads file, compiles, constructs serde_json::Value manually (no derive needed on SceneIR — keeps library dep-free), writes pretty JSON. Arg parsing handles -o/--output, -h/--help, errors on missing/extra args. 13 binary unit tests.
+- examples/hello.alk: the canonical Hello World source (also copied to workspace-root examples/hello.alk so `cargo run --bin alkalive-compiler -- compile examples/hello.alk -o /tmp/hello.scene` works from the workspace root).
+- tests/pipeline.rs: 15 end-to-end integration tests covering the full hello.alk compile, stage independence, JSON well-formedness, node ordering, error cases (no scene, below-text-without-text, unknown color, invalid syntax), comment handling, lowercase hex, custom positions, default placeholder, module ID stability, string escape round-tripping.
+
+Verification:
+- `cargo check -p alkalive-compiler` → passes cleanly (0.27s).
+- `cargo test -p alkalive-compiler` → 121 tests pass (92 lib + 13 bin + 15 integration + 1 doctest).
+- `cargo clippy -p alkalive-compiler --all-targets` → zero warnings.
+- `cargo build --lib --no-default-features` → lib builds with ZERO external deps (only alkalive-core).
+- `cargo test --lib --no-default-features` → 92 lib tests pass with zero external deps.
+- `cargo run --bin alkalive-compiler -- compile examples/hello.alk -o /tmp/hello.scene` → produces valid JSON (verified with python3 json.load): module_name=HelloWorld, 2 nodes (text + input-field), background=[0,0,0], color=#FFD700, font_size=64.0, rotation_speed=0.5, position=center/below-text.
+- `cargo check --workspace` → full workspace compiles cleanly (pre-existing unused-var warning in alkalive-app, unrelated).
+
+Stage Summary:
+- The `alkalive-compiler` crate (G1, G11) is complete: lexer + parser + codegen + CLI binary. It parses the `.alk` Hello-World subset and produces a runtime-consumable `SceneIR` (JSON-serializable).
+- The `examples/hello.alk` file (G9) exists at both `crates/alkalive-compiler/examples/hello.alk` and `examples/hello.alk` (workspace root).
+- Library surface is dependency-free (only `alkalive-core` internal crate); `serde_json` is an optional binary-only dep behind the `cli` feature.
+- `#![forbid(unsafe_code)]` enforced across all 6 library modules + the binary + the integration test file.
+- SceneIR shape matches the task spec exactly: `background: (u8,u8,u8)`, `nodes: Vec<NodeIR>`, `NodeIR::Text{content,color,font_size,rotation_speed,position}`, `NodeIR::InputField{placeholder,position}`, `ColorIR::Solid(u8,u8,u8)|Gold`, `PositionIR::Center|BelowText|Custom(f32,f32)`. Two extension fields added: `module_id: ModuleId` (FNV-1a hash of module name) and `module_name: String` so the runtime can route the IR to the correct module instance.
+- Next wave (Wave 3) can consume the JSON artifact emitted by this compiler: the runtime reads `hello.scene` at startup, deserializes it into a `SceneIR`, and constructs the render-object tree from `nodes`.
+- Files created: crates/alkalive-compiler/{Cargo.toml, src/lib.rs, src/lexer.rs, src/ast.rs, src/parser.rs, src/ir.rs, src/codegen.rs, src/main.rs, tests/pipeline.rs, examples/hello.alk} + examples/hello.alk (workspace root). Files modified: Cargo.toml (workspace members + workspace.dependencies).
