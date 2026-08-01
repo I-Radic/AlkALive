@@ -47,81 +47,97 @@ The catalog also identifies **ecosystem-adoption inertia** (P9.5) as the central
 
 The draft concludes with an **Integration Overview** that synthesises the nine cluster solutions into a single coherent architecture organised around one principle: *the render-object tree is the single source of truth, owned by the WASM module, with multiple emission targets.* It explicitly resolves cross-area conflicts (single-source tree ownership, unified focus/accessibility structure, scheduler ownership, interop-interface ownership) and flags open risks (GPU-backend portability, WASM component-model maturity, COOP/COEP constraints, and catalog-acknowledged literature gaps).
 
-## Hello World Deployment
+## Pure AlkALive Hello World Deployment
 
-The AlkALive Hello World is deployed and working in the browser! It renders a
-golden "Hello World!" text on a black background with a slow 3D Y-axis rotation,
-all via the AlkaLive text stack (HarfRust shaping + glyph rasterization) and a
-CPU software renderer — no HTML/CSS for UI, only a `<canvas>` element.
+The AlkALive Hello World is a **pure AlkALive application** — compiled from a
+`.alk` source file, rendered via WebGL2 GPU, with **zero application JavaScript,
+zero CSS for UI, and zero DOM elements** beyond the canvas and the hidden IME
+input (per ADR 023).
 
 ### Quick Start
 
 ```bash
-# Build the WASM module
-wasm-pack build crates/alkalive-app --target web --release
+# 1. Compile the .alk source to SceneIR
+cargo run --bin alkalive-compiler -- compile examples/hello.alk -o deploy/hello.scene
 
-# Serve the deploy directory
+# 2. Build the WASM runtime binary
+wasm-pack build crates/alkalive-runtime-wasm --target web --release --out-dir ../../deploy/pkg
+
+# 3. Serve the deploy directory
 cd deploy && python3 -m http.server 8080
 
-# Open http://localhost:8080 in a browser
+# 4. Open http://localhost:8080 in a browser
 ```
 
 ### Deployment Files
 
 | Path | Description |
 | --- | --- |
-| `crates/alkalive-app/` | Application crate — WASM entry points, CPU software renderer, text scene |
-| `crates/alkalive-app/src/lib.rs` | `#[wasm_bindgen]` exports: `init`, `tick`, `get_framebuffer_ptr`, `resize` |
-| `crates/alkalive-app/src/renderer.rs` | CPU software renderer: RGBA framebuffer, glyph compositing, Y-axis rotation |
-| `crates/alkalive-app/src/text_scene.rs` | Text scene: font loading → HarfRust shaping → glyph rasterization → positioned quads |
-| `crates/alkalive-app/assets/Roboto-Regular.ttf` | Embedded font covering full ASCII range |
-| `deploy/index.html` | HTML harness: canvas + JS rAF loop + `putImageData` |
-| `deploy/alkalive_app.js` | wasm-bindgen JS glue |
-| `deploy/alkalive_app_bg.wasm` | Compiled WASM binary (1 MB) |
-| `verify_wasm.mjs` | Node.js verification script |
+| `examples/hello.alk` | AlkALive source file — declares the scene (black bg, golden text, input field) |
+| `deploy/hello.scene` | Compiled SceneIR (JSON) produced by the AlkALive compiler |
+| `deploy/index.html` | Minimal HTML shell (19 lines): canvas + hidden input + 4-line script |
+| `deploy/pkg/alkalive_runtime_wasm.js` | wasm-bindgen JS glue (single export: `start`) |
+| `deploy/pkg/alkalive_runtime_wasm_bg.wasm` | Compiled WASM binary (1.1 MB) |
+| `crates/alkalive-compiler/` | Compiler crate: lexer, parser, codegen, CLI |
+| `crates/alkalive-backend-wgpu/` | WebGL2 GPU backend: shaders, textures, vertex buffers |
+| `crates/alkalive-runtime-wasm/` | Runtime: embeds scene, owns frame loop, input handling |
 
 ### Architecture
 
-The Hello World bypasses the not-yet-implemented `.alk` compiler and abstract
-render backend by constructing the scene directly in Rust and using a CPU
-software renderer:
+The pure AlkALive pipeline:
 
-1. **Font Loading** — Roboto-Regular.ttf is embedded via `include_bytes!` and
-   loaded into `HarfRustFontRegistry`.
-2. **Text Shaping** — `HarfRustTextShaper::shape("Hello World!", ctx)` produces
-   a `ShapedRun` with glyph IDs, advances, offsets, and metrics.
-3. **Glyph Rasterization** — `HarfRustGlyphAtlas::ensure(key)` rasterizes each
-   glyph outline via the vendored scanline rasterizer into a 512×512 atlas page.
-4. **Positioning** — The `TextScene::rasterize_run` adapter (implementing the
-   missing §6.5 `TextStack::rasterize`) walks the `ShapedRun`, accumulates pen
-   position, and produces `PositionedGlyph` quads.
-5. **Compositing** — `SoftwareRenderer::composite_glyphs_rotated` reads atlas
-   pixels, applies golden color modulation with alpha blending, and writes to
-   the RGBA framebuffer with a Y-axis rotation transform.
-6. **Presentation** — JavaScript reads the framebuffer via `get_framebuffer_ptr()`
-   and draws it to a `<canvas>` using `putImageData` in a `requestAnimationFrame` loop.
+```
+hello.alk → [alkalive-compiler] → SceneIR → [alkalive-runtime-wasm] → WebGL2 GPU → <canvas>
+```
+
+1. **`.alk` Source** — `examples/hello.alk` declares the scene using the AlkALive language
+2. **Compiler** — `alkalive-compiler` parses and lowers the source to a `SceneIR`
+3. **Runtime** — `alkalive-runtime-wasm` embeds the scene at compile time, initializes
+   the WebGL2 backend, and owns the `requestAnimationFrame` frame loop
+4. **GPU Rendering** — `alkalive-backend-wgpu` uses WebGL2 (GLSL ES 3.00 shaders) to
+   render text quads with golden color modulation and Y-axis rotation
+5. **Text Stack** — `alkalive-text` (HarfRust) shapes text and rasterizes glyphs to
+   a GPU texture atlas
+6. **Input** — The hidden `<input>` (ADR 023) forwards keyboard events to the WASM module
+
+### What the HTML Shell Contains
+
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>AlkALive Hello World</title>
+  <style>body{margin:0;overflow:hidden}canvas{display:block;width:100vw;height:100vh}#ime{position:absolute;left:-9999px;opacity:0}</style>
+</head>
+<body>
+  <canvas id="canvas"></canvas>
+  <input id="ime" type="text">
+  <script type="module">
+    import init from './pkg/alkalive_runtime_wasm.js';
+    const wasm = await init('./pkg/alkalive_runtime_wasm_bg.wasm');
+    const canvas = document.getElementById('canvas');
+    const ime = document.getElementById('ime');
+    await wasm.start(canvas, ime);
+  </script>
+</body>
+</html>
+```
+
+**Zero application JavaScript** — only module import + `start()` call.
+**Zero CSS for UI** — only `body{margin:0}`, canvas sizing, and `#ime` hiding.
+**Zero DOM UI elements** — only `<canvas>` and hidden `<input>`.
 
 ### Verification
 
-The WASM module has been verified both via Node.js (`verify_wasm.mjs`) and via
-headless browser testing (agent-browser + VLM screenshot analysis):
-
-- ✅ 5,564 golden pixels on 98.7% black background
-- ✅ Text shaping produces correct glyph layout for "Hello World!"
-- ✅ 3D Y-axis rotation animation working (text alternates between normal and mirrored)
-- ✅ Resize handling works correctly
-- ✅ All 501 workspace tests pass (490 existing + 11 new)
-
-### Limitations
-
-- **No text input field** — the input system (ADR 023 IME bridge) is not yet
-  implemented. This is documented in `HELLO_WORLD_GAPS.md` (Gaps G8–G11).
-- **No `.alk` source compiler** — the scene is constructed directly in Rust.
-  A source-to-WASM compiler is a future milestone.
-- **CPU rendering** — the software renderer uses CPU compositing + Canvas 2D
-  `putImageData` rather than WebGPU. A concrete WebGPU backend is a future milestone.
-- **Pseudo-3D rotation** — the Y-axis rotation is approximated by scaling the
-  X dimension by `cos(angle)`. Full 3D transform matrices are a future milestone.
+- ✅ 820 workspace tests pass
+- ✅ Browser test: "AlkALive runtime ready — rendering Hello World."
+- ✅ VLM confirms: golden "Hello World!" text on black background
+- ✅ Y-axis rotation animation active (text orientation changes between screenshots)
+- ✅ DOM body contains only `<canvas>` and `<input>` (verified via `document.body.innerHTML`)
+- ✅ Zero forbidden elements (div, span, button, etc.)
+- ✅ Zero forbidden JS patterns (addEventListener, requestAnimationFrame, putImageData)
+- ✅ VLM visual quality: 10/10
 
 ## License
 
