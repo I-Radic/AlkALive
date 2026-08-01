@@ -749,6 +749,22 @@ pub fn handle_key_press(key: &str) -> bool {
                     a.input_field.clear_selection();
                     true
                 }
+                "Ctrl+ArrowLeft" | "Meta+ArrowLeft" => {
+                    a.input_field.goto_prev_word();
+                    true
+                }
+                "Ctrl+ArrowRight" | "Meta+ArrowRight" => {
+                    a.input_field.goto_next_word();
+                    true
+                }
+                "Ctrl+Backspace" | "Meta+Backspace" => {
+                    a.input_field.delete_word_backward();
+                    true
+                }
+                "Ctrl+Delete" | "Meta+Delete" => {
+                    a.input_field.delete_word_forward();
+                    true
+                }
                 _ => false,
             }
         } else {
@@ -1123,6 +1139,78 @@ pub fn get_cursor_position() -> usize {
         let app = app.borrow();
         app.as_ref().map_or(0, |a| a.input_field.cursor_char_position())
     })
+}
+
+// ============================================================================
+// Go-To / Word Navigation
+// ============================================================================
+
+/// Move the cursor to a specific character index. Returns true if moved.
+#[wasm_bindgen]
+pub fn goto_char(char_index: usize) -> bool {
+    APP.with(|app| {
+        if let Some(a) = app.borrow_mut().as_mut() {
+            a.input_field.goto_char(char_index)
+        } else {
+            false
+        }
+    })
+}
+
+/// Move the cursor to the start of a specific word (0-based). Returns true if moved.
+#[wasm_bindgen]
+pub fn goto_word(word_index: usize) -> bool {
+    APP.with(|app| {
+        if let Some(a) = app.borrow_mut().as_mut() {
+            a.input_field.goto_word(word_index)
+        } else {
+            false
+        }
+    })
+}
+
+/// Move the cursor to the next word boundary. Returns true if moved.
+#[wasm_bindgen]
+pub fn goto_next_word() -> bool {
+    APP.with(|app| {
+        if let Some(a) = app.borrow_mut().as_mut() {
+            a.input_field.goto_next_word()
+        } else {
+            false
+        }
+    })
+}
+
+/// Move the cursor to the previous word boundary. Returns true if moved.
+#[wasm_bindgen]
+pub fn goto_prev_word() -> bool {
+    APP.with(|app| {
+        if let Some(a) = app.borrow_mut().as_mut() {
+            a.input_field.goto_prev_word()
+        } else {
+            false
+        }
+    })
+}
+
+/// Delete the word before the cursor (Ctrl+Backspace).
+#[wasm_bindgen]
+pub fn delete_word_backward() {
+    APP.with(|app| {
+        if let Some(a) = app.borrow_mut().as_mut() {
+            a.input_field.delete_word_backward();
+        }
+    });
+}
+
+/// Delete the word after the cursor (Ctrl+Delete).
+#[wasm_bindgen]
+pub fn delete_word_forward() {
+    APP.with(|app| {
+        if let Some(a) = app.borrow_mut().as_mut() {
+            a.input_field.delete_word_forward();
+        }
+    });
 }
 
 /// Toggle the input field visibility.

@@ -103,6 +103,20 @@ export function cut_selection() {
 }
 
 /**
+ * Delete the word before the cursor (Ctrl+Backspace).
+ */
+export function delete_word_backward() {
+    wasm.delete_word_backward();
+}
+
+/**
+ * Delete the word after the cursor (Ctrl+Delete).
+ */
+export function delete_word_forward() {
+    wasm.delete_word_forward();
+}
+
+/**
  * Handle double-click on the input field to select a word.
  * Returns true if the double-click was on the input field.
  * @param {number} x
@@ -316,6 +330,44 @@ export function get_width() {
 export function get_word_count() {
     const ret = wasm.get_word_count();
     return ret >>> 0;
+}
+
+/**
+ * Move the cursor to a specific character index. Returns true if moved.
+ * @param {number} char_index
+ * @returns {boolean}
+ */
+export function goto_char(char_index) {
+    const ret = wasm.goto_char(char_index);
+    return ret !== 0;
+}
+
+/**
+ * Move the cursor to the next word boundary. Returns true if moved.
+ * @returns {boolean}
+ */
+export function goto_next_word() {
+    const ret = wasm.goto_next_word();
+    return ret !== 0;
+}
+
+/**
+ * Move the cursor to the previous word boundary. Returns true if moved.
+ * @returns {boolean}
+ */
+export function goto_prev_word() {
+    const ret = wasm.goto_prev_word();
+    return ret !== 0;
+}
+
+/**
+ * Move the cursor to the start of a specific word (0-based). Returns true if moved.
+ * @param {number} word_index
+ * @returns {boolean}
+ */
+export function goto_word(word_index) {
+    const ret = wasm.goto_word(word_index);
+    return ret !== 0;
 }
 
 /**

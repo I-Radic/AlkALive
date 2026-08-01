@@ -396,6 +396,178 @@ impl InputField {
         self.text[..self.cursor.min(self.text.len())].chars().count()
     }
 
+    // ========================================================================
+    // Go-To / Navigation
+    // ========================================================================
+
+    /// Move the cursor to a specific character index (0-based).
+    /// Clamps to valid range. Clears selection.
+    /// Returns true if the cursor moved.
+    pub fn goto_char(&mut self, char_index: usize) -> bool {
+        let total_chars = self.char_count();
+        let target = char_index.min(total_chars);
+
+        // Convert char index to byte offset.
+        let byte_offset = if target == 0 {
+            0
+        } else if target >= total_chars {
+            self.text.len()
+        } else {
+            self.text
+                .char_indices()
+                .nth(target)
+                .map(|(i, _)| i)
+                .unwrap_or(self.text.len())
+        };
+
+        if byte_offset == self.cursor {
+            self.anchor = self.cursor;
+            return false;
+        }
+        self.cursor = byte_offset;
+        self.anchor = byte_offset;
+        true
+    }
+
+    /// Move the cursor to the start of a specific word (0-based word index).
+    /// Returns true if the cursor moved.
+    pub fn goto_word(&mut self, word_index: usize) -> bool {
+        let words: Vec<&str> = self.text.split_whitespace().collect();
+        if word_index >= words.len() {
+            return false;
+        }
+
+        // Find the byte offset of the start of the word_index-th word.
+        let mut current_word = 0;
+        let mut byte_offset = 0;
+        let mut in_word = false;
+        for (i, c) in self.text.char_indices() {
+            if c.is_whitespace() {
+                if in_word {
+                    in_word = false;
+                }
+            } else {
+                if !in_word {
+                    if current_word == word_index {
+                        byte_offset = i;
+                        break;
+                    }
+                    current_word += 1;
+                    in_word = true;
+                }
+            }
+        }
+
+        self.cursor = byte_offset;
+        self.anchor = byte_offset;
+        true
+    }
+
+    /// Move the cursor to the next word boundary.
+    /// Returns true if the cursor moved.
+    pub fn goto_next_word(&mut self) -> bool {
+        let chars: Vec<(usize, char)> = self.text.char_indices().collect();
+        let current_char_idx = self.text[..self.cursor]
+            .chars()
+            .count();
+
+        // Skip current word (non-whitespace), then skip whitespace.
+        let mut i = current_char_idx;
+        let mut moved = false;
+
+        // Skip non-whitespace.
+        while i < chars.len() && !chars[i].1.is_whitespace() {
+            i += 1;
+        }
+        // Skip whitespace.
+        while i < chars.len() && chars[i].1.is_whitespace() {
+            i += 1;
+        }
+
+        if i < chars.len() {
+            self.cursor = chars[i].0;
+            self.anchor = self.cursor;
+            moved = true;
+        } else if i >= chars.len() && self.cursor < self.text.len() {
+            // Move to end.
+            self.cursor = self.text.len();
+            self.anchor = self.cursor;
+            moved = true;
+        }
+        moved
+    }
+
+    /// Move the cursor to the previous word boundary.
+    /// Returns true if the cursor moved.
+    pub fn goto_prev_word(&mut self) -> bool {
+        let chars: Vec<(usize, char)> = self.text.char_indices().collect();
+        let current_char_idx = self.text[..self.cursor]
+            .chars()
+            .count();
+
+        if current_char_idx == 0 {
+            return false;
+        }
+
+        let mut i = current_char_idx;
+        // Skip whitespace backward.
+        while i > 0 && chars[i - 1].1.is_whitespace() {
+            i -= 1;
+        }
+        // Skip non-whitespace backward.
+        while i > 0 && !chars[i - 1].1.is_whitespace() {
+            i -= 1;
+        }
+
+        let new_cursor = if i > 0 { chars[i].0 } else { 0 };
+        if new_cursor != self.cursor {
+            self.cursor = new_cursor;
+            self.anchor = self.cursor;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Delete the word before the cursor (Ctrl+Backspace).
+    pub fn delete_word_backward(&mut self) {
+        if self.has_selection() {
+            self.backspace();
+            return;
+        }
+        if self.cursor == 0 {
+            return;
+        }
+        self.push_history();
+        // Find the start of the previous word.
+        let prev_cursor = self.cursor;
+        self.goto_prev_word();
+        let word_start = self.cursor;
+        self.text.replace_range(word_start..prev_cursor, "");
+        self.cursor = word_start;
+        self.anchor = word_start;
+        self.dirty = true;
+    }
+
+    /// Delete the word after the cursor (Ctrl+Delete).
+    pub fn delete_word_forward(&mut self) {
+        if self.has_selection() {
+            self.delete_forward();
+            return;
+        }
+        if self.cursor >= self.text.len() {
+            return;
+        }
+        self.push_history();
+        let prev_cursor = self.cursor;
+        self.goto_next_word();
+        let word_end = self.cursor;
+        self.text.replace_range(prev_cursor..word_end, "");
+        self.cursor = prev_cursor;
+        self.anchor = prev_cursor;
+        self.dirty = true;
+    }
+
     /// Returns true if there is an active selection (anchor != cursor).
     pub fn has_selection(&self) -> bool {
         self.anchor != self.cursor
@@ -1866,5 +2038,156 @@ mod tests {
         // Move left once (should be at char 6).
         field.cursor_left();
         assert_eq!(field.cursor_char_position(), 6);
+    }
+
+    // --- Go-To / Navigation tests ---
+
+    #[test]
+    fn goto_char_moves_cursor() {
+        let mut field = InputField::new("");
+        field.insert_str("Hello World");
+        // Cursor at end (11 chars). Go to char 5 (after "Hello").
+        assert!(field.goto_char(5));
+        assert_eq!(field.cursor_char_position(), 5);
+    }
+
+    #[test]
+    fn goto_char_clamps_to_end() {
+        let mut field = InputField::new("");
+        field.insert_str("Hello");
+        field.goto_char(100);
+        assert_eq!(field.cursor_char_position(), 5);
+    }
+
+    #[test]
+    fn goto_char_zero_goes_to_start() {
+        let mut field = InputField::new("");
+        field.insert_str("Hello");
+        field.cursor_home();
+        field.goto_char(0);
+        assert_eq!(field.cursor_char_position(), 0);
+    }
+
+    #[test]
+    fn goto_char_clears_selection() {
+        let mut field = InputField::new("");
+        field.insert_str("Hello World");
+        field.select_all();
+        assert!(field.has_selection());
+        field.goto_char(3);
+        assert!(!field.has_selection());
+    }
+
+    #[test]
+    fn goto_char_unicode() {
+        let mut field = InputField::new("");
+        field.insert_str("你好World");
+        // Go to char 2 (after '好', before 'W').
+        field.goto_char(2);
+        assert_eq!(field.cursor_char_position(), 2);
+        assert_eq!(&field.text[field.cursor..], "World");
+    }
+
+    #[test]
+    fn goto_word_moves_to_word_start() {
+        let mut field = InputField::new("");
+        field.insert_str("Hello World Foo");
+        // Go to word 1 ("World").
+        assert!(field.goto_word(1));
+        assert_eq!(&field.text[field.cursor..field.cursor + 5], "World");
+    }
+
+    #[test]
+    fn goto_word_invalid_index_returns_false() {
+        let mut field = InputField::new("");
+        field.insert_str("Hello World");
+        assert!(!field.goto_word(10));
+    }
+
+    #[test]
+    fn goto_next_word_advances() {
+        let mut field = InputField::new("");
+        field.insert_str("Hello World");
+        field.cursor_home();
+        assert!(field.goto_next_word());
+        assert_eq!(&field.text[field.cursor..field.cursor + 5], "World");
+    }
+
+    #[test]
+    fn goto_prev_word_retreats() {
+        let mut field = InputField::new("");
+        field.insert_str("Hello World");
+        // Cursor at end. Go to prev word.
+        assert!(field.goto_prev_word());
+        assert_eq!(&field.text[field.cursor..field.cursor + 5], "World");
+        // Go prev again.
+        assert!(field.goto_prev_word());
+        assert_eq!(&field.text[field.cursor..field.cursor + 5], "Hello");
+    }
+
+    #[test]
+    fn goto_next_word_at_end_returns_true() {
+        let mut field = InputField::new("");
+        field.insert_str("Hello");
+        field.cursor_home();
+        // From start, next word goes to end.
+        assert!(field.goto_next_word());
+        assert_eq!(field.cursor, 5);
+    }
+
+    #[test]
+    fn goto_prev_word_at_start_returns_false() {
+        let mut field = InputField::new("");
+        field.insert_str("Hello");
+        field.cursor_home();
+        assert!(!field.goto_prev_word());
+    }
+
+    #[test]
+    fn delete_word_backward_removes_word() {
+        let mut field = InputField::new("");
+        field.insert_str("Hello World");
+        // Cursor at end. Delete word backward should remove "World".
+        field.delete_word_backward();
+        assert_eq!(field.text, "Hello ");
+    }
+
+    #[test]
+    fn delete_word_forward_removes_word() {
+        let mut field = InputField::new("");
+        field.insert_str("Hello World");
+        field.cursor_home();
+        field.delete_word_forward();
+        // goto_next_word from position 0 skips "Hello" + space, lands at "World" (pos 6).
+        // Deletes from 0 to 6, leaving "World".
+        assert_eq!(field.text, "World");
+    }
+
+    #[test]
+    fn delete_word_backward_can_undo() {
+        let mut field = InputField::new("");
+        field.insert_str("Hello World");
+        field.delete_word_backward();
+        assert_eq!(field.text, "Hello ");
+        field.undo();
+        assert_eq!(field.text, "Hello World");
+    }
+
+    #[test]
+    fn delete_word_backward_with_selection() {
+        let mut field = InputField::new("");
+        field.insert_str("Hello World");
+        field.select_all();
+        field.delete_word_backward();
+        assert!(field.text.is_empty());
+    }
+
+    #[test]
+    fn goto_next_word_skips_multiple_spaces() {
+        let mut field = InputField::new("");
+        field.insert_str("Hello   World");
+        field.cursor_home();
+        field.goto_next_word();
+        assert_eq!(&field.text[field.cursor..field.cursor + 5], "World");
     }
 }
