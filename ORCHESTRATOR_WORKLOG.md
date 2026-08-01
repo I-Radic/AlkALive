@@ -343,3 +343,177 @@ Stage Summary:
 - No JS, no DOM, no CPU framebuffer — all rendering happens on the GPU
   via WebGL2 draw calls (TRIANGLES), satisfying ADR 013 (no WASM/DOM
   boundary in the hot path) and the "GPU rendering, not CPU" requirement.
+
+---
+Task ID: 4-5-A
+Agent: general-purpose (Runtime + Shell)
+Task: Build alkalive-runtime-wasm crate + minimal HTML shell
+
+Work Log:
+- Read PURE_ALKALIVE_PIPELINE_PLAN.md (Waves 2/3/4/5/N + ADR compliance table)
+  and DEPLOYMENT_FAILURE_ANALYSIS.md (12 gap list G1–G12). Confirmed this
+  task closes G5 (runtime wiring), G6 (JS frame loop), and the HTML-shell
+  half of G10.
+- Audited `alkalive-backend-wgpu` (1205-line crate, compiles on both
+  native + wasm32): `WgpuRenderer::init_from_canvas(canvas, w, h)` is async
+  returning `Result<Self, String>`; `render_frame(&mut self, &TextSceneData,
+  f32)` clears + draws glyph quads via WebGL2; `resize(&mut self, u32, u32)`;
+  `TextSceneData { text, font_size, rotation_speed, background, text_color }`.
+- Audited `alkalive-compiler`: `compile(&str) -> Result<SceneIR, CompileError>`
+  with `SceneIR { module_id, module_name, background, nodes: Vec<NodeIR> }`;
+  `NodeIR::Text { content, color: ColorIR, font_size, rotation_speed,
+  position }`; `ColorIR::rgb() -> (u8, u8, u8)` (Gold → 0xFF,0xD7,0x00).
+- Read `examples/hello.alk` — the canonical source embedded at build time.
+- Created `crates/alkalive-runtime-wasm/Cargo.toml`:
+  * `crate-type = ["cdylib", "rlib"]`, `path = "src/lib.rs"`
+  * deps: `alkalive-backend-wgpu` (workspace), `alkalive-compiler` (workspace),
+    `alkalive-text` (workspace), `wasm-bindgen` (workspace),
+    `wasm-bindgen-futures = "0.4"`, `js-sys = "0.3"`, `web-sys` with
+    features: `HtmlCanvasElement`, `HtmlInputElement`, `Window`, `Document`,
+    `Element`, `EventTarget`, `KeyboardEvent`, `InputEvent`, `console`,
+    `Performance`.
+- Created `crates/alkalive-runtime-wasm/src/lib.rs` (413 lines):
+  * `#![allow(unsafe_code)]` (matches the backend-wgpu crate convention).
+  * Embeds `examples/hello.alk` via `include_str!("../../../examples/hello.alk")`
+    so the WASM binary owns the scene data at build time.
+  * `Runtime` struct: `renderer: WgpuRenderer`, `scene: TextSceneData`,
+    `time: f32`, `input_text: String`, `original_text: String`.
+  * Thread-local state: `RUNTIME: RefCell<Option<Runtime>>`,
+    `RAF_CLOSURE: RefCell<Option<Closure<dyn FnMut()>>>`,
+    `RESIZE_CLOSURE: RefCell<Option<Closure<dyn FnMut()>>>`.
+  * `#[wasm_bindgen] pub fn start(canvas, ime_input) -> Result<(), JsValue>`:
+    1. Installs a panic hook that surfaces panics as console.error.
+    2. Compiles the embedded `.alk` source via `alkalive_compiler::compile`
+       → `SceneIR`; returns `Err(JsValue)` synchronously if compile fails.
+    3. Lowers `SceneIR` → `TextSceneData` (picks the first `NodeIR::Text`,
+       maps `ColorIR::rgb()` → normalized RGB, copies `font_size` and
+       `rotation_speed` from the IR).
+    4. Reads `canvas.client_width()/client_height()` for initial dimensions.
+    5. Spawns async init via `wasm_bindgen_futures::spawn_local` — calls
+       `WgpuRenderer::init_from_canvas(canvas, w, h).await`, then on
+       success stores the runtime in thread_local, sets up input forwarding,
+       sets up the resize listener, focuses the IME input, and starts the
+       frame loop.
+  * `setup_input_forwarding(&HtmlInputElement)`:
+    - `keydown` listener: forwards printable chars, Backspace, Enter,
+      Escape to `runtime.input_text`; updates `runtime.scene.text` from
+      the buffer (restores `original_text` when buffer empty); ignores
+      Ctrl/Alt/Meta shortcuts; calls `prevent_default()` on consumed keys.
+    - `input` listener: forwards IME composition `data` to the buffer
+      (per ADR 023 — IME bridge).
+    - Both closures `.forget()`-ed to keep them alive for the page lifetime
+      (matches the brief's pattern).
+  * `setup_resize_listener()`: window `resize` event listener stored in
+    `RESIZE_CLOSURE` thread_local; reads `window.inner_width/inner_height`
+    and calls `renderer.resize(w, h)`.
+  * `start_frame_loop()`: builds a `Closure::new(|| ...)` that advances
+    `runtime.time += 1.0/60.0` and calls `renderer.render_frame(&scene,
+    time)`; stores it in `RAF_CLOSURE`; calls `schedule_next_frame()`.
+  * `schedule_next_frame()`: borrows `RAF_CLOSURE`, passes the closure
+    reference to `window.request_animation_frame(cb)` — the WASM module
+    owns the RAF cycle (ADR 013: no WASM/DOM boundary in hot path).
+  * `build_scene_from_ir(&SceneIR) -> TextSceneData`: walks `ir.nodes`,
+    finds the first `NodeIR::Text`, maps IR fields to renderer fields;
+    falls back to `TextSceneData::default()` if no text node is present.
+- Updated root `Cargo.toml`:
+  * Added `crates/alkalive-runtime-wasm` to `members`.
+  * Added `alkalive-backend-wgpu = { path = "crates/alkalive-backend-wgpu" }`
+    and `alkalive-runtime-wasm = { path = "crates/alkalive-runtime-wasm" }`
+    to `[workspace.dependencies]`.
+- Rewrote `deploy/index.html` (24 lines, down from 145):
+  * `<!DOCTYPE html>` + minimal `<head>` (charset, viewport, title).
+  * `<style>`: only `body { margin: 0; overflow: hidden; background: #000; }`,
+    `canvas { display: block; width: 100vw; height: 100vh; }`, and
+    `#ime { position: absolute; left: -9999px; opacity: 0; }` — zero CSS
+    for UI (ADR 020).
+  * `<body>`: only `<canvas id="canvas">` + `<input id="ime" type="text">`
+    — zero DOM elements for UI (ADR 023).
+  * `<script type="module">`: 4 lines — `import init`, `await init(...)`,
+    `getElementById` x2, `await wasm.start(canvas, ime)`. Zero application
+    JS — no frame loop, no input routing, no scene creation, no CSS, no DOM.
+- Compilation fixes after first `cargo check`:
+  * Removed `runtime.renderer.elapsed_seconds()` call (only available on
+    the wasm32 build of WgpuRenderer, not the native stub). Replaced with
+    `runtime.time += 1.0 / 60.0` — matches the brief's example and works
+    on both targets.
+  * Fixed a borrow-checker error in `schedule_next_frame()`: the temporary
+    `Ref` from `cell.borrow()` was being dropped before the closure
+    reference was used. Restructured to keep the borrow alive inside the
+    `RAF_CLOSURE.with(|cell| { ... })` scope.
+- Verified `cargo check -p alkalive-runtime-wasm` passes on native (38.13s).
+- Built with `wasm-pack build crates/alkalive-runtime-wasm --target web
+  --release` (1m 38s). Output: `pkg/alkalive_runtime_wasm.js` (28 KB) +
+  `pkg/alkalive_runtime_wasm_bg.wasm` (1.1 MB).
+- Copied artifacts to `deploy/` with the brief's expected names:
+  * `cp pkg/alkalive_runtime_wasm.js deploy/alkalive_runtime.js`
+  * `cp pkg/alkalive_runtime_wasm_bg.wasm deploy/alkalive_runtime_bg.wasm`
+  (The HTML passes the explicit URL `./alkalive_runtime_bg.wasm` to `init()`,
+   which overrides the JS file's internal default URL.)
+- Verified the WASM binary has the correct magic bytes (`00 61 73 6d`).
+- Verified the JS exports `function start(canvas, ime_input)`.
+
+Stage Summary:
+- New crate `crates/alkalive-runtime-wasm/` (Cargo.toml + 413-line src/lib.rs)
+  is the pure AlkALive runtime entry point. It compiles cleanly on BOTH
+  native (cargo check passes, 38s) and wasm32 (wasm-pack build succeeds,
+  1m 38s). No compiler warnings on either target.
+- The WASM module OWNS the entire rendering pipeline:
+  1. Scene loading — `examples/hello.alk` embedded via `include_str!`,
+     compiled at startup via `alkalive_compiler::compile`, lowered to
+     `TextSceneData` for the renderer.
+  2. GPU init — `WgpuRenderer::init_from_canvas(canvas, w, h)` called from
+     inside WASM via `wasm_bindgen_futures::spawn_local`.
+  3. Frame loop — `requestAnimationFrame` called from Rust (via
+     `window.request_animation_frame`); the closure is stored in
+     thread_local `RAF_CLOSURE` and re-scheduled each frame. No JS frame
+     driver.
+  4. Input handling — `keydown` + `input` listeners attached to the hidden
+     IME `<input>` via `ime_input.add_event_listener_with_callback` from
+     Rust. Closures `.forget()`-ed to keep alive. ADR 023 IME bridge.
+  5. Resize handling — `window.resize` listener attached from Rust;
+     `renderer.resize(w, h)` called on each resize.
+- The HTML shell `deploy/index.html` (24 lines) is the minimum viable:
+  - Zero application JavaScript (only `import init`, `await init(...)`,
+    `getElementById` x2, `await wasm.start(canvas, ime)` — 4 statements).
+  - Zero CSS for UI (only `body { margin: 0; }`, canvas sizing, and
+    hiding `#ime` off-screen — no colors, fonts, layouts, or UI styling).
+  - Zero DOM elements for UI (only `<canvas>` + hidden `<input>` per
+    ADR 023 — no `<div>`, `<button>`, `<span>`, status indicators, etc.).
+- The previous broken deployment artifacts (`alkalive_app.js`,
+  `alkalive_app_bg.wasm`) are kept in `deploy/` for now (not referenced by
+  the new `index.html`, but left in place to avoid breaking any other
+  references — e.g. the Next.js page at `localhost:3000`).
+- Output sizes:
+  - `deploy/alkalive_runtime.js` — 28 KB (wasm-bindgen glue, ~700 lines)
+  - `deploy/alkalive_runtime_bg.wasm` — 1.1 MB (release build with opt-level=2;
+    could be smaller with `opt-level="z"` + LTO via the existing
+    `wasm-release` profile, but `wasm-pack build --release` uses the default
+    release profile)
+  - `deploy/index.html` — 756 bytes (24 lines)
+- ADR compliance:
+  - ADR 013 (no WASM/DOM boundary in hot path): ✅ frame loop runs from
+    inside WASM; JS only instantiates + calls `start()` once.
+  - ADR 020 (DOM = metadata only + IME exception): ✅ HTML has only
+    `<canvas>` + hidden `<input>`; no UI DOM elements.
+  - ADR 023 (hidden `<input>` for IME composition): ✅ single hidden input
+    in shell; WASM attaches `keydown` + `input` listeners.
+  - ADR 022 (HarfRust in-WASM text stack): ✅ the runtime depends on
+    `alkalive-text` (transitively via `alkalive-backend-wgpu`); the renderer
+    shapes + rasterizes via HarfRust on the first frame.
+  - ADR 008 (`.alk` compiles to WASM): ✅ the runtime embeds
+    `examples/hello.alk` and compiles it at startup via
+    `alkalive_compiler::compile`.
+- Known limitations / future work:
+  - The renderer's glyph atlas is uploaded only on the first frame
+    (`atlas_uploaded` flag in `WgpuRenderer`). Updating `scene.text` from
+    the input handler does not yet re-upload the atlas, so typed text won't
+    visually replace the "Hello World!" text until a future atlas-
+    invalidation mechanism is added to the backend. The input forwarding
+    scaffolding (event listeners + buffer + scene.text mutation) is in
+    place per ADR 023; only the visual feedback loop is incomplete.
+  - Time advances at a fixed `1.0/60.0` per frame rather than using the
+    renderer's high-resolution `performance.now()` timer (the native stub
+    of `WgpuRenderer` doesn't expose `elapsed_seconds`). A future
+    `cfg(target_arch = "wasm32")` branch could use the performance timer
+    for smoother animation; for now the nominal-60fps increment is
+    sufficient for the rotating-text Hello World.

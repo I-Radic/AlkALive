@@ -410,8 +410,8 @@ mod wasm {
         u_rotation: WebGlUniformLocation,
         /// Cached location of the `canvas_size` uniform.
         u_canvas_size: WebGlUniformLocation,
-        /// Cached location of the `time` uniform.
-        u_time: WebGlUniformLocation,
+        /// Cached location of the `time` uniform (optional — may be optimized away).
+        u_time: Option<WebGlUniformLocation>,
         /// Cached location of the `text_color` uniform.
         u_text_color: WebGlUniformLocation,
         /// Cached location of the `glyph_texture` sampler.
@@ -543,15 +543,15 @@ mod wasm {
             .map_err(|e| format!("tex_image_2d initial failed: {:?}", e))?;
 
             // Cache uniform locations.
+            // Note: `time` uniform may be optimized away by the GLSL compiler
+            // if unused in the shader. Make it optional.
             let u_rotation = gl
                 .get_uniform_location(&program, "rotation")
                 .ok_or_else(|| "uniform 'rotation' not found".to_string())?;
             let u_canvas_size = gl
                 .get_uniform_location(&program, "canvas_size")
                 .ok_or_else(|| "uniform 'canvas_size' not found".to_string())?;
-            let u_time = gl
-                .get_uniform_location(&program, "time")
-                .ok_or_else(|| "uniform 'time' not found".to_string())?;
+            let u_time = gl.get_uniform_location(&program, "time");
             let u_text_color = gl
                 .get_uniform_location(&program, "text_color")
                 .ok_or_else(|| "uniform 'text_color' not found".to_string())?;
@@ -637,7 +637,9 @@ mod wasm {
             let rotation = text_scene.rotation_speed * time;
             self.gl.uniform1f(Some(&self.u_rotation), rotation);
             self.gl.uniform2f(Some(&self.u_canvas_size), self.width as f32, self.height as f32);
-            self.gl.uniform1f(Some(&self.u_time), time);
+            if let Some(ref u_time) = self.u_time {
+                self.gl.uniform1f(Some(u_time), time);
+            }
             self.gl.uniform4f(
                 Some(&self.u_text_color),
                 text_scene.text_color.0,

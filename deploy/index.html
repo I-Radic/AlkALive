@@ -1,145 +1,24 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AlkALive — Hello World</title>
-    <meta name="description" content="AlkALive GPU Runtime — Hello World demo rendered entirely via the AlkaLive text stack and CPU software renderer.">
-    <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-
-        html, body {
-            width: 100%;
-            height: 100%;
-            overflow: hidden;
-            background: #000;
-        }
-
-        body {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }
-
-        canvas {
-            display: block;
-            width: 100vw;
-            height: 100vh;
-            background: #000;
-        }
-
-        #status {
-            position: fixed;
-            top: 12px;
-            left: 12px;
-            color: #888;
-            font-family: monospace;
-            font-size: 12px;
-            z-index: 10;
-        }
-
-        #status.error {
-            color: #f44;
-        }
-
-        #status.ready {
-            color: #4f4;
-        }
-    </style>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AlkALive — Hello World</title>
+  <style>
+    body { margin: 0; overflow: hidden; background: #000; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    #ime { position: absolute; left: -9999px; opacity: 0; }
+  </style>
 </head>
 <body>
-    <div id="status">Loading AlkALive runtime…</div>
-    <canvas id="canvas"></canvas>
-
-    <script type="module">
-        import init, {
-            init as wasmInit,
-            tick,
-            resize,
-            get_framebuffer_ptr,
-            get_framebuffer_len,
-            get_width,
-            get_height,
-        } from './alkalive_app.js';
-
-        const statusEl = document.getElementById('status');
-        const canvas = document.getElementById('canvas');
-        const ctx = canvas.getContext('2d', { alpha: false });
-
-        async function run() {
-            try {
-                // Initialize the WASM module.
-                const wasm = await init('./alkalive_app_bg.wasm');
-
-                // Set canvas to device pixel dimensions.
-                function setCanvasSize() {
-                    canvas.width = window.innerWidth;
-                    canvas.height = window.innerHeight;
-                }
-                setCanvasSize();
-
-                // Initialize the AlkALive application.
-                wasmInit(canvas.width, canvas.height);
-
-                statusEl.textContent = 'AlkALive ready — rendering Hello World!';
-                statusEl.classList.add('ready');
-
-                // Handle resize.
-                let resizeTimer = null;
-                window.addEventListener('resize', () => {
-                    if (resizeTimer) clearTimeout(resizeTimer);
-                    resizeTimer = setTimeout(() => {
-                        setCanvasSize();
-                        resize(canvas.width, canvas.height);
-                    }, 100);
-                });
-
-                // Frame loop.
-                function frame() {
-                    // Render one frame in WASM.
-                    tick();
-
-                    // Get the framebuffer pointer and length.
-                    const ptr = get_framebuffer_ptr();
-                    const len = get_framebuffer_len();
-
-                    if (ptr === 0 || len === 0) {
-                        requestAnimationFrame(frame);
-                        return;
-                    }
-
-                    // Create a Uint8Array view into WASM memory (no copy).
-                    const fb = new Uint8Array(wasm.memory.buffer, ptr, len);
-
-                    // Create ImageData from the framebuffer.
-                    // The framebuffer is RGBA (4 bytes per pixel).
-                    const width = get_width();
-                    const height = get_height();
-                    const imageData = new ImageData(
-                        new Uint8ClampedArray(fb.buffer, fb.byteOffset, fb.byteLength),
-                        width,
-                        height
-                    );
-
-                    // Draw to canvas.
-                    ctx.putImageData(imageData, 0, 0);
-
-                    requestAnimationFrame(frame);
-                }
-
-                requestAnimationFrame(frame);
-            } catch (err) {
-                statusEl.textContent = 'Error: ' + err.message;
-                statusEl.classList.add('error');
-                console.error(err);
-            }
-        }
-
-        run();
-    </script>
+  <canvas id="canvas"></canvas>
+  <input id="ime" type="text" />
+  <script type="module">
+    import init from './alkalive_runtime.js';
+    const wasm = await init('./alkalive_runtime_bg.wasm');
+    const canvas = document.getElementById('canvas');
+    const ime = document.getElementById('ime');
+    await wasm.start(canvas, ime);
+  </script>
 </body>
 </html>

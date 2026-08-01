@@ -1,0 +1,34 @@
+[package]
+name = "alkalive-runtime-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "AlkALive pure runtime — WASM entry point with GPU rendering"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[dependencies]
+# Internal workspace crates — GPU backend, compiler, and text stack.
+alkalive-backend-wgpu = { workspace = true }
+alkalive-compiler = { workspace = true }
+alkalive-text = { workspace = true }
+
+# wasm-bindgen + web-sys for browser DOM/Canvas/WebGL2/event bindings.
+wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+  "HtmlCanvasElement",
+  "HtmlInputElement",
+  "Window",
+  "Document",
+  "Element",
+  "EventTarget",
+  "KeyboardEvent",
+  "InputEvent",
+  "console",
+  "Performance",
+] }
