@@ -733,6 +733,22 @@ pub fn handle_key_press(key: &str) -> bool {
                     // Enter could submit the form in the future.
                     true
                 }
+                "F3" => {
+                    // Find next (F3).
+                    a.input_field.find_next();
+                    true
+                }
+                "Shift+F3" => {
+                    // Find previous (Shift+F3).
+                    a.input_field.find_prev();
+                    true
+                }
+                "Escape" => {
+                    // Escape clears search.
+                    a.input_field.clear_search();
+                    a.input_field.clear_selection();
+                    true
+                }
                 _ => false,
             }
         } else {
@@ -941,6 +957,95 @@ pub fn clear_history() {
     });
 }
 
+// ============================================================================
+// Search / Find Operations
+// ============================================================================
+
+/// Search for a query in the input text. Case-insensitive.
+/// Returns the number of matches found. Selects the first match.
+#[wasm_bindgen]
+pub fn search_text(query: &str) -> usize {
+    APP.with(|app| {
+        if let Some(a) = app.borrow_mut().as_mut() {
+            a.input_field.search(query)
+        } else {
+            0
+        }
+    })
+}
+
+/// Clear the search (remove highlights).
+#[wasm_bindgen]
+pub fn clear_search() {
+    APP.with(|app| {
+        if let Some(a) = app.borrow_mut().as_mut() {
+            a.input_field.clear_search();
+        }
+    });
+}
+
+/// Find the next match. Returns true if found.
+#[wasm_bindgen]
+pub fn find_next() -> bool {
+    APP.with(|app| {
+        if let Some(a) = app.borrow_mut().as_mut() {
+            a.input_field.find_next()
+        } else {
+            false
+        }
+    })
+}
+
+/// Find the previous match. Returns true if found.
+#[wasm_bindgen]
+pub fn find_prev() -> bool {
+    APP.with(|app| {
+        if let Some(a) = app.borrow_mut().as_mut() {
+            a.input_field.find_prev()
+        } else {
+            false
+        }
+    })
+}
+
+/// Get the total number of search matches.
+#[wasm_bindgen]
+pub fn get_match_count() -> usize {
+    APP.with(|app| {
+        let app = app.borrow();
+        app.as_ref().map_or(0, |a| a.input_field.match_count())
+    })
+}
+
+/// Get the current match index (1-based, 0 if no matches).
+#[wasm_bindgen]
+pub fn get_current_match() -> usize {
+    APP.with(|app| {
+        let app = app.borrow();
+        app.as_ref().map_or(0, |a| a.input_field.current_match_display())
+    })
+}
+
+/// Check if search is active.
+#[wasm_bindgen]
+pub fn is_searching() -> bool {
+    APP.with(|app| {
+        let app = app.borrow();
+        app.as_ref().map_or(false, |a| a.input_field.is_searching())
+    })
+}
+
+/// Select the entire line (all text for single-line input).
+/// Used by triple-click.
+#[wasm_bindgen]
+pub fn select_line() {
+    APP.with(|app| {
+        if let Some(a) = app.borrow_mut().as_mut() {
+            a.input_field.select_line();
+        }
+    });
+}
+
 /// Toggle the input field visibility.
 #[wasm_bindgen]
 pub fn set_input_enabled(enabled: bool) {
@@ -1084,6 +1189,42 @@ pub fn double_click_input(x: f32, y: f32) -> bool {
                 a.input_field.click_at(text_relative_x, false);
                 // Now select the word at the cursor.
                 a.input_field.select_word();
+                return true;
+            }
+            false
+        } else {
+            false
+        }
+    })
+}
+
+/// Handle triple-click on the input field to select the entire line.
+/// Returns true if the triple-click was on the input field.
+#[wasm_bindgen]
+pub fn triple_click_input(x: f32, y: f32) -> bool {
+    APP.with(|app| {
+        let mut app = app.borrow_mut();
+        if let Some(a) = app.as_mut() {
+            if !a.input_enabled {
+                return false;
+            }
+            let width = a.renderer.width as f32;
+            let height = a.renderer.height as f32;
+            let field_w = (width * 0.6).min(500.0);
+            let field_h = 44.0;
+            let field_x = (width - field_w) / 2.0;
+            let title_bottom = a.text_baseline_y + 20.0;
+            let field_y = title_bottom + 40.0;
+
+            if field_y + field_h > height {
+                return false;
+            }
+
+            if x >= field_x && x <= field_x + field_w
+                && y >= field_y && y <= field_y + field_h
+            {
+                a.input_field.set_focus(true);
+                a.input_field.select_line();
                 return true;
             }
             false

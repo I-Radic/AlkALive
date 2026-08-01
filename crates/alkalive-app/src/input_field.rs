@@ -69,6 +69,13 @@ pub struct InputField {
     redo_stack: Vec<TextState>,
     /// Whether to suppress history recording (during undo/redo operations).
     suppress_history: bool,
+    /// Search query string (empty = no search active).
+    pub search_query: String,
+    /// List of match positions (byte offsets) for the current search query.
+    /// Each entry is (start, end) byte offset.
+    pub search_matches: Vec<(usize, usize)>,
+    /// Index of the currently highlighted match (for find-next/find-prev).
+    pub current_match: usize,
 }
 
 impl InputField {
@@ -92,6 +99,9 @@ impl InputField {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             suppress_history: false,
+            search_query: String::new(),
+            search_matches: Vec::new(),
+            current_match: 0,
         }
     }
 
@@ -189,6 +199,110 @@ impl InputField {
     pub fn clear_history(&mut self) {
         self.undo_stack.clear();
         self.redo_stack.clear();
+    }
+
+    // ========================================================================
+    // Search / Find
+    // ========================================================================
+
+    /// Set the search query and find all matches in the text.
+    /// Case-insensitive search. Updates `search_matches`.
+    /// Returns the number of matches found.
+    pub fn search(&mut self, query: &str) -> usize {
+        self.search_query = query.to_string();
+        self.search_matches.clear();
+        self.current_match = 0;
+
+        if query.is_empty() || self.text.is_empty() {
+            return 0;
+        }
+
+        let query_lower = query.to_lowercase();
+        let text_lower = self.text.to_lowercase();
+
+        // Find all occurrences (case-insensitive).
+        let mut start = 0;
+        while let Some(pos) = text_lower[start..].find(&query_lower) {
+            let match_start = start + pos;
+            let match_end = match_start + query.len();
+            self.search_matches.push((match_start, match_end));
+            start = match_end;
+            if start >= text_lower.len() {
+                break;
+            }
+        }
+
+        if !self.search_matches.is_empty() {
+            // Select the first match.
+            let (ms, me) = self.search_matches[0];
+            self.anchor = ms;
+            self.cursor = me;
+        }
+
+        self.search_matches.len()
+    }
+
+    /// Clear the search (remove highlights).
+    pub fn clear_search(&mut self) {
+        self.search_query.clear();
+        self.search_matches.clear();
+        self.current_match = 0;
+    }
+
+    /// Find the next match (forward from cursor).
+    /// Returns true if a match was found and selected.
+    pub fn find_next(&mut self) -> bool {
+        if self.search_matches.is_empty() {
+            return false;
+        }
+        self.current_match = (self.current_match + 1) % self.search_matches.len();
+        let (ms, me) = self.search_matches[self.current_match];
+        self.anchor = ms;
+        self.cursor = me;
+        true
+    }
+
+    /// Find the previous match (backward from cursor).
+    /// Returns true if a match was found and selected.
+    pub fn find_prev(&mut self) -> bool {
+        if self.search_matches.is_empty() {
+            return false;
+        }
+        if self.current_match == 0 {
+            self.current_match = self.search_matches.len() - 1;
+        } else {
+            self.current_match -= 1;
+        }
+        let (ms, me) = self.search_matches[self.current_match];
+        self.anchor = ms;
+        self.cursor = me;
+        true
+    }
+
+    /// Get the number of search matches.
+    pub fn match_count(&self) -> usize {
+        self.search_matches.len()
+    }
+
+    /// Get the current match index (1-based for display, 0 if no matches).
+    pub fn current_match_display(&self) -> usize {
+        if self.search_matches.is_empty() {
+            0
+        } else {
+            self.current_match + 1
+        }
+    }
+
+    /// Check if search is active (non-empty query).
+    pub fn is_searching(&self) -> bool {
+        !self.search_query.is_empty()
+    }
+
+    /// Select the entire line (all text, since this is a single-line input).
+    /// Used by triple-click.
+    pub fn select_line(&mut self) {
+        self.anchor = 0;
+        self.cursor = self.text.len();
     }
 
     /// Returns true if there is an active selection (anchor != cursor).
@@ -1368,5 +1482,145 @@ mod tests {
         assert_eq!(field.text, "Hell");
         // After undo, cursor should be at end of "Hell" (4)
         assert_eq!(field.cursor, 4);
+    }
+
+    // --- Search / Find tests ---
+
+    #[test]
+    fn search_empty_query_returns_zero() {
+        let mut field = InputField::new("");
+        field.insert_str("Hello World");
+        assert_eq!(field.search(""), 0);
+    }
+
+    #[test]
+    fn search_empty_text_returns_zero() {
+        let mut field = InputField::new("");
+        assert_eq!(field.search("test"), 0);
+    }
+
+    #[test]
+    fn search_finds_single_match() {
+        let mut field = InputField::new("");
+        field.insert_str("Hello World");
+        let count = field.search("World");
+        assert_eq!(count, 1);
+        assert_eq!(field.match_count(), 1);
+        assert!(field.is_searching());
+    }
+
+    #[test]
+    fn search_finds_multiple_matches() {
+        let mut field = InputField::new("");
+        field.insert_str("Hello Hello Hello");
+        let count = field.search("hello");
+        assert_eq!(count, 3);
+        assert_eq!(field.match_count(), 3);
+    }
+
+    #[test]
+    fn search_case_insensitive() {
+        let mut field = InputField::new("");
+        field.insert_str("Hello HELLO hello");
+        let count = field.search("hello");
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn search_no_match() {
+        let mut field = InputField::new("");
+        field.insert_str("Hello World");
+        let count = field.search("xyz");
+        assert_eq!(count, 0);
+        assert_eq!(field.match_count(), 0);
+    }
+
+    #[test]
+    fn search_selects_first_match() {
+        let mut field = InputField::new("");
+        field.insert_str("Hello World");
+        field.search("World");
+        assert!(field.has_selection());
+        assert_eq!(field.selected_text(), "World");
+    }
+
+    #[test]
+    fn find_next_cycles_through_matches() {
+        let mut field = InputField::new("");
+        field.insert_str("aaa aaa aaa");
+        field.search("aaa");
+        assert_eq!(field.current_match_display(), 1);
+        field.find_next();
+        assert_eq!(field.current_match_display(), 2);
+        field.find_next();
+        assert_eq!(field.current_match_display(), 3);
+        field.find_next(); // Should cycle back to 1
+        assert_eq!(field.current_match_display(), 1);
+    }
+
+    #[test]
+    fn find_prev_cycles_through_matches() {
+        let mut field = InputField::new("");
+        field.insert_str("aaa aaa aaa");
+        field.search("aaa");
+        assert_eq!(field.current_match_display(), 1);
+        field.find_prev(); // Should go to last (3)
+        assert_eq!(field.current_match_display(), 3);
+        field.find_prev();
+        assert_eq!(field.current_match_display(), 2);
+    }
+
+    #[test]
+    fn find_next_no_matches_returns_false() {
+        let mut field = InputField::new("");
+        field.insert_str("Hello");
+        assert!(!field.find_next());
+    }
+
+    #[test]
+    fn clear_search_removes_highlights() {
+        let mut field = InputField::new("");
+        field.insert_str("Hello World");
+        field.search("Hello");
+        assert!(field.is_searching());
+        field.clear_search();
+        assert!(!field.is_searching());
+        assert_eq!(field.match_count(), 0);
+    }
+
+    #[test]
+    fn current_match_display_zero_when_no_matches() {
+        let mut field = InputField::new("");
+        field.insert_str("Hello");
+        field.search("xyz");
+        assert_eq!(field.current_match_display(), 0);
+    }
+
+    #[test]
+    fn search_overlapping_not_counted() {
+        let mut field = InputField::new("");
+        // "aaa" contains "aa" at position 0 and 1, but non-overlapping search
+        // should find "aa" at position 0 and then skip to position 2 (no match).
+        field.insert_str("aaa");
+        let count = field.search("aa");
+        assert_eq!(count, 1, "Non-overlapping search should find 1 match in 'aaa'");
+    }
+
+    // --- Line selection tests ---
+
+    #[test]
+    fn select_line_selects_all_text() {
+        let mut field = InputField::new("");
+        field.insert_str("Hello World");
+        field.select_line();
+        assert!(field.has_selection());
+        assert_eq!(field.selected_text(), "Hello World");
+    }
+
+    #[test]
+    fn select_line_on_empty_does_nothing() {
+        let mut field = InputField::new("");
+        field.select_line();
+        assert!(!field.has_selection());
     }
 }

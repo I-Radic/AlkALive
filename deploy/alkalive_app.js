@@ -40,6 +40,13 @@ export function clear_particles() {
 }
 
 /**
+ * Clear the search (remove highlights).
+ */
+export function clear_search() {
+    wasm.clear_search();
+}
+
+/**
  * Clear the current selection (collapse to cursor).
  */
 export function clear_selection() {
@@ -108,6 +115,24 @@ export function double_click_input(x, y) {
 }
 
 /**
+ * Find the next match. Returns true if found.
+ * @returns {boolean}
+ */
+export function find_next() {
+    const ret = wasm.find_next();
+    return ret !== 0;
+}
+
+/**
+ * Find the previous match. Returns true if found.
+ * @returns {boolean}
+ */
+export function find_prev() {
+    const ret = wasm.find_prev();
+    return ret !== 0;
+}
+
+/**
  * Get the clipboard content.
  * @returns {string}
  */
@@ -122,6 +147,15 @@ export function get_clipboard() {
     } finally {
         wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
     }
+}
+
+/**
+ * Get the current match index (1-based, 0 if no matches).
+ * @returns {number}
+ */
+export function get_current_match() {
+    const ret = wasm.get_current_match();
+    return ret >>> 0;
 }
 
 /**
@@ -184,6 +218,15 @@ export function get_input_text() {
     } finally {
         wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
     }
+}
+
+/**
+ * Get the total number of search matches.
+ * @returns {number}
+ */
+export function get_match_count() {
+    const ret = wasm.get_match_count();
+    return ret >>> 0;
 }
 
 /**
@@ -338,6 +381,15 @@ export function is_rainbow_mode() {
 }
 
 /**
+ * Check if search is active.
+ * @returns {boolean}
+ */
+export function is_searching() {
+    const ret = wasm.is_searching();
+    return ret !== 0;
+}
+
+/**
  * Handle mouse drag for text selection. Called when the mouse moves while
  * the button is held down (after a click on the input field).
  * Updates the cursor to the dragged position, extending the selection.
@@ -383,10 +435,31 @@ export function resize(width, height) {
 }
 
 /**
+ * Search for a query in the input text. Case-insensitive.
+ * Returns the number of matches found. Selects the first match.
+ * @param {string} query
+ * @returns {number}
+ */
+export function search_text(query) {
+    const ptr0 = passStringToWasm0(query, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.search_text(ptr0, len0);
+    return ret >>> 0;
+}
+
+/**
  * Select all text in the input field.
  */
 export function select_all_input() {
     wasm.select_all_input();
+}
+
+/**
+ * Select the entire line (all text for single-line input).
+ * Used by triple-click.
+ */
+export function select_line() {
+    wasm.select_line();
 }
 
 /**
@@ -549,6 +622,18 @@ export function tick() {
  */
 export function toggle_input_focus() {
     wasm.toggle_input_focus();
+}
+
+/**
+ * Handle triple-click on the input field to select the entire line.
+ * Returns true if the triple-click was on the input field.
+ * @param {number} x
+ * @param {number} y
+ * @returns {boolean}
+ */
+export function triple_click_input(x, y) {
+    const ret = wasm.triple_click_input(x, y);
+    return ret !== 0;
 }
 
 /**
