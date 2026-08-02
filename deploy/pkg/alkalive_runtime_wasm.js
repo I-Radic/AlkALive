@@ -155,6 +155,9 @@ function __wbg_get_imports() {
         __wbg_deleteVertexArray_475d4e969aac1dd0: function(arg0, arg1) {
             arg0.deleteVertexArray(arg1);
         },
+        __wbg_disable_1659d1b7d50c31e7: function(arg0, arg1) {
+            arg0.disable(arg1 >>> 0);
+        },
         __wbg_drawArrays_b0c59a6e158122f2: function(arg0, arg1, arg2, arg3) {
             arg0.drawArrays(arg1 >>> 0, arg2, arg3);
         },
@@ -270,6 +273,9 @@ function __wbg_get_imports() {
         __wbg_resolve_2191a4dfe481c25b: function(arg0) {
             const ret = Promise.resolve(arg0);
             return ret;
+        },
+        __wbg_scissor_105e756596bc35df: function(arg0, arg1, arg2, arg3, arg4) {
+            arg0.scissor(arg1, arg2, arg3, arg4);
         },
         __wbg_set_height_7d9d8f892e6964c6: function(arg0, arg1) {
             arg0.height = arg1 >>> 0;

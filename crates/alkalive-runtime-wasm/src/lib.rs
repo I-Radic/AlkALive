@@ -203,6 +203,9 @@ async fn init_runtime(
 /// scene and translates its fields. Falls back to the default
 /// golden-on-black "Hello World!" scene if no text node is present.
 fn build_scene_from_ir(ir: &alkalive_compiler::SceneIR) -> alkalive_backend_wgpu::TextSceneData {
+    let mut scene = alkalive_backend_wgpu::TextSceneData::default();
+
+    // Extract text node
     for node in &ir.nodes {
         if let alkalive_compiler::NodeIR::Text {
             content,
@@ -213,22 +216,27 @@ fn build_scene_from_ir(ir: &alkalive_compiler::SceneIR) -> alkalive_backend_wgpu
         } = node
         {
             let (r, g, b) = color.rgb();
-            return alkalive_backend_wgpu::TextSceneData {
-                text: content.clone(),
-                font_size: *font_size,
-                rotation_speed: *rotation_speed,
-                background: ir.background,
-                text_color: (
-                    r as f32 / 255.0,
-                    g as f32 / 255.0,
-                    b as f32 / 255.0,
-                    1.0,
-                ),
-            };
+            scene.text = content.clone();
+            scene.font_size = *font_size;
+            scene.rotation_speed = *rotation_speed;
+            scene.background = ir.background;
+            scene.text_color = (
+                r as f32 / 255.0,
+                g as f32 / 255.0,
+                b as f32 / 255.0,
+                1.0,
+            );
         }
     }
-    // Fallback: the default golden-on-black "Hello World!" scene.
-    alkalive_backend_wgpu::TextSceneData::default()
+
+    // Extract input field node
+    for node in &ir.nodes {
+        if let alkalive_compiler::NodeIR::InputField { placeholder, .. } = node {
+            scene.input_placeholder = placeholder.clone();
+        }
+    }
+
+    scene
 }
 
 // ---------------------------------------------------------------------------
@@ -274,13 +282,8 @@ fn setup_input_forwarding(ime_input: &web_sys::HtmlInputElement) -> Result<(), J
                     handled = true;
                 }
                 if handled {
-                    // Update the scene's text from the input buffer (or
-                    // restore the original when the buffer is empty).
-                    runtime.scene.text = if runtime.input_text.is_empty() {
-                        runtime.original_text.clone()
-                    } else {
-                        runtime.input_text.clone()
-                    };
+                    // Update the input field text on the scene (not the title).
+                    runtime.scene.input_text = runtime.input_text.clone();
                 }
             }
         });
@@ -303,7 +306,7 @@ fn setup_input_forwarding(ime_input: &web_sys::HtmlInputElement) -> Result<(), J
             RUNTIME.with(|rt| {
                 if let Some(runtime) = rt.borrow_mut().as_mut() {
                     runtime.input_text.push_str(&text);
-                    runtime.scene.text = runtime.input_text.clone();
+                    runtime.scene.input_text = runtime.input_text.clone();
                 }
             });
         }

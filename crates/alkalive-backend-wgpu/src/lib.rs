@@ -67,6 +67,10 @@ pub struct TextSceneData {
     /// Text color as normalized RGBA `(0.0–1.0)`. Default golden =
     /// `(1.0, 0.843, 0.0, 1.0)` (`#FFD700`).
     pub text_color: (f32, f32, f32, f32),
+    /// Input field text (what the user has typed). Empty string = show placeholder.
+    pub input_text: String,
+    /// Input field placeholder text (shown when input_text is empty).
+    pub input_placeholder: String,
 }
 
 impl Default for TextSceneData {
@@ -78,6 +82,8 @@ impl Default for TextSceneData {
             rotation_speed: 0.5,
             background: (0, 0, 0),
             text_color: (1.0, 0.843, 0.0, 1.0), // gold #FFD700
+            input_text: String::new(),
+            input_placeholder: "Type here...".to_string(),
         }
     }
 }
@@ -87,6 +93,8 @@ impl TextSceneData {
     pub fn new(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
+            input_text: String::new(),
+            input_placeholder: "Type here...".to_string(),
             ..Default::default()
         }
     }
@@ -445,6 +453,8 @@ mod wasm {
         atlas_uploaded: bool,
         /// The current vertex count (6 × number of glyph quads).
         vertex_count: u32,
+        /// Last input text rendered (to detect changes for atlas re-upload).
+        last_input_text: String,
     }
 
     impl WgpuRenderer {
@@ -614,12 +624,14 @@ mod wasm {
                 width,
                 height,
                 atlas_uploaded: false,
+                last_input_text: String::new(),
                 vertex_count: 0,
             })
         }
 
         /// Render one frame: clear to the background color, render the text
-        /// quads (golden by default) with Y-axis rotation animated by `time`.
+        /// quads (golden by default) with Y-axis rotation animated by `time`,
+        /// then render the input field below the title.
         ///
         /// `text_scene.text_color` modulates the fragment output; the glyph
         /// atlas is sampled for alpha.
@@ -627,17 +639,25 @@ mod wasm {
         /// On the first call, the glyph atlas is rasterized via
         /// `alkalive-text` (HarfRust shaping + glyph rasterization) and
         /// uploaded to the GPU texture. Subsequent calls re-use the cached
-        /// atlas.
+        /// atlas unless the input text changes (which triggers a re-upload).
         pub fn render_frame(&mut self, text_scene: &TextSceneData, time: f32) {
-            // 1. Shape + rasterize the text on the first frame, then cache.
-            //    (Must complete before any `self.gl.X(...)` borrow below.)
-            if !self.atlas_uploaded {
-                if let Err(e) = self.upload_text_atlas(&text_scene.text, text_scene.font_size) {
+            // 1. Shape + rasterize the title text on the first frame.
+            //    Also re-upload if the input text changed (for the input field).
+            let input_display = if text_scene.input_text.is_empty() {
+                text_scene.input_placeholder.clone()
+            } else {
+                text_scene.input_text.clone()
+            };
+            let combined_text = format!("{}\n{}", text_scene.text, input_display);
+
+            if !self.atlas_uploaded || self.last_input_text != input_display {
+                if let Err(e) = self.upload_text_atlas(&combined_text, text_scene.font_size) {
                     web_sys::console::error_1(
                         &format!("alkalive-backend-wgpu: atlas upload failed: {}", e).into(),
                     );
                 }
                 self.atlas_uploaded = true;
+                self.last_input_text = input_display.clone();
             }
 
             // 2. Set the viewport (in case the canvas was resized).
@@ -648,7 +668,17 @@ mod wasm {
             self.gl.clear_color(br, bg, bb, 1.0);
             self.gl.clear(WebGl2RenderingContext::COLOR_BUFFER_BIT);
 
-            // 4. Bind program + uniforms.
+            // 4. Draw the input field background rectangle (dark, below title).
+            //    Position: centered horizontally, below the title text.
+            let field_w = (self.width as f32 * 0.5).min(400.0);
+            let field_h = 40.0;
+            let field_x = (self.width as f32 - field_w) * 0.5;
+            let field_y = (self.height as f32 * 0.5) + text_scene.font_size * 0.5 + 20.0;
+
+            self.draw_rect_filled(field_x, field_y, field_w, field_h, 0.05, 0.05, 0.08, 0.9);
+            self.draw_rect_outline(field_x, field_y, field_w, field_h, 0.8, 0.65, 0.0, 0.8);
+
+            // 5. Bind program + uniforms for text rendering.
             self.gl.use_program(Some(&self.program));
 
             let rotation = text_scene.rotation_speed * time;
@@ -665,12 +695,12 @@ mod wasm {
                 text_scene.text_color.3,
             );
 
-            // 5. Bind glyph atlas texture to texture unit 0.
+            // 6. Bind glyph atlas texture to texture unit 0.
             self.gl.active_texture(WebGl2RenderingContext::TEXTURE0);
             self.gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(&self.glyph_texture));
             self.gl.uniform1i(Some(&self.u_glyph_texture), 0);
 
-            // 6. Bind VAO + draw.
+            // 7. Bind VAO + draw title text (with rotation).
             self.gl.bind_vertex_array(Some(&self.vao));
             if self.vertex_count > 0 {
                 self.gl.draw_arrays(
@@ -679,6 +709,41 @@ mod wasm {
                     self.vertex_count as i32,
                 );
             }
+        }
+
+        /// Draw a filled rectangle using gl.LINES or gl.TRIANGLE_STRIP.
+        /// Uses a simple immediate-mode approach with a temporary buffer.
+        fn draw_rect_filled(&self, x: f32, y: f32, w: f32, h: f32, r: f32, g: f32, b: f32, a: f32) {
+            // We use scissor test for a filled rect — simplest approach in WebGL2
+            // without a separate shader. Clear the region to the desired color.
+            self.gl.enable(WebGl2RenderingContext::SCISSOR_TEST);
+            self.gl.scissor(x as i32, (self.height as f32 - y - h) as i32, w as i32, h as i32);
+            self.gl.clear_color(r, g, b, a);
+            self.gl.clear(WebGl2RenderingContext::COLOR_BUFFER_BIT);
+            self.gl.disable(WebGl2RenderingContext::SCISSOR_TEST);
+        }
+
+        /// Draw a rectangle outline using gl.LINES.
+        fn draw_rect_outline(&self, x: f32, y: f32, w: f32, h: f32, r: f32, g: f32, b: f32, a: f32) {
+            // Use scissor test for top, bottom, left, right edges
+            let line_w = 2.0;
+            self.gl.enable(WebGl2RenderingContext::SCISSOR_TEST);
+            self.gl.clear_color(r, g, b, a);
+
+            // Top edge
+            self.gl.scissor(x as i32, (self.height as f32 - y - line_w) as i32, w as i32, line_w as i32);
+            self.gl.clear(WebGl2RenderingContext::COLOR_BUFFER_BIT);
+            // Bottom edge
+            self.gl.scissor(x as i32, (self.height as f32 - y - h) as i32, w as i32, line_w as i32);
+            self.gl.clear(WebGl2RenderingContext::COLOR_BUFFER_BIT);
+            // Left edge
+            self.gl.scissor(x as i32, (self.height as f32 - y - h) as i32, line_w as i32, h as i32);
+            self.gl.clear(WebGl2RenderingContext::COLOR_BUFFER_BIT);
+            // Right edge
+            self.gl.scissor((x + w - line_w) as i32, (self.height as f32 - y - h) as i32, line_w as i32, h as i32);
+            self.gl.clear(WebGl2RenderingContext::COLOR_BUFFER_BIT);
+
+            self.gl.disable(WebGl2RenderingContext::SCISSOR_TEST);
         }
 
         /// Resize the canvas + WebGL viewport.
@@ -933,6 +998,7 @@ mod native {
 
         /// No-op on native — the renderer was never actually constructed.
         pub fn render_frame(&mut self, _text_scene: &TextSceneData, _time: f32) {}
+
 
         /// No-op on native.
         pub fn resize(&mut self, width: u32, height: u32) {
