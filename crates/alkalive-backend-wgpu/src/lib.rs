@@ -188,19 +188,22 @@ uniform float time;
 out vec2 v_uv;
 
 void main() {
-    // Y-axis rotation: scale X by cos(rotation). When cos is negative,
-    // the text is mirrored (viewed from behind) — we flip the UV to
-    // keep the text readable, like a spinning sign.
+    // Y-axis rotation: scale X around the canvas CENTER (not origin).
+    // This keeps the text centered while it narrows/widens.
+    // When cos is negative, the text is mirrored (viewed from behind)
+    // — we flip the UV to keep the text readable.
     float cos_r = cos(rotation);
-    vec2 pos = position;
-    pos.x = pos.x * cos_r;
+    float center_x = canvas_size.x * 0.5;
+
+    // Shift to center-relative, scale, shift back
+    float rel_x = position.x - center_x;
+    float scaled_x = rel_x * cos_r + center_x;
 
     // Convert pixel-space (Y-down, origin at top-left) to clip space.
-    // Vertex positions are in pixel coordinates with (0,0) at top-left.
     // Clip space is [-1, 1] with Y-up.
     vec2 clip = vec2(
-        pos.x / (canvas_size.x * 0.5) - 1.0,
-        1.0 - pos.y / (canvas_size.y * 0.5)
+        scaled_x / (canvas_size.x * 0.5) - 1.0,
+        1.0 - position.y / (canvas_size.y * 0.5)
     );
 
     gl_Position = vec4(clip, 0.0, 1.0);
