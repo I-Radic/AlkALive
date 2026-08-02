@@ -208,13 +208,12 @@ void main() {
 
     gl_Position = vec4(clip, 0.0, 1.0);
 
-    // When the text rotates past 90 degrees (cos < 0), mirror the UV
-    // so the text remains readable (like text on the back of a sign).
-    if (cos_r < 0.0) {
-        v_uv = vec2(1.0 - uv.x, uv.y);
-    } else {
-        v_uv = uv;
-    }
+    // Pass UV through unchanged. When cos_r < 0, the X positions are
+    // mirrored (text appears backwards), but the UVs stay correct so
+    // the glyph atlas is sampled properly. The text appears mirrored
+    // on the backface — like reading the back of a sign — which is
+    // the expected behavior for a rotating sign.
+    v_uv = uv;
 }
 "#;
 
@@ -358,17 +357,18 @@ pub fn quads_from_text(
         .iter()
         .map(|q| {
             // alkalive_text::Quad has `position` = top-left of the glyph
-            // bitmap in baseline-relative pixel space (Y-up). Width/height
-            // are in `size`. UV box is in `uv` (x, y, w, h) — origin at the
-            // top-left of the glyph tile in the atlas.
+            // bitmap. The Y coordinate is computed as `offset_y - bearing.1`
+            // which gives a negative value (Y-down convention: negative =
+            // above baseline). Width/height are in `size`. UV box is in
+            // `uv` (x, y, w, h) — origin at the top-left of the glyph tile
+            // in the atlas.
             let px = q.position.0;
-            let py = q.position.1; // Y-up, positive = above baseline
+            let py = q.position.1; // Y-down: negative = above baseline
             let center_x = baseline_x + px + q.size.0 * 0.5;
-            // Convert Y-up baseline-relative to Y-down screen-space:
-            // screen_y = baseline_y_screen - py - h/2
-            // (py is the top of the glyph in Y-up, so subtracting from
-            //  baseline moves it up on screen, which is lower Y in Y-down)
-            let center_y = baseline_y_screen - py - q.size.1 * 0.5;
+            // In Y-down screen space: glyph top is at baseline_y + py
+            // (py is negative, so this is above the baseline = smaller Y).
+            // Center = top + half_height.
+            let center_y = baseline_y_screen + py + q.size.1 * 0.5;
 
             GlyphQuad {
                 center_x,
