@@ -188,27 +188,30 @@ uniform float time;
 out vec2 v_uv;
 
 void main() {
-    // Y-axis rotation: scale X by cos(rotation). The "rotation" here is
-    // animated by the caller as `rotation_speed * time`, so the text
-    // appears to rotate around its vertical axis (like a spinning sign).
+    // Y-axis rotation: scale X by cos(rotation). When cos is negative,
+    // the text is mirrored (viewed from behind) — we flip the UV to
+    // keep the text readable, like a spinning sign.
     float cos_r = cos(rotation);
     vec2 pos = position;
     pos.x = pos.x * cos_r;
 
-    // Convert pixel-space (Y-up, origin at center) to clip space
-    // (X-right, Y-up, [-1, 1]).
-    //
-    // Pixel-space origin: caller places vertices with (0, 0) at the
-    // canvas center, X-right, Y-up. We map to clip-space:
-    //   clip.x = pos.x / (canvas_w / 2)
-    //   clip.y = pos.y / (canvas_h / 2)
+    // Convert pixel-space (Y-down, origin at top-left) to clip space.
+    // Vertex positions are in pixel coordinates with (0,0) at top-left.
+    // Clip space is [-1, 1] with Y-up.
     vec2 clip = vec2(
-        pos.x / (canvas_size.x * 0.5),
-        pos.y / (canvas_size.y * 0.5)
+        pos.x / (canvas_size.x * 0.5) - 1.0,
+        1.0 - pos.y / (canvas_size.y * 0.5)
     );
 
     gl_Position = vec4(clip, 0.0, 1.0);
-    v_uv = uv;
+
+    // When the text rotates past 90 degrees (cos < 0), mirror the UV
+    // so the text remains readable (like text on the back of a sign).
+    if (cos_r < 0.0) {
+        v_uv = vec2(1.0 - uv.x, uv.y);
+    } else {
+        v_uv = uv;
+    }
 }
 "#;
 
@@ -293,20 +296,25 @@ pub fn build_vertex_buffer(quads: &[GlyphQuad]) -> Vec<Vertex> {
     for q in quads {
         let half_w = q.w * 0.5;
         let half_h = q.h * 0.5;
+        // In Y-down screen space: y0 = top, y1 = bottom
         let x0 = q.center_x - half_w;
         let x1 = q.center_x + half_w;
-        let y0 = q.center_y - half_h;
-        let y1 = q.center_y + half_h;
+        let y0 = q.center_y - half_h; // top
+        let y1 = q.center_y + half_h; // bottom
 
-        // Triangle 1: bottom-left, bottom-right, top-left
-        verts.push(Vertex::new(x0, y0, q.u0, q.v1)); // BL
-        verts.push(Vertex::new(x1, y0, q.u1, q.v1)); // BR
-        verts.push(Vertex::new(x0, y1, q.u0, q.v0)); // TL
+        // UV: v0 = top of glyph in atlas, v1 = bottom
+        // Top of quad (y0) maps to v0 (top of atlas glyph)
+        // Bottom of quad (y1) maps to v1 (bottom of atlas glyph)
 
-        // Triangle 2: bottom-right, top-right, top-left
-        verts.push(Vertex::new(x1, y0, q.u1, q.v1)); // BR
-        verts.push(Vertex::new(x1, y1, q.u1, q.v0)); // TR
-        verts.push(Vertex::new(x0, y1, q.u0, q.v0)); // TL
+        // Triangle 1: top-left, top-right, bottom-left
+        verts.push(Vertex::new(x0, y0, q.u0, q.v0)); // TL
+        verts.push(Vertex::new(x1, y0, q.u1, q.v0)); // TR
+        verts.push(Vertex::new(x0, y1, q.u0, q.v1)); // BL
+
+        // Triangle 2: top-right, bottom-right, bottom-left
+        verts.push(Vertex::new(x1, y0, q.u1, q.v0)); // TR
+        verts.push(Vertex::new(x1, y1, q.u1, q.v1)); // BR
+        verts.push(Vertex::new(x0, y1, q.u0, q.v1)); // BL
     }
     verts
 }
@@ -332,10 +340,16 @@ pub fn quads_from_text(
     // the baseline. We want the baseline's horizontal midpoint to land at
     // the canvas's horizontal center, and the ascender to land at the
     // vertical center.
+    //
+    // Vertex positions are in screen-space pixels (Y-down, origin at
+    // top-left of canvas). The text stack produces quads in baseline-relative
+    // Y-up space, so we need to convert Y.
     let baseline_x = canvas_w * 0.5 - total_advance * 0.5;
-    let baseline_y = canvas_h * 0.5 - ascent * 0.5;
+    // In screen space (Y-down), the baseline is at canvas_h/2 + ascent/2
+    // (slightly below center to account for descenders).
+    let baseline_y_screen = canvas_h * 0.5 + ascent * 0.5;
 
-    let _ = (ascent, descent); // metrics used for centering math
+    let _ = descent; // used for centering math
 
     text_quads
         .iter()
@@ -345,13 +359,13 @@ pub fn quads_from_text(
             // are in `size`. UV box is in `uv` (x, y, w, h) — origin at the
             // top-left of the glyph tile in the atlas.
             let px = q.position.0;
-            let py = q.position.1;
+            let py = q.position.1; // Y-up, positive = above baseline
             let center_x = baseline_x + px + q.size.0 * 0.5;
-            // In Y-up baseline space, `py` is the bottom of the glyph (top
-            // of the bitmap from the baseline's perspective). Convert to
-            // canvas-centered Y-up: center = baseline_y + py + h/2 - h/2 =
-            // baseline_y + py (we want the center of the glyph).
-            let center_y = baseline_y + py + q.size.1 * 0.5;
+            // Convert Y-up baseline-relative to Y-down screen-space:
+            // screen_y = baseline_y_screen - py - h/2
+            // (py is the top of the glyph in Y-up, so subtracting from
+            //  baseline moves it up on screen, which is lower Y in Y-down)
+            let center_y = baseline_y_screen - py - q.size.1 * 0.5;
 
             GlyphQuad {
                 center_x,
@@ -1002,15 +1016,17 @@ mod tests {
         assert_eq!(verts.len(), 6);
 
         // Verify corner positions: half_w=20, half_h=30
-        // x0=80, x1=120, y0=20, y1=80
-        // Triangle 1: (80,20)-(120,20)-(80,80)
-        assert_eq!(verts[0], Vertex::new(80.0, 20.0, 0.0, 0.2)); // BL
-        assert_eq!(verts[1], Vertex::new(120.0, 20.0, 0.1, 0.2)); // BR
-        assert_eq!(verts[2], Vertex::new(80.0, 80.0, 0.0, 0.0)); // TL
-        // Triangle 2: (120,20)-(120,80)-(80,80)
-        assert_eq!(verts[3], Vertex::new(120.0, 20.0, 0.1, 0.2)); // BR
-        assert_eq!(verts[4], Vertex::new(120.0, 80.0, 0.1, 0.0)); // TR
-        assert_eq!(verts[5], Vertex::new(80.0, 80.0, 0.0, 0.0)); // TL
+        // x0=80, x1=120, y0=20 (top), y1=80 (bottom)
+        // In Y-down space: y0=top, y1=bottom
+        // UV: v0=top of glyph, v1=bottom of glyph
+        // Triangle 1: TL-TR-BL = (80,20)-(120,20)-(80,80)
+        assert_eq!(verts[0], Vertex::new(80.0, 20.0, 0.0, 0.0)); // TL
+        assert_eq!(verts[1], Vertex::new(120.0, 20.0, 0.1, 0.0)); // TR
+        assert_eq!(verts[2], Vertex::new(80.0, 80.0, 0.0, 0.2)); // BL
+        // Triangle 2: TR-BR-BL = (120,20)-(120,80)-(80,80)
+        assert_eq!(verts[3], Vertex::new(120.0, 20.0, 0.1, 0.0)); // TR
+        assert_eq!(verts[4], Vertex::new(120.0, 80.0, 0.1, 0.2)); // BR
+        assert_eq!(verts[5], Vertex::new(80.0, 80.0, 0.0, 0.2)); // BL
     }
 
     #[test]
