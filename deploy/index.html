@@ -10,11 +10,17 @@
   <canvas id="canvas"></canvas>
   <input id="ime" type="text">
   <script type="module">
-    import init from './pkg/alkalive_runtime_wasm.js';
-    const wasm = await init('./pkg/alkalive_runtime_wasm_bg.wasm');
+    import init from './pkg/alkalive_runtime_wasm.js?XTransformPort=8080';
+    const wasm = await init('./pkg/alkalive_runtime_wasm_bg.wasm?XTransformPort=8080');
     const canvas = document.getElementById('canvas');
     const ime = document.getElementById('ime');
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
     await wasm.start(canvas, ime);
+    window.addEventListener('resize', () => {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+    });
   </script>
 </body>
 </html>
