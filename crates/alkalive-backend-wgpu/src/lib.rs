@@ -335,6 +335,28 @@ pub fn build_vertex_buffer(quads: &[GlyphQuad]) -> Vec<Vertex> {
 /// `canvas_w`/`canvas_h` is the viewport size in pixels. The text is
 /// centered horizontally and vertically (ascender at the top of the
 /// vertical center).
+/// Build baseline-relative glyph quads from a shaped run.
+fn build_text_quads(
+    run: &alkalive_text::ShapedRun,
+    atlas: &mut alkalive_text::HarfRustGlyphAtlas,
+    font_size: f32,
+) -> Vec<alkalive_text::Quad> {
+    use alkalive_text::{GlyphAtlas, GlyphKey};
+    let mut quads = Vec::with_capacity(run.glyph_ids.len());
+    let mut pen_x = 0.0f32;
+    for (i, &glyph_id) in run.glyph_ids.iter().enumerate() {
+        let key = GlyphKey { font_id: run.font_id, glyph_id, phase: 0, size_px: font_size as u16 };
+        let slot = atlas.ensure(key);
+        if slot.size.0 < 0.5 || slot.size.1 < 0.5 { pen_x += run.advances[i]; continue; }
+        quads.push(alkalive_text::Quad {
+            position: (pen_x + run.offsets[i].0 + slot.bearing.0, run.offsets[i].1 - slot.bearing.1),
+            size: slot.size, uv: slot.uv, page: slot.page,
+        });
+        pen_x += run.advances[i];
+    }
+    quads
+}
+
 pub fn quads_from_text(
     text_quads: &[alkalive_text::Quad],
     ascent: f32,
@@ -455,6 +477,14 @@ mod wasm {
         vertex_count: u32,
         /// Last input text rendered (to detect changes for atlas re-upload).
         last_input_text: String,
+        /// Vertex count for the title text (drawn with rotation).
+        title_vertex_count: u32,
+        /// Start offset for input field text vertices (drawn without rotation).
+        input_vertex_start: u32,
+        /// Vertex count for the input field text.
+        input_vertex_count: u32,
+        /// Input field bounds in pixels (x, y, w, h) for hit-testing.
+        input_field_bounds: (f32, f32, f32, f32),
     }
 
     impl WgpuRenderer {
@@ -625,6 +655,10 @@ mod wasm {
                 height,
                 atlas_uploaded: false,
                 last_input_text: String::new(),
+                title_vertex_count: 0,
+                input_vertex_start: 0,
+                input_vertex_count: 0,
+                input_field_bounds: (0.0, 0.0, 0.0, 0.0),
                 vertex_count: 0,
             })
         }
@@ -641,73 +675,64 @@ mod wasm {
         /// uploaded to the GPU texture. Subsequent calls re-use the cached
         /// atlas unless the input text changes (which triggers a re-upload).
         pub fn render_frame(&mut self, text_scene: &TextSceneData, time: f32) {
-            // 1. Shape + rasterize the title text on the first frame.
-            //    Also re-upload if the input text changed (for the input field).
+            // 1. Determine input display text.
             let input_display = if text_scene.input_text.is_empty() {
                 text_scene.input_placeholder.clone()
             } else {
                 text_scene.input_text.clone()
             };
-            let combined_text = format!("{}\n{}", text_scene.text, input_display);
 
+            // 2. Re-upload atlas if needed (first frame or input changed).
             if !self.atlas_uploaded || self.last_input_text != input_display {
-                if let Err(e) = self.upload_text_atlas(&combined_text, text_scene.font_size) {
-                    web_sys::console::error_1(
-                        &format!("alkalive-backend-wgpu: atlas upload failed: {}", e).into(),
-                    );
+                if let Err(e) = self.upload_text_atlas(&text_scene.text, &input_display, text_scene.font_size) {
+                    web_sys::console::error_1(&format!("atlas upload failed: {}", e).into());
                 }
                 self.atlas_uploaded = true;
                 self.last_input_text = input_display.clone();
             }
 
-            // 2. Set the viewport (in case the canvas was resized).
+            // 3. Set viewport + clear.
             self.gl.viewport(0, 0, self.width as i32, self.height as i32);
-
-            // 3. Clear to the background color.
             let (br, bg, bb) = text_scene.background_normalized();
             self.gl.clear_color(br, bg, bb, 1.0);
             self.gl.clear(WebGl2RenderingContext::COLOR_BUFFER_BIT);
 
-            // 4. Draw the input field background rectangle (dark, below title).
-            //    Position: centered horizontally, below the title text.
-            let field_w = (self.width as f32 * 0.5).min(400.0);
-            let field_h = 40.0;
-            let field_x = (self.width as f32 - field_w) * 0.5;
-            let field_y = (self.height as f32 * 0.5) + text_scene.font_size * 0.5 + 20.0;
+            // 4. Draw input field background + border (below title).
+            let (fx, fy, fw, fh) = self.input_field_bounds;
+            self.draw_rect_filled(fx, fy, fw, fh, 0.05, 0.05, 0.08, 0.9);
+            self.draw_rect_outline(fx, fy, fw, fh, 0.8, 0.65, 0.0, 0.8);
 
-            self.draw_rect_filled(field_x, field_y, field_w, field_h, 0.05, 0.05, 0.08, 0.9);
-            self.draw_rect_outline(field_x, field_y, field_w, field_h, 0.8, 0.65, 0.0, 0.8);
-
-            // 5. Bind program + uniforms for text rendering.
+            // 5. Bind program + shared state.
             self.gl.use_program(Some(&self.program));
-
-            let rotation = text_scene.rotation_speed * time;
-            self.gl.uniform1f(Some(&self.u_rotation), rotation);
             self.gl.uniform2f(Some(&self.u_canvas_size), self.width as f32, self.height as f32);
-            if let Some(ref u_time) = self.u_time {
-                self.gl.uniform1f(Some(u_time), time);
-            }
-            self.gl.uniform4f(
-                Some(&self.u_text_color),
-                text_scene.text_color.0,
-                text_scene.text_color.1,
-                text_scene.text_color.2,
-                text_scene.text_color.3,
-            );
-
-            // 6. Bind glyph atlas texture to texture unit 0.
+            if let Some(ref u_time) = self.u_time { self.gl.uniform1f(Some(u_time), time); }
             self.gl.active_texture(WebGl2RenderingContext::TEXTURE0);
             self.gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(&self.glyph_texture));
             self.gl.uniform1i(Some(&self.u_glyph_texture), 0);
-
-            // 7. Bind VAO + draw title text (with rotation).
             self.gl.bind_vertex_array(Some(&self.vao));
-            if self.vertex_count > 0 {
-                self.gl.draw_arrays(
-                    WebGl2RenderingContext::TRIANGLES,
-                    0,
-                    self.vertex_count as i32,
-                );
+
+            // 6. Draw title text WITH rotation (golden color).
+            if self.title_vertex_count > 0 {
+                let rotation = text_scene.rotation_speed * time;
+                self.gl.uniform1f(Some(&self.u_rotation), rotation);
+                self.gl.uniform4f(Some(&self.u_text_color),
+                    text_scene.text_color.0, text_scene.text_color.1,
+                    text_scene.text_color.2, text_scene.text_color.3);
+                self.gl.draw_arrays(WebGl2RenderingContext::TRIANGLES, 0, self.title_vertex_count as i32);
+            }
+
+            // 7. Draw input field text WITHOUT rotation (white or dim color).
+            if self.input_vertex_count > 0 {
+                self.gl.uniform1f(Some(&self.u_rotation), 0.0); // No rotation for input
+                if text_scene.input_text.is_empty() {
+                    // Placeholder: dim gray
+                    self.gl.uniform4f(Some(&self.u_text_color), 0.35, 0.35, 0.4, 1.0);
+                } else {
+                    // Typed text: white
+                    self.gl.uniform4f(Some(&self.u_text_color), 0.9, 0.9, 0.95, 1.0);
+                }
+                self.gl.draw_arrays(WebGl2RenderingContext::TRIANGLES,
+                    self.input_vertex_start as i32, self.input_vertex_count as i32);
             }
         }
 
@@ -781,6 +806,17 @@ mod wasm {
             self.vertex_count
         }
 
+        /// Returns the input field bounds (x, y, w, h) in screen pixels.
+        pub fn input_field_bounds(&self) -> (f32, f32, f32, f32) {
+            self.input_field_bounds
+        }
+
+        /// Check if a point (x, y) is inside the input field rectangle.
+        pub fn hit_test_input_field(&self, x: f32, y: f32) -> bool {
+            let (fx, fy, fw, fh) = self.input_field_bounds;
+            x >= fx && x <= fx + fw && y >= fy && y <= fy + fh
+        }
+
         /// Shape + rasterize the text via `alkalive-text`, then upload the
         /// glyph atlas to the GPU texture and rebuild the vertex buffer.
         ///
@@ -792,14 +828,13 @@ mod wasm {
         /// 4. Uploads the atlas page to the GPU as an R8 texture.
         /// 5. Builds a canvas-centered vertex buffer (6 verts per glyph).
         /// 6. Uploads the vertex buffer to the VBO.
-        fn upload_text_atlas(&mut self, text: &str, font_size: f32) -> Result<(), String> {
+        fn upload_text_atlas(&mut self, title_text: &str, input_text: &str, font_size: f32) -> Result<(), String> {
             use alkalive_text::{
                 FontRequest, FontRegistry, GlyphAtlas, GlyphKey, HarfRustFontRegistry,
                 HarfRustGlyphAtlas, HarfRustTextShaper, ShapeContext, TextShaper,
             };
 
-            // 1. Load the bundled Roboto-Regular font (also used by
-            //    alkalive-app's text_scene — same source file).
+            // 1. Load the bundled Roboto-Regular font.
             let font_bytes: &[u8] = include_bytes!("../../alkalive-app/assets/Roboto-Regular.ttf");
             let mut registry = HarfRustFontRegistry::new();
             let loaded_id = registry
@@ -813,97 +848,84 @@ mod wasm {
             let font_id = registry.resolve(&req).unwrap_or(loaded_id);
             let registry_arc = Arc::new(registry);
 
-            // 2. Shape the text.
+            // 2. Shape the title text.
             let shaper = HarfRustTextShaper::new(Arc::clone(&registry_arc));
             let mut atlas = HarfRustGlyphAtlas::new(Arc::clone(&registry_arc));
-            let ctx = ShapeContext {
-                font: font_id,
-                size_px: font_size,
-                direction: None,
-            };
-            let run = shaper
-                .shape(text, &ctx)
-                .map_err(|e| format!("shape: {:?}", e))?;
+            let title_font_size = font_size;
+            let input_font_size = font_size * 0.5; // Input text is half the title size
 
-            // 3. Rasterize each glyph into the atlas and build a list of
-            //    pixel-space glyph quads (baseline-relative, Y-up).
-            let mut text_quads: Vec<alkalive_text::Quad> = Vec::with_capacity(run.glyph_ids.len());
-            let mut pen_x = 0.0f32;
-            for (i, &glyph_id) in run.glyph_ids.iter().enumerate() {
-                let key = GlyphKey {
-                    font_id: run.font_id,
-                    glyph_id,
-                    phase: 0,
-                    size_px: font_size as u16,
-                };
-                let slot = atlas.ensure(key);
-                if slot.size.0 < 0.5 || slot.size.1 < 0.5 {
-                    pen_x += run.advances[i];
-                    continue;
-                }
-                let offset_x = run.offsets[i].0;
-                let offset_y = run.offsets[i].1;
-                text_quads.push(alkalive_text::Quad {
-                    position: (pen_x + offset_x + slot.bearing.0, offset_y - slot.bearing.1),
-                    size: slot.size,
-                    uv: slot.uv,
-                    page: slot.page,
-                });
-                pen_x += run.advances[i];
-            }
+            let ctx_title = ShapeContext { font: font_id, size_px: title_font_size, direction: None };
+            let title_run = shaper.shape(title_text, &ctx_title).map_err(|e| format!("shape title: {:?}", e))?;
 
-            // 4. Upload the atlas page (page 0) to the GPU texture.
-            //    The atlas is 512×512 grayscale R8.
-            let page_data = atlas
-                .page_data(0)
-                .ok_or_else(|| "atlas page 0 missing".to_string())?;
+            // 3. Shape the input text (smaller font).
+            let ctx_input = ShapeContext { font: font_id, size_px: input_font_size, direction: None };
+            let input_run = shaper.shape(input_text, &ctx_input).map_err(|e| format!("shape input: {:?}", e))?;
+
+            // 4. Rasterize title glyphs into the atlas and build quads.
+            let title_quads = build_text_quads(&title_run, &mut atlas, title_font_size);
+            let input_quads = build_text_quads(&input_run, &mut atlas, input_font_size);
+
+            // 5. Upload atlas page 0 to GPU.
+            let page_data = atlas.page_data(0).ok_or_else(|| "atlas page 0 missing".to_string())?;
             self.gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(&self.glyph_texture));
-            self.gl
-                .tex_image_2d_with_i32_and_i32_and_i32_and_format_and_type_and_opt_u8_array(
-                    WebGl2RenderingContext::TEXTURE_2D,
-                    0,
-                    WebGl2RenderingContext::R8 as i32,
-                    512,
-                    512,
-                    0,
-                    WebGl2RenderingContext::RED,
-                    WebGl2RenderingContext::UNSIGNED_BYTE,
-                    Some(page_data),
-                )
-                .map_err(|e| format!("tex_image_2d upload failed: {:?}", e))?;
+            self.gl.tex_image_2d_with_i32_and_i32_and_i32_and_format_and_type_and_opt_u8_array(
+                WebGl2RenderingContext::TEXTURE_2D, 0, WebGl2RenderingContext::R8 as i32,
+                512, 512, 0, WebGl2RenderingContext::RED, WebGl2RenderingContext::UNSIGNED_BYTE,
+                Some(page_data),
+            ).map_err(|e| format!("tex_image_2d upload failed: {:?}", e))?;
 
-            // 5. Build the canvas-centered vertex buffer.
-            let canvas_quads = quads_from_text(
-                &text_quads,
-                run.metrics.ascent,
-                run.metrics.descent,
-                run.metrics.total_advance,
-                self.width as f32,
-                self.height as f32,
+            // 6. Build canvas-centered title quads (centered, will get rotation).
+            let title_canvas_quads = quads_from_text(
+                &title_quads, title_run.metrics.ascent, title_run.metrics.descent,
+                title_run.metrics.total_advance, self.width as f32, self.height as f32,
             );
-            let verts = build_vertex_buffer(&canvas_quads);
-            self.vertex_count = verts.len() as u32;
+            let title_verts = build_vertex_buffer(&title_canvas_quads);
+            self.title_vertex_count = title_verts.len() as u32;
 
-            // 6. Upload the vertex buffer.
+            // 7. Build input field quads (positioned inside the input field, no rotation).
+            //    Input field is centered horizontally, below the title.
+            let field_w = (self.width as f32 * 0.5).min(400.0);
+            let field_h = 40.0;
+            let field_x = (self.width as f32 - field_w) * 0.5;
+            let field_y = (self.height as f32 * 0.5) + font_size * 0.5 + 20.0;
+            self.input_field_bounds = (field_x, field_y, field_w, field_h);
+
+            // Center input text inside the field.
+            let input_baseline_x = field_x + (field_w - input_run.metrics.total_advance) * 0.5;
+            let input_baseline_y = field_y + field_h * 0.5 + input_run.metrics.ascent * 0.5;
+
+            let input_canvas_quads: Vec<GlyphQuad> = input_quads.iter().map(|q| {
+                let px = q.position.0;
+                let py = q.position.1;
+                GlyphQuad {
+                    center_x: input_baseline_x + px + q.size.0 * 0.5,
+                    center_y: input_baseline_y + py + q.size.1 * 0.5,
+                    w: q.size.0,
+                    h: q.size.1,
+                    u0: q.uv.x,
+                    v0: q.uv.y,
+                    u1: q.uv.x + q.uv.w,
+                    v1: q.uv.y + q.uv.h,
+                }
+            }).collect();
+            let input_verts = build_vertex_buffer(&input_canvas_quads);
+            self.input_vertex_start = self.title_vertex_count;
+            self.input_vertex_count = input_verts.len() as u32;
+
+            // 8. Combine and upload vertex buffer.
+            let mut all_verts = title_verts;
+            all_verts.extend(input_verts);
+            self.vertex_count = all_verts.len() as u32;
+
             self.gl.bind_buffer(WebGl2RenderingContext::ARRAY_BUFFER, Some(&self.vbo));
-            let byte_len = verts.len() * std::mem::size_of::<Vertex>();
-            if byte_len == 0 {
-                return Ok(());
-            }
-            // Safety: `verts` is a `Vec<Vertex>` of `Pod` types (repr(C),
-            // no padding). The byte slice borrows `verts` for the duration
-            // of the synchronous `buffer_data_with_u8_array` call, which
-            // copies the bytes into the WebGL buffer. After the call,
-            // `verts` is dropped normally.
+            let byte_len = all_verts.len() * std::mem::size_of::<Vertex>();
+            if byte_len == 0 { return Ok(()); }
             let bytes: &[u8] = unsafe {
-                std::slice::from_raw_parts(verts.as_ptr() as *const u8, byte_len)
+                std::slice::from_raw_parts(all_verts.as_ptr() as *const u8, byte_len)
             };
             self.gl.buffer_data_with_u8_array(
-                WebGl2RenderingContext::ARRAY_BUFFER,
-                bytes,
-                WebGl2RenderingContext::DYNAMIC_DRAW,
+                WebGl2RenderingContext::ARRAY_BUFFER, bytes, WebGl2RenderingContext::DYNAMIC_DRAW,
             );
-
             Ok(())
         }
     }
@@ -999,11 +1021,15 @@ mod native {
         /// No-op on native — the renderer was never actually constructed.
         pub fn render_frame(&mut self, _text_scene: &TextSceneData, _time: f32) {}
 
-
         /// No-op on native.
         pub fn resize(&mut self, width: u32, height: u32) {
             self.width = width;
             self.height = height;
+        }
+
+        /// Always returns false on native (no renderer).
+        pub fn hit_test_input_field(&self, _x: f32, _y: f32) -> bool {
+            false
         }
     }
 }

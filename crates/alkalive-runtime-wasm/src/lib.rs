@@ -160,7 +160,7 @@ async fn init_runtime(
     scene: alkalive_backend_wgpu::TextSceneData,
 ) -> Result<(), JsValue> {
     // 1. Initialize the WebGL2 renderer (async — acquires the GPU context).
-    let renderer = alkalive_backend_wgpu::WgpuRenderer::init_from_canvas(canvas, width, height)
+    let renderer = alkalive_backend_wgpu::WgpuRenderer::init_from_canvas(canvas.clone(), width, height)
         .await
         .map_err(|e| JsValue::from_str(&format!("AlkALive renderer init failed: {}", e)))?;
 
@@ -179,14 +179,16 @@ async fn init_runtime(
     // 3. Set up keyboard input forwarding from the hidden IME input.
     setup_input_forwarding(&ime_input)?;
 
-    // 4. Set up the window resize listener (so the canvas re-sizes when the
-    //    window is resized).
+    // 4. Set up click handler — clicking the input field focuses the IME input.
+    setup_click_handler(&canvas, &ime_input)?;
+
+    // 5. Set up the window resize listener.
     setup_resize_listener()?;
 
-    // 5. Focus the IME input so it receives keyboard events.
+    // 6. Focus the IME input so it receives keyboard events.
     let _ = ime_input.focus();
 
-    // 6. Start the requestAnimationFrame loop, owned by WASM.
+    // 7. Start the requestAnimationFrame loop, owned by WASM.
     start_frame_loop();
 
     web_sys::console::log_1(&"AlkALive runtime ready — rendering Hello World.".into());
@@ -354,6 +356,35 @@ fn setup_resize_listener() -> Result<(), JsValue> {
         *cell.borrow_mut() = Some(on_resize);
     });
 
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Canvas click handler (focus IME input when clicking the input field)
+// ---------------------------------------------------------------------------
+
+/// Set up a click listener on the canvas. When the user clicks inside the
+/// input field rectangle, focus the hidden IME input so keyboard events
+/// are forwarded to the WASM text buffer.
+fn setup_click_handler(canvas: &web_sys::HtmlCanvasElement, ime_input: &web_sys::HtmlInputElement) -> Result<(), JsValue> {
+    let ime_clone = ime_input.clone();
+    let on_click = Closure::<dyn FnMut(web_sys::MouseEvent)>::new(move |e: web_sys::MouseEvent| {
+        let x = e.client_x() as f32;
+        let y = e.client_y() as f32;
+        let should_focus = RUNTIME.with(|rt| {
+            let borrow = rt.borrow();
+            if let Some(runtime) = borrow.as_ref() {
+                runtime.renderer.hit_test_input_field(x, y)
+            } else {
+                false
+            }
+        });
+        if should_focus {
+            let _ = ime_clone.focus();
+        }
+    });
+    canvas.add_event_listener_with_callback("click", on_click.as_ref().unchecked_ref())?;
+    on_click.forget();
     Ok(())
 }
 
