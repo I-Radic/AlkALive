@@ -139,6 +139,18 @@ hello.alk → [alkalive-compiler] → SceneIR → [alkalive-runtime-wasm] → We
 - ✅ Zero forbidden JS patterns (addEventListener, requestAnimationFrame, putImageData)
 - ✅ VLM visual quality: 10/10
 
+## Adopted VUMA-Inspired Compiler Enhancements
+
+Following a feasibility study (`external-research/feasibility-assessment.md`) that concluded VUMA cannot serve as AlkALive's kernel, five VUMA-inspired compiler ideas were adopted as design references for enhancing AlkALive's own compiler pipeline:
+
+1. Incremental computation (Salsa/Adapton) for reactive re-evaluation
+2. Monotonicity types (Datafun) for compile-time collection enforcement
+3. E-graph optimization for signal read/write pattern optimization
+4. PMT verification as a future formal-verification research direction
+5. Algorithm/schedule separation (Halide) for SceneIR
+
+See [`docs/adopted-vuma-ideas/`](docs/adopted-vuma-ideas/) for the problem catalog and rough draft.
+
 ## License
 
 Apache License 2.0. See `LICENSE`.
