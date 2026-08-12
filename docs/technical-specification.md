@@ -229,7 +229,7 @@ This is the entire runtime state. There is no signal store, no dependency graph,
 
 **Frame loop** (lines 400–447): `start_frame_loop()` builds a `Closure<dyn FnMut()>` stored in `thread_local RAF_CLOSURE`. Each frame: `runtime.time += 1.0 / 60.0; runtime.renderer.render_frame(&runtime.scene, runtime.time);`. The closure reschedules itself via `requestAnimationFrame`. **Critical observation:** the frame loop calls `render_frame()` unconditionally every frame — there is no "did anything change?" check. This is the O(n) per-frame cost ADR-025 targets.
 
-**Input forwarding** (lines 256–320): two `Closure`s attached to the hidden IME `<input>` element:
+**Input forwarding** (lines 256–320, per ADR-023): two `Closure`s attached to the hidden IME `<input>` element:
 - `keydown` listener: forwards printable chars, Backspace, Enter, Escape to `runtime.input_text`. Updates `runtime.scene.input_text` (a field on `TextSceneData`).
 - `input` listener: forwards IME composition events.
 
