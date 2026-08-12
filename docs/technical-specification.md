@@ -8,7 +8,7 @@
 - `docs/adopted-vuma-ideas/reconciliation-report.md` — ADR vs. rough-draft conflict analysis
 - `docs/adopted-vuma-ideas/fine-draft-v2.md` — design reference for the five enhancements
 - `docs/SPECIFICATION.md` — full system specification (pre-ADR-024)
-- `docs/adr/ADR.md` — ADRs 001–028
+- `docs/adr/ADR.md` — ADRs 001–022 (consolidated); ADRs 023–028 in separate files (see `docs/adr/README.md` for the full index)
 
 **Purpose:** This document grounds the five VUMA-inspired enhancements (ADR-024 through ADR-028) in the **actual codebase** at `crates/`. It analyzes the current implementation, identifies the integration points for each ADR, and lists the technical debt, risks, and recommended solutions. It is the authoritative reference for an engineer modifying the codebase to implement any of the five enhancements.
 
@@ -39,7 +39,7 @@ This specification covers the AlkALive workspace at the time of writing (commit 
 - The **interfaces** that must remain stable for the five enhancements to compose cleanly.
 - The **technical debt** that exists in the current code and the new debt the enhancements will introduce.
 
-Out of scope: full ADR-001–028 rationale (see `docs/adr/ADR.md`); the `.alk` language tutorial (see `examples/hello.alk`); the deployment story (see `deploy/index.html`).
+Out of scope: full ADR-001–028 rationale (see `docs/adr/ADR.md` for ADRs 001–022 and individual ADR files for ADRs 023–028); the `.alk` language tutorial (see `examples/hello.alk`); the deployment story (see `deploy/index.html`).
 
 ### 1.2 Workspace Layout
 
