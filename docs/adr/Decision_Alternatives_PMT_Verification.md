@@ -1,6 +1,6 @@
 # Decision Alternatives: PMT Verification for AlkALive
 
-> **Status:** Unresolved — long-term research direction. Recommended: defer until Monotonicity Types are stable.
+> **⚠ RESOLVED — superseded by [ADR 028](ADR_028_pmt_verification_deferred.md).** The decision is to defer PMT verification (Approach C). This file is retained for historical context.
 
 ## Context
 

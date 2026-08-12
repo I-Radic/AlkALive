@@ -1,6 +1,6 @@
 # Decision Alternatives: Monotonicity Types for AlkALive
 
-> **Status:** Unresolved — two viable approaches with different trade-offs. Recommended approach marked below.
+> **⚠ RESOLVED — superseded by [ADR 027](ADR_027_monotonicity_types_phased.md).** The decision is a phased adoption: Phase 1 (lint-based, Approach B) → Phase 2 (full type qualifier, Approach A). This file is retained for historical context.
 
 ## Context
 

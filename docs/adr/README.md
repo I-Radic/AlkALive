@@ -19,13 +19,15 @@ This directory records the architectural decisions for the AlkALive system (a cu
 | [`ADR_024_algorithm_schedule_separation.md`](ADR_024_algorithm_schedule_separation.md) | **ADR 024** — Algorithm/Schedule Separation for SceneIR. Split SceneIR into AlgorithmIR (what) + ScheduleIR (how). Confidence: High. |
 | [`ADR_025_incremental_computation.md`](ADR_025_incremental_computation.md) | **ADR 025** — Incremental Computation (Salsa/Adapton-style). Only dirty subtrees re-evaluate. Implements ADR-002. Confidence: Medium. |
 | [`ADR_026_egraph_optimization.md`](ADR_026_egraph_optimization.md) | **ADR 026** — E-Graph Optimization for signal read/write patterns. Compile-time rewrite rules. Confidence: High. |
-| [`Decision_Alternatives_Monotonicity_Types.md`](Decision_Alternatives_Monotonicity_Types.md) | ⚠ UNRESOLVED — three approaches for monotonicity enforcement (type qualifier, lint, runtime). Recommended: phased type qualifier. |
-| [`Decision_Alternatives_PMT_Verification.md`](Decision_Alternatives_PMT_Verification.md) | ⚠ UNRESOLVED — PMT formal verification as future research. Recommended: defer until monotonicity types are stable. |
+| [`ADR_027_monotonicity_types_phased.md`](ADR_027_monotonicity_types_phased.md) | **ADR 027** — Monotonicity Types, Phased Adoption. Phase 1: lint-based (Approach B). Phase 2: full type qualifier (Approach A). Confidence: Medium-High (P1), Medium (P2). |
+| [`ADR_028_pmt_verification_deferred.md`](ADR_028_pmt_verification_deferred.md) | **ADR 028** — PMT Verification, Deferred (Approach C). Re-evaluate after ADR-027 Phase 2 is stable. Confidence: High (in deferral). |
+| [`Decision_Alternatives_Monotonicity_Types.md`](Decision_Alternatives_Monotonicity_Types.md) | ⚠ RESOLVED — superseded by ADR 027. Retained for historical context. |
+| [`Decision_Alternatives_PMT_Verification.md`](Decision_Alternatives_PMT_Verification.md) | ⚠ RESOLVED — superseded by ADR 028. Retained for historical context. |
 | [`Spec_Tradeoff_Note_IME.md`](Spec_Tradeoff_Note_IME.md) | ⚠ RESOLVED — superseded by ADR 023. Retained for historical context. |
 
 ## Decision summary
 
-All 26 ADRs are **Proposed** (awaiting ratification). ADRs 001–018 were the original set; ADRs 019–022 are the four project-owner resolutions that supersede the prior Decision Alternatives; ADR 023 resolves the IME composition-event acquisition open dependency; ADRs 024–026 are VUMA-inspired compiler enhancements. Two Decision Alternative files (Monotonicity Types, PMT Verification) remain unresolved.
+All 28 ADRs are **Proposed** (awaiting ratification). ADRs 001–018 were the original set; ADRs 019–022 are the four project-owner resolutions; ADR 023 resolves the IME composition-event acquisition; ADRs 024–026 are VUMA-inspired compiler enhancements; ADR 027 resolves Monotonicity Types (phased adoption); ADR 028 defers PMT Verification. All Decision Alternative files are now resolved.
 
 | ID | Decision | Confidence | Status |
 |----|----------|------------|--------|
@@ -55,6 +57,8 @@ All 26 ADRs are **Proposed** (awaiting ratification). ADRs 001–018 were the or
 | ADR 024 | Algorithm/Schedule Separation for SceneIR | High | Proposed |
 | ADR 025 | Incremental Computation (Salsa/Adapton-Style) | Medium | Proposed |
 | ADR 026 | E-Graph Optimization for Signal Read/Write Patterns | High | Proposed |
+| ADR 027 | Monotonicity Types — Phased Adoption | Medium-High / Medium | Proposed |
+| ADR 028 | PMT Verification — Deferred (Approach C) | High | Proposed (Deferred) |
 
 ## Resolved Decision Alternatives
 
@@ -67,14 +71,14 @@ The four Decision Alternative files have been resolved by the project owner's no
 | `Decision_Alternatives_accessibility-bridge.md` | ADR 019 | Approach A (no DOM mirror, a11y deferred) overrides prior Approach C (hybrid DOM projection) |
 | `Decision_Alternatives_adoption-interop.md` | ADR 020 | Approach C (DOM only for metadata/SEO) overrides prior Approach A (host-DOM interop bridges) |
 
-## Unresolved Decision Alternatives (VUMA-Inspired)
+## Resolved Decision Alternatives (VUMA-Inspired)
 
-Two Decision Alternative files remain unresolved, pending further analysis or implementation experience:
+Both VUMA-inspired Decision Alternative files are now resolved:
 
-| File | Topic | Recommended Approach | Status |
-|------|-------|---------------------|--------|
-| `Decision_Alternatives_Monotonicity_Types.md` | Monotonicity type enforcement for collections | Phased: lint-based (Phase 1) → full type qualifier (Phase 2) | Unresolved |
-| `Decision_Alternatives_PMT_Verification.md` | Formal memory-safety verification (PMT/Lean/Z3) | Defer until Monotonicity Types are stable | Unresolved (future research) |
+| File | Resolved By | Decision |
+|------|-------------|----------|
+| `Decision_Alternatives_Monotonicity_Types.md` | ADR 027 | Phased adoption: lint (Phase 1) → type qualifier (Phase 2) |
+| `Decision_Alternatives_PMT_Verification.md` | ADR 028 | Defer (Approach C) — re-evaluate after ADR-027 Phase 2 |
 
 ## Consistency review
 
