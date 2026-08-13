@@ -257,6 +257,27 @@ pub fn compile_with_lints(src: &str) -> Result<(AlgorithmIR, crate::lints::LintS
     Ok((ir, lint_set))
 }
 
+/// Convenience: tokenize + parse + typecheck + lower in one call.
+///
+/// This is the ADR-027 Phase 2 entry point. It runs the type checker
+/// *after* parsing but *before* codegen. If the type checker finds any
+/// errors (e.g. a shrink op on a `monotone` collection), compilation aborts
+/// with [`CompileError::Type`].
+///
+/// # Errors
+///
+/// Returns [`CompileError::Parse`] if lexing/parsing fails,
+/// [`CompileError::Type`] if the type checker finds errors, or
+/// [`CompileError::Codegen`] if semantic lowering fails.
+pub fn compile_typecheck(src: &str) -> Result<AlgorithmIR, CompileError> {
+    let module = crate::parser::parse(src).map_err(CompileError::Parse)?;
+    let type_errors = crate::typechecker::check_module(&module);
+    if !type_errors.is_empty() {
+        return Err(CompileError::Type(type_errors));
+    }
+    lower(&module).map_err(CompileError::Codegen)
+}
+
 /// Convenience: tokenize + parse + lower + schedule-lower in one call.
 ///
 /// This is the ADR-024 entry point. It runs the full pipeline:
@@ -426,11 +447,13 @@ pub fn compile_full(src: &str) -> Result<(ScheduledScene, DependencyGraph), Comp
     Ok((scheduled, optimized))
 }
 
-/// Top-level error for the full `compile` pipeline (lex+parse+lower).
+/// Top-level error for the full `compile` pipeline (lex+parse+typecheck+lower).
 #[derive(Debug, Clone)]
 pub enum CompileError {
     /// Lexing or parsing failed.
     Parse(crate::parser::ParseError),
+    /// Type checking (ADR-027 Phase 2) failed.
+    Type(crate::typechecker::TypeErrorSet),
     /// Semantic validation (codegen) failed.
     Codegen(CodegenError),
 }
@@ -439,6 +462,7 @@ impl fmt::Display for CompileError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             CompileError::Parse(e) => write!(f, "{}", e),
+            CompileError::Type(set) => write!(f, "{}", set),
             CompileError::Codegen(e) => write!(f, "{}", e),
         }
     }

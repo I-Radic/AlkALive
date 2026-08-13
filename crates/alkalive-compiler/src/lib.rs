@@ -99,15 +99,17 @@ pub mod lexer;
 pub mod lints;
 pub mod parser;
 pub mod schedule;
+pub mod typechecker;
 
 // Re-export the primary public surface at the crate root for convenience.
 pub use ast::{
-    Attribute, Color, InputFieldNode, ModuleDecl, NodeDecl, PositionDecl, RotationDecl, SceneDecl,
-    TextNode,
+    Attribute, BaseType, Block, Color, Expr, FnDecl, InputFieldNode, ItemDecl, LetDecl, Lit,
+    ModuleDecl, NodeDecl, Param, PositionDecl, Qualifier, RotationDecl, SceneDecl, Stmt, TextNode,
+    Type,
 };
 pub use codegen::{
-    compile, compile_full, compile_scheduled, compile_with_deps, compile_with_lints, lower,
-    CodegenError, CompileError, DEFAULT_FONT_SIZE,
+    compile, compile_full, compile_scheduled, compile_typecheck, compile_with_deps,
+    compile_with_lints, lower, CodegenError, CompileError, DEFAULT_FONT_SIZE,
 };
 pub use egraph::{
     apply_dead_store_elimination, apply_read_merge, apply_state_store_load_forward,
@@ -121,6 +123,10 @@ pub use lints::{run_lints, LintReport, LintSet, LintSeverity};
 pub use parser::{parse, ParseError, Parser};
 pub use schedule::{
     schedule_lowering, BatchingStrategy, PassKind, RenderPass, ScheduleIR, ScheduledScene, ShaderId,
+};
+pub use typechecker::{
+    check_module, effective_qualifier, param_qualifier, qualifier_is_subtype, type_is_subtype,
+    TypeEnv, TypeError, TypeErrorSet,
 };
 
 /// Re-export of [`alkalive_core::ModuleId`] so downstream consumers can

@@ -197,6 +197,18 @@ fn format_compile_error(e: &CompileError, input: &Path) -> String {
         CompileError::Parse(pe) => {
             format!("{}:{}: {}", input.display(), pe.line, pe.message)
         }
+        CompileError::Type(set) => {
+            let mut out = format!("{}: type error(s):", input.display());
+            for te in &set.errors {
+                out.push_str(&format!(
+                    "\n  {}:{}: {}",
+                    input.display(),
+                    te.line,
+                    te.message
+                ));
+            }
+            out
+        }
         CompileError::Codegen(ce) => {
             format!("{}:{}: {}", input.display(), ce.line, ce.message)
         }
