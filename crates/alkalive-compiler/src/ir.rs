@@ -156,9 +156,7 @@ impl AlgorithmIR {
 
     /// Returns `true` iff the scene contains at least one [`NodeIR::Text`].
     pub fn has_text(&self) -> bool {
-        self.nodes
-            .iter()
-            .any(|n| matches!(n, NodeIR::Text { .. }))
+        self.nodes.iter().any(|n| matches!(n, NodeIR::Text { .. }))
     }
 
     /// Returns `true` iff the scene contains at least one
@@ -221,7 +219,10 @@ fn push_node_json(out: &mut String, node: &NodeIR) {
             out.push('"');
             out.push('}');
         }
-        NodeIR::InputField { placeholder, position } => {
+        NodeIR::InputField {
+            placeholder,
+            position,
+        } => {
             out.push_str("{\"type\":\"input-field\",\"placeholder\":\"");
             push_json_escaped(out, placeholder);
             out.push_str("\",\"position\":\"");
@@ -291,10 +292,7 @@ mod tests {
     fn position_ir_display() {
         assert_eq!(format!("{}", PositionIR::Center), "center");
         assert_eq!(format!("{}", PositionIR::BelowText), "below-text");
-        assert_eq!(
-            format!("{}", PositionIR::Custom(0.5, 0.25)),
-            "(0.5, 0.25)"
-        );
+        assert_eq!(format!("{}", PositionIR::Custom(0.5, 0.25)), "(0.5, 0.25)");
     }
 
     #[test]

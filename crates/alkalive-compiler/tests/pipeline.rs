@@ -53,7 +53,10 @@ fn end_to_end_hello_world() {
         other => panic!("expected Text node, got {:?}", other),
     }
     match &ir.nodes[1] {
-        NodeIR::InputField { placeholder, position } => {
+        NodeIR::InputField {
+            placeholder,
+            position,
+        } => {
             assert_eq!(placeholder, "Type here...");
             assert_eq!(*position, PositionIR::BelowText);
         }
@@ -86,7 +89,11 @@ fn json_output_is_well_formed() {
     assert_eq!(open_braces, close_braces, "unbalanced braces: {}", json);
     let open_brackets = json.chars().filter(|&c| c == '[').count();
     let close_brackets = json.chars().filter(|&c| c == ']').count();
-    assert_eq!(open_brackets, close_brackets, "unbalanced brackets: {}", json);
+    assert_eq!(
+        open_brackets, close_brackets,
+        "unbalanced brackets: {}",
+        json
+    );
     // Verify key fields are present.
     for needle in [
         "\"module_name\":\"HelloWorld\"",
@@ -99,7 +106,12 @@ fn json_output_is_well_formed() {
         "\"type\":\"input-field\"",
         "\"placeholder\":\"Type here...\"",
     ] {
-        assert!(json.contains(needle), "missing `{}` in JSON: {}", needle, json);
+        assert!(
+            json.contains(needle),
+            "missing `{}` in JSON: {}",
+            needle,
+            json
+        );
     }
 }
 
@@ -136,7 +148,8 @@ fn module_without_scene_errors() {
 
 #[test]
 fn below_text_without_preceding_text_errors() {
-    let err = compile(r#"module M { scene { input-field { position: below text } } }"#).unwrap_err();
+    let err =
+        compile(r#"module M { scene { input-field { position: below text } } }"#).unwrap_err();
     let s = format!("{}", err);
     assert!(s.contains("`text` node"), "got: {}", s);
 }
@@ -152,7 +165,11 @@ fn unknown_color_name_errors() {
 fn invalid_syntax_errors() {
     let err = compile("module { }").unwrap_err();
     let s = format!("{}", err);
-    assert!(s.contains("identifier") || s.contains("parse error"), "got: {}", s);
+    assert!(
+        s.contains("identifier") || s.contains("parse error"),
+        "got: {}",
+        s
+    );
 }
 
 #[test]

@@ -95,21 +95,24 @@ pub mod codegen;
 pub mod egraph;
 pub mod incremental;
 pub mod ir;
-pub mod lints;
 pub mod lexer;
+pub mod lints;
 pub mod parser;
 pub mod schedule;
 
 // Re-export the primary public surface at the crate root for convenience.
 pub use ast::{
-    Attribute, Color, InputFieldNode, ModuleDecl, NodeDecl, PositionDecl, RotationDecl,
-    SceneDecl, TextNode,
+    Attribute, Color, InputFieldNode, ModuleDecl, NodeDecl, PositionDecl, RotationDecl, SceneDecl,
+    TextNode,
 };
-pub use codegen::{lower, compile, compile_full, compile_with_deps, compile_with_lints, compile_scheduled, CodegenError, CompileError, DEFAULT_FONT_SIZE};
+pub use codegen::{
+    compile, compile_full, compile_scheduled, compile_with_deps, compile_with_lints, lower,
+    CodegenError, CompileError, DEFAULT_FONT_SIZE,
+};
 pub use egraph::{
-    egraph_optimization, extract, build_from_dep_graph, op_cost,
-    apply_state_store_load_forward, apply_dead_store_elimination, apply_read_merge,
-    evaluation_reorder, EClass, EClassData, EClassId, EGraph, ENode, EOp, EOpKind,
+    apply_dead_store_elimination, apply_read_merge, apply_state_store_load_forward,
+    build_from_dep_graph, egraph_optimization, evaluation_reorder, extract, op_cost, EClass,
+    EClassData, EClassId, EGraph, ENode, EOp, EOpKind,
 };
 pub use incremental::{incremental_analysis, DepNode, DepNodeId, DependencyGraph, SignalId};
 pub use ir::{mint_module_id, AlgorithmIR, ColorIR, NodeIR, PositionIR, SceneIR};
@@ -117,8 +120,7 @@ pub use lexer::{tokenize, LexError, Lexer, Token, TokenKind};
 pub use lints::{run_lints, LintReport, LintSet, LintSeverity};
 pub use parser::{parse, ParseError, Parser};
 pub use schedule::{
-    schedule_lowering, BatchingStrategy, PassKind, RenderPass, ScheduledScene, ScheduleIR,
-    ShaderId,
+    schedule_lowering, BatchingStrategy, PassKind, RenderPass, ScheduleIR, ScheduledScene, ShaderId,
 };
 
 /// Re-export of [`alkalive_core::ModuleId`] so downstream consumers can
@@ -168,7 +170,11 @@ module HelloWorld {
         assert!(json.contains("\"content\":\"Hello World!\""), "{}", json);
         assert!(json.contains("\"color\":\"#FFD700\""), "{}", json);
         assert!(json.contains("\"type\":\"input-field\""), "{}", json);
-        assert!(json.contains("\"placeholder\":\"Type here...\""), "{}", json);
+        assert!(
+            json.contains("\"placeholder\":\"Type here...\""),
+            "{}",
+            json
+        );
     }
 
     #[test]
@@ -226,12 +232,7 @@ module HelloWorld {
     #[test]
     fn compile_scheduled_pass_kinds_in_expected_order() {
         let scheduled = compile_scheduled(HELLO_WORLD).unwrap();
-        let kinds: Vec<_> = scheduled
-            .schedule
-            .passes
-            .iter()
-            .map(|p| p.kind)
-            .collect();
+        let kinds: Vec<_> = scheduled.schedule.passes.iter().map(|p| p.kind).collect();
         assert_eq!(
             kinds,
             vec![

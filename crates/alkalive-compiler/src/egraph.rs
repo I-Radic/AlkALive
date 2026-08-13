@@ -1046,9 +1046,7 @@ pub fn apply_dead_store_elimination(eg: &mut EGraph) -> bool {
             let (v1, p1) = sig_writes[i];
             let (_, p2) = sig_writes[i + 1];
             // Check if any read of `sig` has pass_index in (p1, p2).
-            let has_read_between = reads.iter().any(|(s, p)| {
-                *s == sig && *p > p1 && *p < p2
-            });
+            let has_read_between = reads.iter().any(|(s, p)| *s == sig && *p > p1 && *p < p2);
             if !has_read_between && !eg.is_dead(v1) {
                 eg.mark_dead(v1);
                 changed = true;
@@ -1205,9 +1203,7 @@ pub fn evaluation_reorder(nodes: &mut Vec<DepNode>) {
     let mut remaining: Vec<bool> = vec![true; n];
     for _ in 0..n {
         // Find the lowest-position node with in_degree 0 and remaining.
-        let next = (0..n)
-            .filter(|&i| remaining[i] && in_degree[i] == 0)
-            .min();
+        let next = (0..n).filter(|&i| remaining[i] && in_degree[i] == 0).min();
         match next {
             Some(i) => {
                 order.push(i);
@@ -1505,7 +1501,7 @@ pub fn build_from_dep_graph(eg: &mut EGraph, dep_graph: &DependencyGraph) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::incremental::{DepNode, DepNodeId, DependencyGraph, SignalId, signals};
+    use crate::incremental::{signals, DepNode, DepNodeId, DependencyGraph, SignalId};
 
     // ---- Helper: build a small synthetic dep graph ----
 
@@ -2055,7 +2051,11 @@ mod tests {
         let mut eg = EGraph::new();
         build_from_dep_graph(&mut eg, &dep);
         let read_classes = eg.find_read_classes(SignalId(0));
-        assert_eq!(read_classes.len(), 1, "SignalRead(0) should hash-cons to one class");
+        assert_eq!(
+            read_classes.len(),
+            1,
+            "SignalRead(0) should hash-cons to one class"
+        );
     }
 
     // =========================
@@ -2069,7 +2069,10 @@ mod tests {
         let mut eg = EGraph::new();
         build_from_dep_graph(&mut eg, &dep);
         let changed = apply_read_merge(&mut eg);
-        assert!(!changed, "read_merge should be a no-op when hash-consing already merged");
+        assert!(
+            !changed,
+            "read_merge should be a no-op when hash-consing already merged"
+        );
     }
 
     #[test]
@@ -2182,7 +2185,10 @@ mod tests {
         assert!(!eg.is_dead(pass0_class));
         let changed = apply_dead_store_elimination(&mut eg);
         assert!(changed);
-        assert!(eg.is_dead(pass0_class), "pass 0's class should be marked dead");
+        assert!(
+            eg.is_dead(pass0_class),
+            "pass 0's class should be marked dead"
+        );
     }
 
     #[test]
@@ -2420,7 +2426,11 @@ mod tests {
                 },
                 DepNode {
                     id: DepNodeId(4),
-                    inputs: vec![signals::INPUT_TEXT, signals::CANVAS_WIDTH, signals::CANVAS_HEIGHT],
+                    inputs: vec![
+                        signals::INPUT_TEXT,
+                        signals::CANVAS_WIDTH,
+                        signals::CANVAS_HEIGHT,
+                    ],
                     outputs: vec![],
                     pass_index: 4,
                     description: "InputText".into(),
@@ -2433,12 +2443,21 @@ mod tests {
         // Each pass's inputs should be preserved (read_merge doesn't
         // eliminate reads, only deduplicates them at the e-class level).
         for (orig, opt) in dep.nodes.iter().zip(result.nodes.iter()) {
-            assert_eq!(orig.inputs.len(), opt.inputs.len(),
+            assert_eq!(
+                orig.inputs.len(),
+                opt.inputs.len(),
                 "pass {} inputs changed: {:?} → {:?}",
-                orig.pass_index, orig.inputs, opt.inputs);
+                orig.pass_index,
+                orig.inputs,
+                opt.inputs
+            );
             for sig in &orig.inputs {
-                assert!(opt.inputs.contains(sig),
-                    "pass {} lost input {:?}", orig.pass_index, sig);
+                assert!(
+                    opt.inputs.contains(sig),
+                    "pass {} lost input {:?}",
+                    orig.pass_index,
+                    sig
+                );
             }
         }
     }
@@ -2449,7 +2468,10 @@ mod tests {
         let result = egraph_optimization(&dep);
         // Pass 0 (dead store) should be pruned.
         let pass_indices: Vec<usize> = result.nodes.iter().map(|n| n.pass_index).collect();
-        assert!(!pass_indices.contains(&0), "dead store should be eliminated");
+        assert!(
+            !pass_indices.contains(&0),
+            "dead store should be eliminated"
+        );
         assert!(pass_indices.contains(&1));
         assert!(pass_indices.contains(&2));
     }

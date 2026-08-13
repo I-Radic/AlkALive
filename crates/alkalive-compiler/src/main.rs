@@ -85,8 +85,12 @@ fn run_compile(args: &[String]) -> Result<(), String> {
                 println!("Usage: alkalive-compiler compile <input.alk> -o <output.scene> [--lint] [--scheduled]");
                 println!();
                 println!("Flags:");
-                println!("  --lint        Run lint passes and print findings to stderr (ADR-027 P1).");
-                println!("  --scheduled   Emit the ADR-024 ScheduledScene JSON (algorithm + schedule).");
+                println!(
+                    "  --lint        Run lint passes and print findings to stderr (ADR-027 P1)."
+                );
+                println!(
+                    "  --scheduled   Emit the ADR-024 ScheduledScene JSON (algorithm + schedule)."
+                );
                 return Ok(());
             }
             other if other.starts_with('-') => {
@@ -103,7 +107,8 @@ fn run_compile(args: &[String]) -> Result<(), String> {
     }
 
     let input_path = input_path.ok_or_else(|| {
-        "missing input file; usage: alkalive-compiler compile <input.alk> -o <output.scene>".to_string()
+        "missing input file; usage: alkalive-compiler compile <input.alk> -o <output.scene>"
+            .to_string()
     })?;
     let output_path = output_path.ok_or_else(|| {
         "missing -o <output.scene>; usage: alkalive-compiler compile <input.alk> -o <output.scene>".to_string()
@@ -298,13 +303,19 @@ fn render_pass_to_json(pass: &RenderPass) -> serde_json::Value {
                 .collect(),
         ),
     );
-    m.insert("shader".into(), Value::String(shader_id_to_string(pass.shader).to_string()));
+    m.insert(
+        "shader".into(),
+        Value::String(shader_id_to_string(pass.shader).to_string()),
+    );
     m.insert(
         "batching".into(),
         Value::String(batching_strategy_to_string(pass.batching).to_string()),
     );
     m.insert("rotation".into(), Value::Bool(pass.rotation));
-    m.insert("kind".into(), Value::String(pass_kind_to_string(pass.kind).to_string()));
+    m.insert(
+        "kind".into(),
+        Value::String(pass_kind_to_string(pass.kind).to_string()),
+    );
     Value::Object(m)
 }
 
@@ -348,14 +359,23 @@ fn node_to_json(node: &NodeIR) -> serde_json::Value {
             m.insert("color".into(), Value::String(color_to_string(*color)));
             m.insert("font_size".into(), json!(*font_size));
             m.insert("rotation_speed".into(), json!(*rotation_speed));
-            m.insert("position".into(), Value::String(position_to_string(*position)));
+            m.insert(
+                "position".into(),
+                Value::String(position_to_string(*position)),
+            );
             Value::Object(m)
         }
-        NodeIR::InputField { placeholder, position } => {
+        NodeIR::InputField {
+            placeholder,
+            position,
+        } => {
             let mut m = Map::new();
             m.insert("type".into(), Value::String("input-field".into()));
             m.insert("placeholder".into(), Value::String(placeholder.clone()));
-            m.insert("position".into(), Value::String(position_to_string(*position)));
+            m.insert(
+                "position".into(),
+                Value::String(position_to_string(*position)),
+            );
             Value::Object(m)
         }
     }
@@ -542,12 +562,8 @@ mod tests {
 
     #[test]
     fn run_compile_lint_help_succeeds() {
-        run(&[
-            "alkalive-compiler".into(),
-            "compile".into(),
-            "-h".into(),
-        ])
-        .expect("compile -h should succeed");
+        run(&["alkalive-compiler".into(), "compile".into(), "-h".into()])
+            .expect("compile -h should succeed");
     }
 
     #[test]
@@ -562,11 +578,7 @@ mod tests {
             "--lint".into(),
         ])
         .unwrap_err();
-        assert!(
-            !err.contains("unknown flag"),
-            "got: {}",
-            err
-        );
+        assert!(!err.contains("unknown flag"), "got: {}", err);
         assert!(err.contains("missing input file"), "got: {}", err);
     }
 

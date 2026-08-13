@@ -86,7 +86,10 @@ impl LintReport {
     /// Render this report as a single human-readable line, prefixed by
     /// the severity and the source position.
     pub fn render(&self) -> String {
-        format!("{}:{}: {}: {}", self.line, self.col, self.severity, self.message)
+        format!(
+            "{}:{}: {}: {}",
+            self.line, self.col, self.severity, self.message
+        )
     }
 }
 
@@ -285,6 +288,7 @@ mod tests {
             name: "M".into(),
             scene: None,
             attributes: Vec::new(),
+            items: Vec::new(),
             line: 1,
             col: 1,
         };
@@ -299,6 +303,7 @@ mod tests {
             name: "M".into(),
             scene: None,
             attributes: vec![ast::Attribute::new("deny(monotonicity)", 1, 1)],
+            items: Vec::new(),
             line: 1,
             col: 1,
         };

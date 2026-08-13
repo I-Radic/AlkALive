@@ -22,8 +22,7 @@
 use core::fmt;
 
 use crate::ast::{
-    Color, ModuleDecl, NodeDecl, PositionDecl, RotationDecl, SceneDecl, TextNode,
-    InputFieldNode,
+    Color, InputFieldNode, ModuleDecl, NodeDecl, PositionDecl, RotationDecl, SceneDecl, TextNode,
 };
 use crate::egraph::egraph_optimization;
 use crate::incremental::{incremental_analysis, DependencyGraph};
@@ -141,10 +140,7 @@ fn lower_text_node(t: &TextNode) -> Result<NodeIR, CodegenError> {
     })
 }
 
-fn lower_input_field_node(
-    f: &InputFieldNode,
-    scene: &SceneDecl,
-) -> Result<NodeIR, CodegenError> {
+fn lower_input_field_node(f: &InputFieldNode, scene: &SceneDecl) -> Result<NodeIR, CodegenError> {
     let placeholder = f.placeholder.clone().unwrap_or_default();
     let position = match &f.position {
         Some(p) => lower_position(p, f.line, f.col)?,
@@ -157,7 +153,9 @@ fn lower_input_field_node(
         let has_preceding_text = scene.nodes.iter().any(|n| matches!(n, NodeDecl::Text(_)));
         if !has_preceding_text {
             return Err(CodegenError {
-                message: "`position: below text` requires a `text` node to be declared in the same scene".into(),
+                message:
+                    "`position: below text` requires a `text` node to be declared in the same scene"
+                        .into(),
                 line: f.line,
                 col: f.col,
             });
@@ -252,9 +250,7 @@ pub fn compile(src: &str) -> Result<AlgorithmIR, CompileError> {
 ///
 /// Returns [`CompileError`] only if lexing, parsing, or codegen fails.
 /// Lint findings never produce a `CompileError`.
-pub fn compile_with_lints(
-    src: &str,
-) -> Result<(AlgorithmIR, crate::lints::LintSet), CompileError> {
+pub fn compile_with_lints(src: &str) -> Result<(AlgorithmIR, crate::lints::LintSet), CompileError> {
     let module = crate::parser::parse(src).map_err(CompileError::Parse)?;
     let lint_set = crate::lints::run_lints(&module);
     let ir = lower(&module).map_err(CompileError::Codegen)?;
@@ -305,7 +301,10 @@ pub fn compile_with_lints(
 pub fn compile_scheduled(src: &str) -> Result<ScheduledScene, CompileError> {
     let algorithm = compile(src)?;
     let schedule = schedule_lowering(&algorithm);
-    Ok(ScheduledScene { algorithm, schedule })
+    Ok(ScheduledScene {
+        algorithm,
+        schedule,
+    })
 }
 
 /// Convenience: tokenize + parse + lower + schedule-lower + incremental
@@ -556,7 +555,11 @@ mod tests {
     #[test]
     fn lower_text_node_unknown_color_errors() {
         let err = lower_err(r#"module M { scene { text "Hi" { color: purple } } }"#);
-        assert!(err.message.contains("unknown named color"), "got: {}", err.message);
+        assert!(
+            err.message.contains("unknown named color"),
+            "got: {}",
+            err.message
+        );
     }
 
     #[test]
@@ -573,11 +576,12 @@ mod tests {
 
     #[test]
     fn lower_input_field_defaults() {
-        let ir = lower_ok(
-            r#"module M { scene { text "Hi" { } input-field { } } }"#,
-        );
+        let ir = lower_ok(r#"module M { scene { text "Hi" { } input-field { } } }"#);
         match &ir.nodes[1] {
-            NodeIR::InputField { placeholder, position } => {
+            NodeIR::InputField {
+                placeholder,
+                position,
+            } => {
                 assert_eq!(placeholder, "");
                 assert_eq!(*position, PositionIR::Center);
             }
@@ -591,7 +595,10 @@ mod tests {
             r#"module M { scene { text "Hi" { } input-field { placeholder: "Type" position: below text } } }"#,
         );
         match &ir.nodes[1] {
-            NodeIR::InputField { placeholder, position } => {
+            NodeIR::InputField {
+                placeholder,
+                position,
+            } => {
                 assert_eq!(placeholder, "Type");
                 assert_eq!(*position, PositionIR::BelowText);
             }
@@ -611,8 +618,7 @@ mod tests {
 
     #[test]
     fn lower_input_field_below_other_ref_errors() {
-        let err =
-            lower_err(r#"module M { scene { input-field { position: below button } } }"#);
+        let err = lower_err(r#"module M { scene { input-field { position: below button } } }"#);
         assert!(err.message.contains("below button"), "got: {}", err.message);
     }
 
@@ -668,7 +674,10 @@ module HelloWorld {
             other => panic!("expected Text, got {:?}", other),
         }
         match &ir.nodes[1] {
-            NodeIR::InputField { placeholder, position } => {
+            NodeIR::InputField {
+                placeholder,
+                position,
+            } => {
                 assert_eq!(placeholder, "Type here...");
                 assert_eq!(*position, PositionIR::BelowText);
             }
@@ -709,7 +718,11 @@ module HelloWorld {
     fn compile_error_display() {
         let err = compile("module M { }").unwrap_err();
         let s = format!("{}", err);
-        assert!(s.contains("codegen error") || s.contains("parse error"), "got: {}", s);
+        assert!(
+            s.contains("codegen error") || s.contains("parse error"),
+            "got: {}",
+            s
+        );
     }
 
     #[test]
@@ -723,10 +736,9 @@ module HelloWorld {
 
     #[test]
     fn compile_scheduled_full_pipeline_ok() {
-        let scheduled = compile_scheduled(
-            r#"module M { scene { text "Hi" { } input-field { } } }"#,
-        )
-        .expect("compile_scheduled should succeed");
+        let scheduled =
+            compile_scheduled(r#"module M { scene { text "Hi" { } input-field { } } }"#)
+                .expect("compile_scheduled should succeed");
         assert_eq!(scheduled.algorithm.module_name, "M");
         assert!(scheduled.algorithm.has_text());
         assert!(scheduled.algorithm.has_input_field());
@@ -737,11 +749,13 @@ module HelloWorld {
 
     #[test]
     fn compile_scheduled_text_only_has_two_passes() {
-        let scheduled =
-            compile_scheduled(r#"module M { scene { text "Hi" { } } }"#).unwrap();
+        let scheduled = compile_scheduled(r#"module M { scene { text "Hi" { } } }"#).unwrap();
         // Clear + TitleText = 2 passes.
         assert_eq!(scheduled.schedule.passes.len(), 2);
-        assert_eq!(scheduled.schedule.passes[0].kind, crate::schedule::PassKind::Clear);
+        assert_eq!(
+            scheduled.schedule.passes[0].kind,
+            crate::schedule::PassKind::Clear
+        );
         assert_eq!(
             scheduled.schedule.passes[1].kind,
             crate::schedule::PassKind::TitleText
@@ -752,7 +766,10 @@ module HelloWorld {
     fn compile_scheduled_empty_scene_has_only_clear_pass() {
         let scheduled = compile_scheduled("module M { scene { } }").unwrap();
         assert_eq!(scheduled.schedule.passes.len(), 1);
-        assert_eq!(scheduled.schedule.passes[0].kind, crate::schedule::PassKind::Clear);
+        assert_eq!(
+            scheduled.schedule.passes[0].kind,
+            crate::schedule::PassKind::Clear
+        );
     }
 
     #[test]
@@ -781,10 +798,9 @@ module HelloWorld {
 
     #[test]
     fn compile_with_deps_full_pipeline_ok() {
-        let (scheduled, dep_graph) = compile_with_deps(
-            r#"module M { scene { text "Hi" { } input-field { } } }"#,
-        )
-        .expect("compile_with_deps should succeed");
+        let (scheduled, dep_graph) =
+            compile_with_deps(r#"module M { scene { text "Hi" { } input-field { } } }"#)
+                .expect("compile_with_deps should succeed");
         // The scheduled scene matches what compile_scheduled returns.
         assert_eq!(scheduled.algorithm.module_name, "M");
         assert!(scheduled.algorithm.has_text());
@@ -849,17 +865,19 @@ module HelloWorld {
         let (scheduled_with_deps, _graph) = compile_with_deps(src).unwrap();
         let scheduled = compile_scheduled(src).unwrap();
         assert_eq!(scheduled_with_deps.algorithm, scheduled.algorithm);
-        assert_eq!(scheduled_with_deps.schedule.passes.len(), scheduled.schedule.passes.len());
+        assert_eq!(
+            scheduled_with_deps.schedule.passes.len(),
+            scheduled.schedule.passes.len()
+        );
     }
 
     // ---- ADR-026: compile_full() tests ----
 
     #[test]
     fn compile_full_full_pipeline_ok() {
-        let (scheduled, dep_graph) = compile_full(
-            r#"module M { scene { text "Hi" { } input-field { } } }"#,
-        )
-        .expect("compile_full should succeed");
+        let (scheduled, dep_graph) =
+            compile_full(r#"module M { scene { text "Hi" { } input-field { } } }"#)
+                .expect("compile_full should succeed");
         // The scheduled scene matches what compile_scheduled returns.
         assert_eq!(scheduled.algorithm.module_name, "M");
         assert!(scheduled.algorithm.has_text());
@@ -954,7 +972,10 @@ module HelloWorld {
         .unwrap();
         let dep_graph_unoptimized = incremental_analysis(&scheduled);
         // Same number of nodes.
-        assert_eq!(dep_graph_optimized.nodes.len(), dep_graph_unoptimized.nodes.len());
+        assert_eq!(
+            dep_graph_optimized.nodes.len(),
+            dep_graph_unoptimized.nodes.len()
+        );
         // For each pass, the set of input signals should be the same
         // (order may differ due to topological sort, so we compare as
         // sets).
@@ -981,6 +1002,9 @@ module HelloWorld {
         let (scheduled_full, _graph) = compile_full(src).unwrap();
         let scheduled = compile_scheduled(src).unwrap();
         assert_eq!(scheduled_full.algorithm, scheduled.algorithm);
-        assert_eq!(scheduled_full.schedule.passes.len(), scheduled.schedule.passes.len());
+        assert_eq!(
+            scheduled_full.schedule.passes.len(),
+            scheduled.schedule.passes.len()
+        );
     }
 }

@@ -97,10 +97,245 @@ pub struct ModuleDecl {
     /// File-level attributes (e.g. `#![deny(monotonicity)]`) attached to
     /// the module. Collected from the very start of the source file.
     pub attributes: Vec<Attribute>,
+    /// Top-level items declared in the module body alongside the scene:
+    /// `fn` declarations and `let` collection declarations.
+    /// (ADR-027 Phase 2 — the language is extended with functions and typed
+    /// collections so that monotonicity qualifiers have something to annotate.)
+    pub items: Vec<ItemDecl>,
     /// 1-based line where the `module` keyword appears.
     pub line: u32,
     /// 1-based column where the `module` keyword appears.
     pub col: u32,
+}
+
+impl ModuleDecl {
+    /// Returns `true` iff the module carries the `#![deny(monotonicity)]`
+    /// file-level attribute. The attribute name is stored as
+    /// `"deny(monotonicity)"` by the shebang-attribute parser.
+    pub fn denies_monotonicity(&self) -> bool {
+        self.attributes
+            .iter()
+            .any(|a| a.name == "deny(monotonicity)")
+    }
+}
+
+// ======================================================================
+// ADR-027 Phase 2 — Type system, functions, collections, expressions
+// ======================================================================
+
+/// A top-level item declared inside a module body (alongside the scene block).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ItemDecl {
+    /// `fn name(params) -> ReturnType { body }`
+    Fn(FnDecl),
+    /// `let name: Type = init;`
+    Let(LetDecl),
+}
+
+/// A function declaration.
+///
+/// ```text
+/// fn name(param: Type, ...) -> ReturnType { body }
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct FnDecl {
+    /// Function name.
+    pub name: String,
+    /// Typed parameters.
+    pub params: Vec<Param>,
+    /// Optional return type. `None` means the function returns unit `()`.
+    pub return_type: Option<Type>,
+    /// The function body block.
+    pub body: Block,
+    /// Attributes attached to this declaration (e.g. `@monotone`).
+    pub attrs: Vec<Attribute>,
+    /// 1-based line of the `fn` keyword.
+    pub line: u32,
+    /// 1-based column of the `fn` keyword.
+    pub col: u32,
+}
+
+/// A typed function parameter.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Param {
+    /// Parameter name.
+    pub name: String,
+    /// Parameter type (may carry a monotonicity qualifier).
+    pub ty: Type,
+    /// 1-based line of the parameter name.
+    pub line: u32,
+    /// 1-based column of the parameter name.
+    pub col: u32,
+}
+
+/// A typed `let` binding (collection declaration).
+///
+/// ```text
+/// let name: Type = init;
+/// ```
+/// The `Type` may carry a `monotone` / `antitone` qualifier.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LetDecl {
+    /// Binding name.
+    pub name: String,
+    /// Declared type (may carry a monotonicity qualifier).
+    pub ty: Type,
+    /// Initialiser expression.
+    pub init: Expr,
+    /// Attributes attached to this declaration (e.g. `@monotone`).
+    pub attrs: Vec<Attribute>,
+    /// 1-based line of the `let` keyword.
+    pub line: u32,
+    /// 1-based column of the `let` keyword.
+    pub col: u32,
+}
+
+/// A brace-delimited block of statements.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Block {
+    /// Statements in source order.
+    pub stmts: Vec<Stmt>,
+    /// 1-based line of the opening `{`.
+    pub line: u32,
+    /// 1-based column of the opening `{`.
+    pub col: u32,
+}
+
+/// A statement inside a function body.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Stmt {
+    /// `let name: Type = init;`
+    Let(LetDecl),
+    /// An expression statement (typically a method call like `x.push(e);`).
+    Expr(Expr),
+    /// `return expr;` or `return;`.
+    Return(Option<Expr>, u32, u32),
+}
+
+/// An expression.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Expr {
+    /// A literal value.
+    Lit(Lit, u32, u32),
+    /// A variable reference.
+    Var(String, u32, u32),
+    /// A path-qualified call like `Vec::new()`.
+    ///
+    /// Stored as `(module, member, args, line, col)`.
+    PathCall(String, String, Vec<Expr>, u32, u32),
+    /// A method call `receiver.method(args)`.
+    MethodCall {
+        /// The receiver expression (often a `Var`).
+        receiver: Box<Expr>,
+        /// Method name (e.g. `push`, `remove`, `len`).
+        method: String,
+        /// Argument expressions.
+        args: Vec<Expr>,
+        /// 1-based line of the method name.
+        line: u32,
+        /// 1-based column of the method name.
+        col: u32,
+    },
+}
+
+/// A literal value.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Lit {
+    /// An integer literal (stored as `i64`).
+    Int(i64),
+    /// A floating-point literal.
+    Float(f64),
+    /// A string literal.
+    Str(String),
+    /// A boolean literal.
+    Bool(bool),
+}
+
+/// A type, optionally carrying a monotonicity qualifier.
+///
+/// (ADR-027 Phase 2 — `monotone` / `antitone` are first-class type qualifiers.)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Type {
+    /// The monotonicity qualifier on this type.
+    pub qualifier: Qualifier,
+    /// The base (unqualified) type.
+    pub base: BaseType,
+}
+
+/// The monotonicity qualifier on a type.
+///
+/// - `Monotone`: the collection may only grow (no shrink operations).
+/// - `Antitone`: the collection may only shrink (no grow operations).
+/// - `Unrestricted`: no monotonicity constraint (the default).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Qualifier {
+    /// No monotonicity constraint.
+    #[default]
+    Unrestricted,
+    /// Collection only grows.
+    Monotone,
+    /// Collection only shrinks.
+    Antitone,
+}
+
+impl fmt::Display for Qualifier {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Qualifier::Unrestricted => write!(f, "unrestricted"),
+            Qualifier::Monotone => write!(f, "monotone"),
+            Qualifier::Antitone => write!(f, "antitone"),
+        }
+    }
+}
+
+/// The base (unqualified) type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BaseType {
+    /// `i32`
+    I32,
+    /// `f32`
+    F32,
+    /// `string`
+    Str,
+    /// `bool`
+    Bool,
+    /// `Vec<T>` — a growable collection.
+    Vec(Box<Type>),
+    /// A named user type (forward reference; currently unused).
+    Named(String),
+}
+
+impl Type {
+    /// Convenience: is this a `Vec<T>` (any element type, any qualifier)?
+    pub fn is_vec(&self) -> bool {
+        matches!(self.base, BaseType::Vec(_))
+    }
+
+    /// Convenience: construct an unrestricted `Vec<T>`.
+    pub fn vec(elem: Type) -> Self {
+        Type {
+            qualifier: Qualifier::Unrestricted,
+            base: BaseType::Vec(Box::new(elem)),
+        }
+    }
+}
+
+impl fmt::Display for Type {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.qualifier {
+            Qualifier::Unrestricted => {}
+            Qualifier::Monotone => write!(f, "monotone ")?,
+            Qualifier::Antitone => write!(f, "antitone ")?,
+        }
+        match &self.base {
+            BaseType::I32 => write!(f, "i32"),
+            BaseType::F32 => write!(f, "f32"),
+            BaseType::Str => write!(f, "string"),
+            BaseType::Bool => write!(f, "bool"),
+            BaseType::Vec(elem) => write!(f, "Vec<{}>", elem),
+            BaseType::Named(n) => write!(f, "{}", n),
+        }
+    }
 }
 
 /// A `scene { ... }` block.
@@ -254,10 +489,7 @@ mod tests {
             format!("{}", PositionDecl::Below("text".into())),
             "below text"
         );
-        assert_eq!(
-            format!("{}", PositionDecl::Custom(1.0, 2.0)),
-            "1 2"
-        );
+        assert_eq!(format!("{}", PositionDecl::Custom(1.0, 2.0)), "1 2");
     }
 
     #[test]
@@ -284,6 +516,7 @@ mod tests {
                 col: 1,
             }),
             attributes: vec![Attribute::new("deny(monotonicity)", 1, 1)],
+            items: Vec::new(),
             line: 1,
             col: 1,
         };

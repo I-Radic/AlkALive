@@ -13,8 +13,9 @@
 use core::fmt;
 
 use crate::ast::{
-    Attribute, Color, InputFieldNode, ModuleDecl, NodeDecl, PositionDecl, RotationDecl,
-    SceneDecl, TextNode,
+    Attribute, BaseType, Block, Color, Expr, FnDecl, InputFieldNode, ItemDecl, LetDecl, Lit,
+    ModuleDecl, NodeDecl, Param, PositionDecl, Qualifier, RotationDecl, SceneDecl, Stmt, TextNode,
+    Type,
 };
 use crate::lexer::{Token, TokenKind};
 
@@ -152,14 +153,31 @@ impl Parser {
         self.skip_newlines();
 
         let mut scene: Option<SceneDecl> = None;
-        // Parse module body: zero or one scene block.
+        let mut items: Vec<ItemDecl> = Vec::new();
+        // Parse module body: an optional `scene` block (possibly with
+        // leading `@attributes`) followed by zero or more `fn` / `let`
+        // top-level items (ADR-027 Phase 2). Items may also carry leading
+        // `@attributes`.
         loop {
+            // Collect any leading attributes.
+            let attrs = self.parse_leading_attributes()?;
+            self.skip_newlines();
             match self.peek().kind {
                 TokenKind::RBrace => {
+                    if !attrs.is_empty() {
+                        return Err(self
+                            .unexpected_msg("trailing attributes with no following declaration"));
+                    }
                     self.advance();
                     break;
                 }
-                TokenKind::Scene | TokenKind::At => {
+                TokenKind::Scene => {
+                    if !attrs.is_empty() {
+                        return Err(self.unexpected_msg(
+                            "attributes are not allowed on `scene` blocks in this position; \
+                             place `@`-attributes immediately before `scene`",
+                        ));
+                    }
                     if scene.is_some() {
                         return Err(self.unexpected_msg(
                             "duplicate `scene` block; a module may declare at most one scene",
@@ -168,11 +186,21 @@ impl Parser {
                     scene = Some(self.parse_scene()?);
                     self.skip_newlines();
                 }
+                TokenKind::Fn => {
+                    let f = self.parse_fn(attrs)?;
+                    items.push(ItemDecl::Fn(f));
+                    self.skip_newlines();
+                }
+                TokenKind::Let => {
+                    let l = self.parse_let(attrs)?;
+                    items.push(ItemDecl::Let(l));
+                    self.skip_newlines();
+                }
                 TokenKind::Eof => {
                     return Err(self.unexpected("closing `}`"));
                 }
                 _ => {
-                    return Err(self.unexpected("`scene` or closing `}`"));
+                    return Err(self.unexpected("`scene`, `fn`, `let`, or closing `}`"));
                 }
             }
         }
@@ -181,9 +209,314 @@ impl Parser {
             name,
             scene,
             attributes,
+            items,
             line,
             col,
         })
+    }
+
+    // ------------------------------------------------------------------
+    // ADR-027 Phase 2 — types, functions, let bindings, expressions
+    // ------------------------------------------------------------------
+
+    /// Accept any identifier-shaped token (keyword or plain `Ident`) as an
+    /// attribute name, method name, or path member. This is necessary because
+    /// `monotone` and `antitone` are keywords in Phase 2 but may also appear
+    /// as attribute names in the Phase 1 `@monotone` form.
+    fn expect_any_ident(&mut self) -> Result<Token, ParseError> {
+        let tok = self.peek().clone();
+        if matches!(
+            tok.kind,
+            TokenKind::Ident | TokenKind::Monotone | TokenKind::Antitone
+        ) {
+            self.advance();
+            Ok(tok)
+        } else {
+            Err(self.unexpected("identifier"))
+        }
+    }
+
+    /// Parse a type: `Qualifier? BaseType`.
+    fn parse_type(&mut self) -> Result<Type, ParseError> {
+        let qualifier = match self.peek().kind {
+            TokenKind::Monotone => {
+                self.advance();
+                Qualifier::Monotone
+            }
+            TokenKind::Antitone => {
+                self.advance();
+                Qualifier::Antitone
+            }
+            _ => Qualifier::Unrestricted,
+        };
+        let base = self.parse_base_type()?;
+        Ok(Type { qualifier, base })
+    }
+
+    /// Parse a base type: `i32 | f32 | string | bool | Vec<T> | Ident`.
+    fn parse_base_type(&mut self) -> Result<BaseType, ParseError> {
+        let tok = self.peek().clone();
+        let base = match tok.kind {
+            TokenKind::I32 => {
+                self.advance();
+                BaseType::I32
+            }
+            TokenKind::F32 => {
+                self.advance();
+                BaseType::F32
+            }
+            TokenKind::Str => {
+                self.advance();
+                BaseType::Str
+            }
+            TokenKind::Bool => {
+                self.advance();
+                BaseType::Bool
+            }
+            TokenKind::Vec => {
+                self.advance();
+                self.expect(TokenKind::Lt)?;
+                let elem = self.parse_type()?;
+                self.expect(TokenKind::Gt)?;
+                BaseType::Vec(Box::new(elem))
+            }
+            TokenKind::Ident => {
+                self.advance();
+                BaseType::Named(tok.value.clone())
+            }
+            _ => return Err(self.unexpected("type")),
+        };
+        Ok(base)
+    }
+
+    /// Parse `fn name(params) -> Type { body }`. `attrs` are the leading
+    /// attributes already collected.
+    fn parse_fn(&mut self, attrs: Vec<Attribute>) -> Result<FnDecl, ParseError> {
+        let kw = self.expect(TokenKind::Fn)?;
+        let line = kw.line;
+        let col = kw.col;
+        let name_tok = self.expect(TokenKind::Ident)?;
+        let name = name_tok.value.clone();
+        self.expect(TokenKind::LParen)?;
+        self.skip_newlines();
+        let mut params = Vec::new();
+        loop {
+            if matches!(self.peek().kind, TokenKind::RParen) {
+                self.advance();
+                break;
+            }
+            let ptok = self.expect(TokenKind::Ident)?;
+            let pname = ptok.value.clone();
+            let pline = ptok.line;
+            let pcol = ptok.col;
+            self.expect(TokenKind::Colon)?;
+            let ty = self.parse_type()?;
+            params.push(Param {
+                name: pname,
+                ty,
+                line: pline,
+                col: pcol,
+            });
+            self.skip_newlines();
+            if matches!(self.peek().kind, TokenKind::Comma) {
+                self.advance();
+                self.skip_newlines();
+            } else {
+                self.expect(TokenKind::RParen)?;
+                break;
+            }
+        }
+        self.skip_newlines();
+        let return_type = if matches!(self.peek().kind, TokenKind::Arrow) {
+            self.advance();
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
+        self.skip_newlines();
+        let body = self.parse_block()?;
+        Ok(FnDecl {
+            name,
+            params,
+            return_type,
+            body,
+            attrs,
+            line,
+            col,
+        })
+    }
+
+    /// Parse `let name: Type = init;`. `attrs` are the leading attributes
+    /// already collected.
+    fn parse_let(&mut self, attrs: Vec<Attribute>) -> Result<LetDecl, ParseError> {
+        let kw = self.expect(TokenKind::Let)?;
+        let line = kw.line;
+        let col = kw.col;
+        let name_tok = self.expect(TokenKind::Ident)?;
+        let name = name_tok.value.clone();
+        self.expect(TokenKind::Colon)?;
+        let ty = self.parse_type()?;
+        self.expect(TokenKind::Eq)?;
+        self.skip_newlines();
+        let init = self.parse_expr()?;
+        self.expect(TokenKind::Semi)?;
+        Ok(LetDecl {
+            name,
+            ty,
+            init,
+            attrs,
+            line,
+            col,
+        })
+    }
+
+    /// Parse `{ stmt* }`.
+    fn parse_block(&mut self) -> Result<Block, ParseError> {
+        let lb = self.expect(TokenKind::LBrace)?;
+        let line = lb.line;
+        let col = lb.col;
+        self.skip_newlines();
+        let mut stmts = Vec::new();
+        loop {
+            if matches!(self.peek().kind, TokenKind::RBrace) {
+                self.advance();
+                break;
+            }
+            let stmt_attrs = self.parse_leading_attributes()?;
+            if !stmt_attrs.is_empty() {
+                if !matches!(self.peek().kind, TokenKind::Let) {
+                    return Err(
+                        self.unexpected_msg("attributes inside a body must be followed by `let`")
+                    );
+                }
+                let l = self.parse_let(stmt_attrs)?;
+                stmts.push(Stmt::Let(l));
+            } else {
+                let s = self.parse_stmt()?;
+                stmts.push(s);
+            }
+            self.skip_newlines();
+        }
+        Ok(Block { stmts, line, col })
+    }
+
+    /// Parse a single statement.
+    fn parse_stmt(&mut self) -> Result<Stmt, ParseError> {
+        match self.peek().kind {
+            TokenKind::Let => {
+                let l = self.parse_let(Vec::new())?;
+                Ok(Stmt::Let(l))
+            }
+            TokenKind::Return => {
+                let kw = self.advance().clone();
+                self.skip_newlines();
+                if matches!(self.peek().kind, TokenKind::Semi) {
+                    self.advance();
+                    return Ok(Stmt::Return(None, kw.line, kw.col));
+                }
+                let e = self.parse_expr()?;
+                self.expect(TokenKind::Semi)?;
+                Ok(Stmt::Return(Some(e), kw.line, kw.col))
+            }
+            _ => {
+                let e = self.parse_expr()?;
+                self.expect(TokenKind::Semi)?;
+                Ok(Stmt::Expr(e))
+            }
+        }
+    }
+
+    /// Parse an expression: literal, variable, method call, or path call.
+    fn parse_expr(&mut self) -> Result<Expr, ParseError> {
+        let tok = self.peek().clone();
+        let mut expr = match tok.kind {
+            TokenKind::Number => {
+                self.advance();
+                let v = tok.value.clone();
+                if let Ok(i) = v.parse::<i64>() {
+                    Expr::Lit(Lit::Int(i), tok.line, tok.col)
+                } else if let Ok(f) = v.parse::<f64>() {
+                    Expr::Lit(Lit::Float(f), tok.line, tok.col)
+                } else {
+                    return Err(self.unexpected_msg(format!("unparseable number `{}`", v)));
+                }
+            }
+            TokenKind::String => {
+                self.advance();
+                Expr::Lit(Lit::Str(tok.value.clone()), tok.line, tok.col)
+            }
+            TokenKind::True => {
+                self.advance();
+                Expr::Lit(Lit::Bool(true), tok.line, tok.col)
+            }
+            TokenKind::False => {
+                self.advance();
+                Expr::Lit(Lit::Bool(false), tok.line, tok.col)
+            }
+            TokenKind::Ident | TokenKind::Vec => {
+                // Could be `Vec::member(...)` (path call) or a plain variable.
+                if matches!(self.peek_at(1).kind, TokenKind::ColonColon) {
+                    let module = tok.value.clone();
+                    self.advance(); // ident/Vec
+                    self.advance(); // ::
+                    let member_tok = self.expect_any_ident()?;
+                    let member = member_tok.value.clone();
+                    self.expect(TokenKind::LParen)?;
+                    self.skip_newlines();
+                    let args = self.parse_arg_list()?;
+                    Expr::PathCall(module, member, args, tok.line, tok.col)
+                } else {
+                    self.advance();
+                    Expr::Var(tok.value.clone(), tok.line, tok.col)
+                }
+            }
+            _ => return Err(self.unexpected("expression")),
+        };
+
+        // Postfix: `.method(args)` chains.
+        loop {
+            if matches!(self.peek().kind, TokenKind::Dot) {
+                let dot = self.advance().clone();
+                let m_tok = self.expect_any_ident()?;
+                let method = m_tok.value.clone();
+                self.expect(TokenKind::LParen)?;
+                self.skip_newlines();
+                let args = self.parse_arg_list()?;
+                expr = Expr::MethodCall {
+                    receiver: Box::new(expr),
+                    method,
+                    args,
+                    line: dot.line,
+                    col: dot.col,
+                };
+            } else {
+                break;
+            }
+        }
+        Ok(expr)
+    }
+
+    /// Parse `(arg, arg, ...)` including the closing `)`. The `(` must be
+    /// the current token. Returns an empty vec for `()`.
+    fn parse_arg_list(&mut self) -> Result<Vec<Expr>, ParseError> {
+        let mut args = Vec::new();
+        loop {
+            if matches!(self.peek().kind, TokenKind::RParen) {
+                self.advance();
+                break;
+            }
+            let e = self.parse_expr()?;
+            args.push(e);
+            self.skip_newlines();
+            if matches!(self.peek().kind, TokenKind::Comma) {
+                self.advance();
+                self.skip_newlines();
+            } else {
+                self.expect(TokenKind::RParen)?;
+                break;
+            }
+        }
+        Ok(args)
     }
 
     fn parse_scene(&mut self) -> Result<SceneDecl, ParseError> {
@@ -231,9 +564,9 @@ impl Parser {
                     // followed by a String literal. (If followed by
                     // something else, it's an error.)
                     if !matches!(self.peek_at(1).kind, TokenKind::String) {
-                        return Err(self.unexpected_msg(
-                            "`text` must be followed by a string literal",
-                        ));
+                        return Err(
+                            self.unexpected_msg("`text` must be followed by a string literal")
+                        );
                     }
                     let node = self.parse_text_node(attrs)?;
                     nodes.push(NodeDecl::Text(node));
@@ -248,9 +581,9 @@ impl Parser {
                     return Err(self.unexpected("closing `}`"));
                 }
                 _ => {
-                    return Err(self.unexpected(
-                        "`background`, `text`, `input-field`, or closing `}`",
-                    ));
+                    return Err(
+                        self.unexpected("`background`, `text`, `input-field`, or closing `}`")
+                    );
                 }
             }
         }
@@ -360,9 +693,7 @@ impl Parser {
                     return Err(self.unexpected("closing `}`"));
                 }
                 _ => {
-                    return Err(self.unexpected(
-                        "`placeholder`, `position`, or closing `}`",
-                    ));
+                    return Err(self.unexpected("`placeholder`, `position`, or closing `}`"));
                 }
             }
             self.skip_newlines();
@@ -474,9 +805,7 @@ impl Parser {
                 let y = self.parse_number()?;
                 Ok(PositionDecl::Custom(x, y))
             }
-            _ => Err(self.unexpected(
-                "`center`, `below <name>`, or two numbers",
-            )),
+            _ => Err(self.unexpected("`center`, `below <name>`, or two numbers")),
         }
     }
 
@@ -491,13 +820,11 @@ impl Parser {
     /// Parse a number token and return its `f32` value.
     fn parse_number(&mut self) -> Result<f32, ParseError> {
         let tok = self.expect(TokenKind::Number)?;
-        tok.value
-            .parse::<f32>()
-            .map_err(|_| ParseError {
-                message: format!("invalid number literal: `{}`", tok.value),
-                line: tok.line,
-                col: tok.col,
-            })
+        tok.value.parse::<f32>().map_err(|_| ParseError {
+            message: format!("invalid number literal: `{}`", tok.value),
+            line: tok.line,
+            col: tok.col,
+        })
     }
 
     // ------------------------------------------------------------------
@@ -522,7 +849,10 @@ impl Parser {
                 let at_tok = self.advance(); // consume `@`
                 (at_tok.line, at_tok.col)
             };
-            let name_tok = self.expect(TokenKind::Ident)?;
+            // In Phase 2, `monotone` and `antitone` are keywords, but they
+            // are still valid attribute names in the `@monotone` form.
+            // Accept any identifier-shaped token.
+            let name_tok = self.expect_any_ident()?;
             attrs.push(Attribute {
                 name: name_tok.value.clone(),
                 line: at_line,
@@ -601,12 +931,11 @@ fn decode_hex_color(digits: &str) -> Option<(u8, u8, u8)> {
 
 /// Convenience: tokenize + parse a source string in one call.
 pub fn parse(src: &str) -> Result<ModuleDecl, ParseError> {
-    let tokens = crate::lexer::tokenize(src)
-        .map_err(|e| ParseError {
-            message: format!("lex error: {}", e.message),
-            line: e.line,
-            col: e.col,
-        })?;
+    let tokens = crate::lexer::tokenize(src).map_err(|e| ParseError {
+        message: format!("lex error: {}", e.message),
+        line: e.line,
+        col: e.col,
+    })?;
     Parser::new(tokens).parse()
 }
 
@@ -662,7 +991,10 @@ mod tests {
     #[test]
     fn parse_background_hex() {
         let m = parse_ok("module M { scene { background: #112233 } }");
-        assert_eq!(m.scene.unwrap().background, Some(Color::Hex(0x11, 0x22, 0x33)));
+        assert_eq!(
+            m.scene.unwrap().background,
+            Some(Color::Hex(0x11, 0x22, 0x33))
+        );
     }
 
     #[test]
@@ -684,7 +1016,9 @@ mod tests {
 
     #[test]
     fn parse_text_node_full() {
-        let m = parse_ok(r#"module M { scene { text "Hello!" { color: gold font-size: 64 rotation: y-axis 0.5 position: center } } }"#);
+        let m = parse_ok(
+            r#"module M { scene { text "Hello!" { color: gold font-size: 64 rotation: y-axis 0.5 position: center } } }"#,
+        );
         let s = m.scene.unwrap();
         match &s.nodes[0] {
             NodeDecl::Text(t) => {
@@ -773,7 +1107,11 @@ mod tests {
     #[test]
     fn parse_position_unknown_keyword_errors() {
         let err = parse(r#"module M { scene { text "Hi" { position: top-left } } }"#).unwrap_err();
-        assert!(err.message.contains("unknown position"), "got: {}", err.message);
+        assert!(
+            err.message.contains("unknown position"),
+            "got: {}",
+            err.message
+        );
     }
 
     #[test]
@@ -791,8 +1129,7 @@ mod tests {
 
     #[test]
     fn parse_placeholder_non_string_errors() {
-        let err =
-            parse(r#"module M { scene { input-field { placeholder: 42 } } }"#).unwrap_err();
+        let err = parse(r#"module M { scene { input-field { placeholder: 42 } } }"#).unwrap_err();
         assert!(err.message.contains("string"), "got: {}", err.message);
     }
 
@@ -921,8 +1258,7 @@ module M { // inline comment
 
     #[test]
     fn parse_multiple_attributes_on_node() {
-        let m =
-            parse_ok(r#"module M { scene { @monotone @antitone text "Hi" { } } }"#);
+        let m = parse_ok(r#"module M { scene { @monotone @antitone text "Hi" { } } }"#);
         let s = m.scene.expect("scene");
         match &s.nodes[0] {
             NodeDecl::Text(t) => {
@@ -976,7 +1312,8 @@ module M { // inline comment
     fn parse_attribute_on_background_errors() {
         let err = parse(r#"module M { scene { @monotone background: #000000 } }"#).unwrap_err();
         assert!(
-            err.message.contains("cannot be applied to the `background`"),
+            err.message
+                .contains("cannot be applied to the `background`"),
             "got: {}",
             err.message
         );

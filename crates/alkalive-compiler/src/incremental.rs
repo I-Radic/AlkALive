@@ -150,17 +150,13 @@ impl DependencyGraph {
     /// exists (which can happen if a stale `DepNodeId` is held after the
     /// graph was rebuilt).
     pub fn node(&self, id: DepNodeId) -> Option<&DepNode> {
-        self.nodes
-            .iter()
-            .find(|n| n.id == id)
+        self.nodes.iter().find(|n| n.id == id)
     }
 
     /// Look up a node by its pass index. Returns `None` if no node models
     /// that pass index (e.g. the schedule was rebuilt with fewer passes).
     pub fn node_for_pass(&self, pass_index: usize) -> Option<&DepNode> {
-        self.nodes
-            .iter()
-            .find(|n| n.pass_index == pass_index)
+        self.nodes.iter().find(|n| n.pass_index == pass_index)
     }
 }
 
@@ -232,10 +228,10 @@ pub mod signals {
 /// [`InputFieldBorder`]: PassKind::InputFieldBorder
 pub fn incremental_analysis(scheduled: &ScheduledScene) -> DependencyGraph {
     let mut graph = DependencyGraph::default();
-    let mut node_id = 0u32;
 
     // For each pass in the schedule, create a dependency node.
     for (pass_idx, pass) in scheduled.schedule.passes.iter().enumerate() {
+        let node_id = pass_idx as u32;
         let mut inputs = Vec::new();
 
         match pass.kind {
@@ -269,7 +265,6 @@ pub fn incremental_analysis(scheduled: &ScheduledScene) -> DependencyGraph {
             pass_index: pass_idx,
             description: format!("{:?}", pass.kind),
         });
-        node_id += 1;
     }
 
     graph
@@ -279,7 +274,7 @@ pub fn incremental_analysis(scheduled: &ScheduledScene) -> DependencyGraph {
 mod tests {
     use super::*;
     use crate::codegen::compile_scheduled;
-    use crate::ir::{ColorIR, NodeIR, PositionIR, SceneIR, mint_module_id};
+    use crate::ir::{mint_module_id, ColorIR, NodeIR, PositionIR, SceneIR};
     use crate::schedule::{
         schedule_lowering, BatchingStrategy, PassKind, RenderPass, ScheduledScene, ShaderId,
     };
@@ -348,7 +343,11 @@ mod tests {
         // All IDs distinct.
         for i in 0..ids.len() {
             for j in (i + 1)..ids.len() {
-                assert_ne!(ids[i], ids[j], "signals {:?} and {:?} collide", ids[i], ids[j]);
+                assert_ne!(
+                    ids[i], ids[j],
+                    "signals {:?} and {:?} collide",
+                    ids[i], ids[j]
+                );
             }
         }
     }
@@ -377,7 +376,10 @@ mod tests {
     fn graph_len_and_is_empty() {
         let algo = algo_with_nodes(vec![sample_text_node(), sample_input_field()]);
         let sched = schedule_lowering(&algo);
-        let scheduled = ScheduledScene { algorithm: algo, schedule: sched };
+        let scheduled = ScheduledScene {
+            algorithm: algo,
+            schedule: sched,
+        };
         let g = incremental_analysis(&scheduled);
         // Hello World: 5 passes -> 5 nodes.
         assert!(!g.is_empty());
@@ -389,7 +391,10 @@ mod tests {
     fn graph_node_lookup_by_id() {
         let algo = algo_with_nodes(vec![sample_text_node(), sample_input_field()]);
         let sched = schedule_lowering(&algo);
-        let scheduled = ScheduledScene { algorithm: algo, schedule: sched };
+        let scheduled = ScheduledScene {
+            algorithm: algo,
+            schedule: sched,
+        };
         let g = incremental_analysis(&scheduled);
 
         // IDs are dense 0..5.
@@ -405,7 +410,10 @@ mod tests {
     fn graph_node_lookup_by_pass_index() {
         let algo = algo_with_nodes(vec![sample_text_node(), sample_input_field()]);
         let sched = schedule_lowering(&algo);
-        let scheduled = ScheduledScene { algorithm: algo, schedule: sched };
+        let scheduled = ScheduledScene {
+            algorithm: algo,
+            schedule: sched,
+        };
         let g = incremental_analysis(&scheduled);
 
         // Each pass_index should map to a node whose pass_index matches.
@@ -455,14 +463,20 @@ module HelloWorld {
         }
         // All nodes have empty outputs (Hello World has no signal outputs).
         for node in &g.nodes {
-            assert!(node.outputs.is_empty(), "node {:?} should have empty outputs", node.id);
+            assert!(
+                node.outputs.is_empty(),
+                "node {:?} should have empty outputs",
+                node.id
+            );
         }
         // Descriptions should mention the pass kind.
         let descriptions: Vec<&str> = g.nodes.iter().map(|n| n.description.as_str()).collect();
         assert!(descriptions.iter().any(|d| d.contains("Clear")));
         assert!(descriptions.iter().any(|d| d.contains("TitleText")));
         assert!(descriptions.iter().any(|d| d.contains("InputText")));
-        assert!(descriptions.iter().any(|d| d.contains("InputFieldBackground")));
+        assert!(descriptions
+            .iter()
+            .any(|d| d.contains("InputFieldBackground")));
         assert!(descriptions.iter().any(|d| d.contains("InputFieldBorder")));
     }
 
@@ -470,7 +484,10 @@ module HelloWorld {
     fn clear_pass_reads_canvas_dimensions() {
         let algo = algo_with_nodes(vec![]);
         let sched = schedule_lowering(&algo);
-        let scheduled = ScheduledScene { algorithm: algo, schedule: sched };
+        let scheduled = ScheduledScene {
+            algorithm: algo,
+            schedule: sched,
+        };
         let g = incremental_analysis(&scheduled);
 
         // Empty scene has just the Clear pass.
@@ -490,7 +507,10 @@ module HelloWorld {
     fn title_text_pass_reads_all_six_signals() {
         let algo = algo_with_nodes(vec![sample_text_node()]);
         let sched = schedule_lowering(&algo);
-        let scheduled = ScheduledScene { algorithm: algo, schedule: sched };
+        let scheduled = ScheduledScene {
+            algorithm: algo,
+            schedule: sched,
+        };
         let g = incremental_analysis(&scheduled);
 
         // text-only: Clear + TitleText = 2 passes.
@@ -514,7 +534,10 @@ module HelloWorld {
     fn input_text_pass_reads_input_and_canvas_not_time() {
         let algo = algo_with_nodes(vec![sample_text_node(), sample_input_field()]);
         let sched = schedule_lowering(&algo);
-        let scheduled = ScheduledScene { algorithm: algo, schedule: sched };
+        let scheduled = ScheduledScene {
+            algorithm: algo,
+            schedule: sched,
+        };
         let g = incremental_analysis(&scheduled);
 
         let input_node = g
@@ -536,12 +559,21 @@ module HelloWorld {
     fn input_field_bg_and_border_read_only_canvas() {
         let algo = algo_with_nodes(vec![sample_text_node(), sample_input_field()]);
         let sched = schedule_lowering(&algo);
-        let scheduled = ScheduledScene { algorithm: algo, schedule: sched };
+        let scheduled = ScheduledScene {
+            algorithm: algo,
+            schedule: sched,
+        };
         let g = incremental_analysis(&scheduled);
 
         for node in &g.nodes {
-            if node.description == "InputFieldBackground" || node.description == "InputFieldBorder" {
-                assert_eq!(node.inputs.len(), 2, "node {:?} should read only canvas dims", node.id);
+            if node.description == "InputFieldBackground" || node.description == "InputFieldBorder"
+            {
+                assert_eq!(
+                    node.inputs.len(),
+                    2,
+                    "node {:?} should read only canvas dims",
+                    node.id
+                );
                 assert!(node.inputs.contains(&signals::CANVAS_WIDTH));
                 assert!(node.inputs.contains(&signals::CANVAS_HEIGHT));
                 assert!(!node.inputs.contains(&signals::INPUT_TEXT));
@@ -554,7 +586,10 @@ module HelloWorld {
     fn pass_index_matches_node_position() {
         let algo = algo_with_nodes(vec![sample_text_node(), sample_input_field()]);
         let sched = schedule_lowering(&algo);
-        let scheduled = ScheduledScene { algorithm: algo, schedule: sched };
+        let scheduled = ScheduledScene {
+            algorithm: algo,
+            schedule: sched,
+        };
         let g = incremental_analysis(&scheduled);
 
         // pass_index should match the node's position in nodes (since we
@@ -568,7 +603,10 @@ module HelloWorld {
     fn empty_scene_produces_single_clear_node() {
         let algo = algo_with_nodes(vec![]);
         let sched = schedule_lowering(&algo);
-        let scheduled = ScheduledScene { algorithm: algo, schedule: sched };
+        let scheduled = ScheduledScene {
+            algorithm: algo,
+            schedule: sched,
+        };
         let g = incremental_analysis(&scheduled);
         assert_eq!(g.nodes.len(), 1);
         assert_eq!(g.nodes[0].description, "Clear");
@@ -579,7 +617,10 @@ module HelloWorld {
     fn graph_clone_round_trips() {
         let algo = algo_with_nodes(vec![sample_text_node(), sample_input_field()]);
         let sched = schedule_lowering(&algo);
-        let scheduled = ScheduledScene { algorithm: algo, schedule: sched };
+        let scheduled = ScheduledScene {
+            algorithm: algo,
+            schedule: sched,
+        };
         let g = incremental_analysis(&scheduled);
         let g2 = g.clone();
         assert_eq!(g.len(), g2.len());
@@ -654,8 +695,14 @@ module HelloWorld {
         assert_eq!(format!("{:?}", PassKind::Clear), "Clear");
         assert_eq!(format!("{:?}", PassKind::TitleText), "TitleText");
         assert_eq!(format!("{:?}", PassKind::InputText), "InputText");
-        assert_eq!(format!("{:?}", PassKind::InputFieldBackground), "InputFieldBackground");
-        assert_eq!(format!("{:?}", PassKind::InputFieldBorder), "InputFieldBorder");
+        assert_eq!(
+            format!("{:?}", PassKind::InputFieldBackground),
+            "InputFieldBackground"
+        );
+        assert_eq!(
+            format!("{:?}", PassKind::InputFieldBorder),
+            "InputFieldBorder"
+        );
     }
 
     #[test]

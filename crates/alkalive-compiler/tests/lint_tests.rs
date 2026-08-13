@@ -16,7 +16,7 @@
 #![forbid(unsafe_code)]
 
 use alkalive_compiler::{
-    compile, compile_with_lints, parse, Attribute, LintSeverity, NodeDecl, TokenKind, tokenize,
+    compile, compile_with_lints, parse, tokenize, Attribute, LintSeverity, NodeDecl, TokenKind,
 };
 
 /// Helper: the canonical Hello-World source (no attributes).
@@ -62,8 +62,10 @@ fn monotone_attribute_parsed_on_text_node() {
 }
 
 #[test]
-fn monotone_lexes_as_at_then_ident() {
-    // The `@` character must be its own token; `monotone` is NOT a keyword.
+fn monotone_lexes_as_at_then_keyword() {
+    // In Phase 2, `monotone` IS a reserved keyword. `@monotone` lexes as
+    // `At` followed by `Monotone`. The parser still accepts the keyword
+    // token as an attribute name (see `expect_any_ident`).
     let src = "@monotone";
     let toks = tokenize(src).expect("lex ok");
     let kinds: Vec<_> = toks
@@ -73,13 +75,13 @@ fn monotone_lexes_as_at_then_ident() {
         .collect();
     assert_eq!(
         kinds,
-        vec![TokenKind::At, TokenKind::Ident, TokenKind::Eof]
+        vec![TokenKind::At, TokenKind::Monotone, TokenKind::Eof]
     );
-    let ident = toks
+    let kw = toks
         .iter()
-        .find(|t| t.kind == TokenKind::Ident)
-        .expect("ident token");
-    assert_eq!(ident.value, "monotone");
+        .find(|t| t.kind == TokenKind::Monotone)
+        .expect("Monotone keyword token");
+    assert_eq!(kw.value, "monotone");
 }
 
 // ---------------------------------------------------------------------------
@@ -132,9 +134,7 @@ fn deny_monotonicity_upgrades_warnings_to_errors() {
     let (_ir, lint_set) = compile_with_lints(src).expect("compile ok");
     assert!(lint_set.has_errors(), "expected at least one error");
     assert!(
-        lint_set
-            .iter()
-            .any(|r| r.severity == LintSeverity::Deny),
+        lint_set.iter().any(|r| r.severity == LintSeverity::Deny),
         "expected a Deny finding, got: {:?}",
         lint_set
     );
@@ -153,7 +153,11 @@ fn lint_reports_generated_for_monotone_attribute() {
         .iter()
         .find(|r| r.message.contains("@monotone"))
         .expect("should have a report mentioning @monotone");
-    assert!(report.message.contains("monotonicity:"), "got: {}", report.message);
+    assert!(
+        report.message.contains("monotonicity:"),
+        "got: {}",
+        report.message
+    );
     assert_eq!(report.severity, LintSeverity::Warning);
 }
 
@@ -197,8 +201,16 @@ module M {
         .iter()
         .find(|r| r.message.contains("@monotone"))
         .expect("should have a @monotone report");
-    assert!(report.line >= 4, "line should point at the @ on line 4; got: {}", report.line);
-    assert!(report.col >= 5, "col should point at the @ in col 5; got: {}", report.col);
+    assert!(
+        report.line >= 4,
+        "line should point at the @ on line 4; got: {}",
+        report.line
+    );
+    assert!(
+        report.col >= 5,
+        "col should point at the @ in col 5; got: {}",
+        report.col
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -223,7 +235,11 @@ fn existing_alk_without_attributes_has_no_lint_findings() {
     // source must produce an empty `LintSet`.
     let (ir, lint_set) = compile_with_lints(HELLO_WORLD).expect("compile ok");
     assert_eq!(ir.module_name, "HelloWorld");
-    assert!(lint_set.is_empty(), "expected no lint findings; got: {:?}", lint_set);
+    assert!(
+        lint_set.is_empty(),
+        "expected no lint findings; got: {:?}",
+        lint_set
+    );
     assert!(!lint_set.deny_monotonicity);
 }
 
@@ -234,7 +250,11 @@ fn ast_attributes_are_empty_for_canonical_hello_world() {
     let scene = ast.scene.expect("scene");
     assert!(scene.attributes.is_empty());
     for n in &scene.nodes {
-        assert!(n.attributes().is_empty(), "node {:?} has unexpected attrs", n);
+        assert!(
+            n.attributes().is_empty(),
+            "node {:?} has unexpected attrs",
+            n
+        );
     }
 }
 

@@ -134,9 +134,7 @@ fn lint_scene_attribute(attr: &crate::ast::Attribute, set: &mut LintSet) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{
-        Attribute, InputFieldNode, ModuleDecl, NodeDecl, SceneDecl, TextNode,
-    };
+    use crate::ast::{Attribute, InputFieldNode, ModuleDecl, NodeDecl, SceneDecl, TextNode};
 
     fn module_with_text(attrs: Vec<Attribute>) -> ModuleDecl {
         ModuleDecl {
@@ -158,6 +156,7 @@ mod tests {
                 col: 1,
             }),
             attributes: Vec::new(),
+            items: Vec::new(),
             line: 1,
             col: 1,
         }
@@ -169,6 +168,7 @@ mod tests {
             name: "M".into(),
             scene: None,
             attributes: Vec::new(),
+            items: Vec::new(),
             line: 1,
             col: 1,
         };
@@ -192,7 +192,11 @@ mod tests {
         run(&m, &mut set);
         assert_eq!(set.len(), 1);
         assert_eq!(set.reports[0].severity, LintSeverity::Warning);
-        assert!(set.reports[0].message.contains("@monotone"), "got: {}", set.reports[0].message);
+        assert!(
+            set.reports[0].message.contains("@monotone"),
+            "got: {}",
+            set.reports[0].message
+        );
         assert!(!set.has_errors());
     }
 
@@ -214,13 +218,18 @@ mod tests {
                 col: 1,
             }),
             attributes: Vec::new(),
+            items: Vec::new(),
             line: 1,
             col: 1,
         };
         let mut set = LintSet::new();
         run(&m, &mut set);
         assert_eq!(set.len(), 1);
-        assert!(set.reports[0].message.contains("@antitone"), "got: {}", set.reports[0].message);
+        assert!(
+            set.reports[0].message.contains("@antitone"),
+            "got: {}",
+            set.reports[0].message
+        );
     }
 
     #[test]
@@ -229,8 +238,16 @@ mod tests {
         let mut set = LintSet::new();
         run(&m, &mut set);
         assert_eq!(set.len(), 1);
-        assert!(set.reports[0].message.contains("unknown"), "got: {}", set.reports[0].message);
-        assert!(set.reports[0].message.contains("monotonic"), "got: {}", set.reports[0].message);
+        assert!(
+            set.reports[0].message.contains("unknown"),
+            "got: {}",
+            set.reports[0].message
+        );
+        assert!(
+            set.reports[0].message.contains("monotonic"),
+            "got: {}",
+            set.reports[0].message
+        );
     }
 
     #[test]
@@ -254,6 +271,7 @@ mod tests {
                 col: 1,
             }),
             attributes: vec![Attribute::new("deny(monotonicity)", 1, 1)],
+            items: Vec::new(),
             line: 1,
             col: 1,
         };

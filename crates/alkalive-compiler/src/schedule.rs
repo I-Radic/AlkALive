@@ -219,7 +219,7 @@ pub fn schedule_lowering(algorithm: &AlgorithmIR) -> ScheduleIR {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{ColorIR, PositionIR, SceneIR, mint_module_id};
+    use crate::ir::{mint_module_id, ColorIR, PositionIR, SceneIR};
 
     /// Build an `AlgorithmIR` with the given nodes (helper for tests).
     fn algo_with_nodes(nodes: Vec<NodeIR>) -> AlgorithmIR {

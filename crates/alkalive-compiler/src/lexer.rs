@@ -65,6 +65,32 @@ pub enum TokenKind {
     /// `placeholder` — property key inside an input-field block.
     Placeholder,
 
+    // ---- ADR-027 Phase 2: type-system keywords ----
+    /// `fn` — introduces a function declaration.
+    Fn,
+    /// `let` — introduces a typed binding.
+    Let,
+    /// `monotone` — type qualifier (collection only grows).
+    Monotone,
+    /// `antitone` — type qualifier (collection only shrinks).
+    Antitone,
+    /// `i32` — primitive signed 32-bit integer type.
+    I32,
+    /// `f32` — primitive 32-bit float type.
+    F32,
+    /// `string` — primitive string type.
+    Str,
+    /// `bool` — primitive boolean type.
+    Bool,
+    /// `Vec` — built-in growable collection type.
+    Vec,
+    /// `true` — boolean literal.
+    True,
+    /// `false` — boolean literal.
+    False,
+    /// `return` — return statement.
+    Return,
+
     // ---- Literals ----
     /// An identifier that is not a reserved keyword. The text lives in
     /// [`Token::value`].
@@ -76,7 +102,6 @@ pub enum TokenKind {
     /// the parser interprets it as `f32` / `u32` as needed.
     Number,
     /// A hex color literal `#RRGGBB`. `value` holds the 6 hex digits (no `#`).
-
     HexColor,
 
     // ---- Punctuation ----
@@ -106,6 +131,22 @@ pub enum TokenKind {
     LParen,
     /// `)` — closing parenthesis.
     RParen,
+    /// `,` (ADR-027 Phase 2 — parameter / argument lists).
+    Comma,
+    /// `;` (ADR-027 Phase 2 — statement terminator).
+    Semi,
+    /// `=` (ADR-027 Phase 2 — `let` initialiser).
+    Eq,
+    /// `<` (ADR-027 Phase 2 — `Vec<T>` type parameter).
+    Lt,
+    /// `>` (ADR-027 Phase 2 — `Vec<T>` type parameter close).
+    Gt,
+    /// `->` (ADR-027 Phase 2 — function return type).
+    Arrow,
+    /// `::` (ADR-027 Phase 2 — path separator, e.g. `Vec::new()`).
+    ColonColon,
+    /// `!` — used inside shebang attribute payloads.
+    Bang,
 
     // ---- Structural ----
     /// A newline (`\n`). Emitted so the parser may use it as a soft
@@ -129,6 +170,18 @@ impl fmt::Display for TokenKind {
             TokenKind::Position => write!(f, "keyword `position`"),
             TokenKind::Background => write!(f, "keyword `background`"),
             TokenKind::Placeholder => write!(f, "keyword `placeholder`"),
+            TokenKind::Fn => write!(f, "keyword `fn`"),
+            TokenKind::Let => write!(f, "keyword `let`"),
+            TokenKind::Monotone => write!(f, "keyword `monotone`"),
+            TokenKind::Antitone => write!(f, "keyword `antitone`"),
+            TokenKind::I32 => write!(f, "keyword `i32`"),
+            TokenKind::F32 => write!(f, "keyword `f32`"),
+            TokenKind::Str => write!(f, "keyword `string`"),
+            TokenKind::Bool => write!(f, "keyword `bool`"),
+            TokenKind::Vec => write!(f, "keyword `Vec`"),
+            TokenKind::True => write!(f, "keyword `true`"),
+            TokenKind::False => write!(f, "keyword `false`"),
+            TokenKind::Return => write!(f, "keyword `return`"),
             TokenKind::Ident => write!(f, "identifier"),
             TokenKind::String => write!(f, "string literal"),
             TokenKind::Number => write!(f, "number"),
@@ -143,6 +196,14 @@ impl fmt::Display for TokenKind {
             TokenKind::RBracket => write!(f, "`]`"),
             TokenKind::LParen => write!(f, "`(`"),
             TokenKind::RParen => write!(f, "`)`"),
+            TokenKind::Comma => write!(f, "`,`"),
+            TokenKind::Semi => write!(f, "`;`"),
+            TokenKind::Eq => write!(f, "`=`"),
+            TokenKind::Lt => write!(f, "`<`"),
+            TokenKind::Gt => write!(f, "`>`"),
+            TokenKind::Arrow => write!(f, "`->`"),
+            TokenKind::ColonColon => write!(f, "`::`"),
+            TokenKind::Bang => write!(f, "`!`"),
             TokenKind::Newline => write!(f, "newline"),
             TokenKind::Eof => write!(f, "end of input"),
         }
@@ -194,6 +255,14 @@ impl Token {
                 | TokenKind::RBracket
                 | TokenKind::LParen
                 | TokenKind::RParen
+                | TokenKind::Comma
+                | TokenKind::Semi
+                | TokenKind::Eq
+                | TokenKind::Lt
+                | TokenKind::Gt
+                | TokenKind::Arrow
+                | TokenKind::ColonColon
+                | TokenKind::Bang
                 | TokenKind::Newline
                 | TokenKind::Eof
         )
@@ -237,6 +306,19 @@ fn classify_keyword(text: &str) -> Option<TokenKind> {
         "position" => TokenKind::Position,
         "background" => TokenKind::Background,
         "placeholder" => TokenKind::Placeholder,
+        // ADR-027 Phase 2 type-system keywords.
+        "fn" => TokenKind::Fn,
+        "let" => TokenKind::Let,
+        "monotone" => TokenKind::Monotone,
+        "antitone" => TokenKind::Antitone,
+        "i32" => TokenKind::I32,
+        "f32" => TokenKind::F32,
+        "string" => TokenKind::Str,
+        "bool" => TokenKind::Bool,
+        "Vec" => TokenKind::Vec,
+        "true" => TokenKind::True,
+        "false" => TokenKind::False,
+        "return" => TokenKind::Return,
         _ => return None,
     })
 }
@@ -336,12 +418,52 @@ impl<'src> Lexer<'src> {
                 Ok(Token::new(TokenKind::RBrace, "}", line, col))
             }
             b':' => {
+                // `::` vs `:`
                 self.advance_byte();
-                Ok(Token::new(TokenKind::Colon, ":", line, col))
+                if self.pos < self.bytes.len() && self.bytes[self.pos] == b':' {
+                    self.advance_byte();
+                    Ok(Token::new(TokenKind::ColonColon, "::", line, col))
+                } else {
+                    Ok(Token::new(TokenKind::Colon, ":", line, col))
+                }
             }
             b'.' => {
                 self.advance_byte();
                 Ok(Token::new(TokenKind::Dot, ".", line, col))
+            }
+            b',' => {
+                self.advance_byte();
+                Ok(Token::new(TokenKind::Comma, ",", line, col))
+            }
+            b';' => {
+                self.advance_byte();
+                Ok(Token::new(TokenKind::Semi, ";", line, col))
+            }
+            b'=' => {
+                self.advance_byte();
+                Ok(Token::new(TokenKind::Eq, "=", line, col))
+            }
+            b'<' => {
+                self.advance_byte();
+                Ok(Token::new(TokenKind::Lt, "<", line, col))
+            }
+            b'>' => {
+                self.advance_byte();
+                Ok(Token::new(TokenKind::Gt, ">", line, col))
+            }
+            b'!' => {
+                self.advance_byte();
+                Ok(Token::new(TokenKind::Bang, "!", line, col))
+            }
+            b'-' => {
+                // `->` vs numeric `-N`
+                if self.bytes.get(self.pos + 1) == Some(&b'>') {
+                    self.advance_byte();
+                    self.advance_byte();
+                    Ok(Token::new(TokenKind::Arrow, "->", line, col))
+                } else {
+                    self.lex_number(line, col)
+                }
             }
             b'@' => {
                 self.advance_byte();
@@ -375,7 +497,7 @@ impl<'src> Lexer<'src> {
                 }
             }
             b'"' => self.lex_string(line, col),
-            b'0'..=b'9' | b'-' | b'+' => self.lex_number(line, col),
+            b'0'..=b'9' | b'+' => self.lex_number(line, col),
             b'a'..=b'z' | b'A'..=b'Z' | b'_' => self.lex_ident(line, col),
             other => Err(LexError {
                 message: format!("unexpected byte {:#?}", other as char),
@@ -535,7 +657,7 @@ impl<'src> Lexer<'src> {
                 match self.bytes.get(self.pos + 1) {
                     Some(next) if next.is_ascii_alphanumeric() => {
                         self.advance_byte(); // consume '-'
-                        // advance_byte handles the next char on the next iteration
+                                             // advance_byte handles the next char on the next iteration
                     }
                     _ => break,
                 }
@@ -599,11 +721,13 @@ mod tests {
     fn lex_whitespace_only() {
         let toks = tokenize("   \t  \n  \n").unwrap();
         // newlines are tokens, trailing whitespace is skipped, then EOF.
-        assert!(toks.iter().all(|t| matches!(
-            t.kind,
-            TokenKind::Newline | TokenKind::Eof
-        )));
-        assert_eq!(toks.iter().filter(|t| t.kind == TokenKind::Newline).count(), 2);
+        assert!(toks
+            .iter()
+            .all(|t| matches!(t.kind, TokenKind::Newline | TokenKind::Eof)));
+        assert_eq!(
+            toks.iter().filter(|t| t.kind == TokenKind::Newline).count(),
+            2
+        );
         assert_eq!(toks.last().unwrap().kind, TokenKind::Eof);
     }
 
@@ -645,7 +769,9 @@ mod tests {
     fn lex_hyphenated_identifiers() {
         let toks = tokenize("y-axis below center gold HelloWorld").unwrap();
         let kinds = kinds_no_nl(&toks);
-        assert!(kinds.iter().all(|k| *k == TokenKind::Ident || *k == TokenKind::Eof));
+        assert!(kinds
+            .iter()
+            .all(|k| *k == TokenKind::Ident || *k == TokenKind::Eof));
         assert_eq!(toks[0].value, "y-axis");
         assert_eq!(toks[1].value, "below");
         assert_eq!(toks[2].value, "center");
@@ -783,9 +909,14 @@ mod tests {
 
     #[test]
     fn lex_unexpected_byte_errors() {
-        // `;` is not part of the Hello-World `.alk` subset.
-        let err = tokenize(";").unwrap_err();
-        assert!(err.message.contains("unexpected byte"), "got: {}", err.message);
+        // `;` is now a valid token (Phase 2 statement terminator), so use
+        // a genuinely illegal byte to exercise the error path.
+        let err = tokenize("`").unwrap_err();
+        assert!(
+            err.message.contains("unexpected byte"),
+            "got: {}",
+            err.message
+        );
         assert_eq!(err.line, 1);
         assert_eq!(err.col, 1);
     }
@@ -803,22 +934,29 @@ mod tests {
 
     #[test]
     fn lex_monotone_attribute() {
-        // `@monotone` lexes as `At` followed by `Ident("monotone")` —
-        // the attribute name is NOT a reserved keyword.
+        // In Phase 2, `monotone` is a reserved keyword. `@monotone` lexes
+        // as `At` followed by `Monotone` — the attribute name IS a keyword
+        // token, but the parser still accepts it as an attribute name.
         let toks = tokenize("@monotone").unwrap();
         let filtered = kinds_no_nl(&toks);
-        assert_eq!(filtered, vec![TokenKind::At, TokenKind::Ident, TokenKind::Eof]);
+        assert_eq!(
+            filtered,
+            vec![TokenKind::At, TokenKind::Monotone, TokenKind::Eof]
+        );
         assert_eq!(toks[0].kind, TokenKind::At);
-        assert_eq!(toks[1].kind, TokenKind::Ident);
+        assert_eq!(toks[1].kind, TokenKind::Monotone);
         assert_eq!(toks[1].value, "monotone");
-        assert!(!toks[1].is_keyword(), "monotone must NOT be a keyword");
+        assert!(toks[1].is_keyword(), "monotone IS a keyword in Phase 2");
     }
 
     #[test]
     fn lex_antitone_attribute() {
         let toks = tokenize("@antitone").unwrap();
         let filtered = kinds_no_nl(&toks);
-        assert_eq!(filtered, vec![TokenKind::At, TokenKind::Ident, TokenKind::Eof]);
+        assert_eq!(
+            filtered,
+            vec![TokenKind::At, TokenKind::Antitone, TokenKind::Eof]
+        );
         assert_eq!(toks[1].value, "antitone");
     }
 
@@ -868,9 +1006,9 @@ mod tests {
             vec![
                 TokenKind::Shebang,
                 TokenKind::LBracket,
-                TokenKind::Ident,    // deny
+                TokenKind::Ident, // deny
                 TokenKind::LParen,
-                TokenKind::Ident,    // monotonicity
+                TokenKind::Ident, // monotonicity
                 TokenKind::RParen,
                 TokenKind::RBracket,
                 TokenKind::Eof,
@@ -905,39 +1043,39 @@ module HelloWorld {
             filtered,
             vec![
                 TokenKind::Module,
-                TokenKind::Ident,         // HelloWorld
+                TokenKind::Ident, // HelloWorld
                 TokenKind::LBrace,
                 TokenKind::Scene,
                 TokenKind::LBrace,
                 TokenKind::Background,
                 TokenKind::Colon,
-                TokenKind::HexColor,      // 000000
+                TokenKind::HexColor, // 000000
                 TokenKind::Text,
-                TokenKind::String,        // Hello World!
+                TokenKind::String, // Hello World!
                 TokenKind::LBrace,
                 TokenKind::Color,
                 TokenKind::Colon,
-                TokenKind::Ident,         // gold
+                TokenKind::Ident, // gold
                 TokenKind::FontSize,
                 TokenKind::Colon,
-                TokenKind::Number,        // 64
+                TokenKind::Number, // 64
                 TokenKind::Rotation,
                 TokenKind::Colon,
-                TokenKind::Ident,         // y-axis
-                TokenKind::Number,        // 0.5
+                TokenKind::Ident,  // y-axis
+                TokenKind::Number, // 0.5
                 TokenKind::Position,
                 TokenKind::Colon,
-                TokenKind::Ident,         // center
+                TokenKind::Ident, // center
                 TokenKind::RBrace,
                 TokenKind::InputField,
                 TokenKind::LBrace,
                 TokenKind::Placeholder,
                 TokenKind::Colon,
-                TokenKind::String,        // Type here...
+                TokenKind::String, // Type here...
                 TokenKind::Position,
                 TokenKind::Colon,
-                TokenKind::Ident,         // below
-                TokenKind::Text,          // text (keyword used as node ref)
+                TokenKind::Ident, // below
+                TokenKind::Text,  // text (keyword used as node ref)
                 TokenKind::RBrace,
                 TokenKind::RBrace,
                 TokenKind::RBrace,
