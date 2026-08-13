@@ -15,8 +15,8 @@
 
 use alkalive_compiler::{
     check_module, collection_strategies, collection_strategy, compile, compile_typecheck,
-    compile_with_lints, has_seminive_collections, parse, seminive_eligible_count,
-    CollectionDeclIR, EvaluationStrategy, Monotonicity, Qualifier,
+    compile_with_lints, has_seminive_collections, parse, seminive_eligible_count, CollectionDeclIR,
+    EvaluationStrategy, Monotonicity, Qualifier,
 };
 
 const SCENE: &str = "scene { background: #000000 }";
