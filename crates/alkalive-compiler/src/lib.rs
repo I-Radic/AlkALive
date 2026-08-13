@@ -73,12 +73,26 @@
 //! uses this graph to propagate dirtiness from changed signals to the
 //! passes that depend on them, reducing per-frame work from O(n) to
 //! O(Δ) (per ADR-025).
+//!
+//! # ADR-026 — E-Graph Optimization
+//!
+//! Use [`compile_full`] to additionally run
+//! [`egraph::egraph_optimization`] on the [`DependencyGraph`]. The
+//! optimizer applies four rewrite rules (`state_store_load_forward`,
+//! `dead_store_elimination`, `read_merge`, `evaluation_reorder`) to a
+//! custom e-graph data structure (no `egg` crate, per ADR-018) and
+//! extracts an optimized [`DependencyGraph`] via cost-based extraction.
+//! For the canonical Hello World scene (all passes have empty
+//! `outputs`), the optimization is structurally a no-op — the
+//! infrastructure is in place for scenes with intra-frame signal
+//! outputs.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
 pub mod ast;
 pub mod codegen;
+pub mod egraph;
 pub mod incremental;
 pub mod ir;
 pub mod lints;
@@ -91,7 +105,12 @@ pub use ast::{
     Attribute, Color, InputFieldNode, ModuleDecl, NodeDecl, PositionDecl, RotationDecl,
     SceneDecl, TextNode,
 };
-pub use codegen::{lower, compile, compile_with_deps, compile_with_lints, compile_scheduled, CodegenError, CompileError, DEFAULT_FONT_SIZE};
+pub use codegen::{lower, compile, compile_full, compile_with_deps, compile_with_lints, compile_scheduled, CodegenError, CompileError, DEFAULT_FONT_SIZE};
+pub use egraph::{
+    egraph_optimization, extract, build_from_dep_graph, op_cost,
+    apply_state_store_load_forward, apply_dead_store_elimination, apply_read_merge,
+    evaluation_reorder, EClass, EClassData, EClassId, EGraph, ENode, EOp, EOpKind,
+};
 pub use incremental::{incremental_analysis, DepNode, DepNodeId, DependencyGraph, SignalId};
 pub use ir::{mint_module_id, AlgorithmIR, ColorIR, NodeIR, PositionIR, SceneIR};
 pub use lexer::{tokenize, LexError, Lexer, Token, TokenKind};

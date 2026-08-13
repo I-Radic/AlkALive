@@ -25,6 +25,7 @@ use crate::ast::{
     Color, ModuleDecl, NodeDecl, PositionDecl, RotationDecl, SceneDecl, TextNode,
     InputFieldNode,
 };
+use crate::egraph::egraph_optimization;
 use crate::incremental::{incremental_analysis, DependencyGraph};
 use crate::ir::{mint_module_id, AlgorithmIR, ColorIR, NodeIR, PositionIR};
 use crate::schedule::{schedule_lowering, ScheduledScene};
@@ -358,6 +359,72 @@ pub fn compile_with_deps(src: &str) -> Result<(ScheduledScene, DependencyGraph),
     let scheduled = compile_scheduled(src)?;
     let dep_graph = incremental_analysis(&scheduled);
     Ok((scheduled, dep_graph))
+}
+
+/// Convenience: tokenize + parse + lower + schedule-lower + incremental
+/// analysis + e-graph optimization in one call.
+///
+/// This is the ADR-026 entry point. It runs the full pipeline:
+/// `.alk source → AlgorithmIR → ScheduledScene → DependencyGraph
+/// → optimized DependencyGraph`. The returned tuple contains both the
+/// [`ScheduledScene`] (algorithm + default schedule, per ADR-024) and
+/// the e-graph-optimized [`DependencyGraph`] (per ADR-026).
+///
+/// The dependency graph is computed *from* the scheduled scene via
+/// [`incremental_analysis`], then optimized via
+/// [`egraph_optimization`](crate::egraph::egraph_optimization). The
+/// optimizer applies four rewrite rules (`state_store_load_forward`,
+/// `dead_store_elimination`, `read_merge`, `evaluation_reorder`) to a
+/// custom e-graph data structure (no `egg` crate, per ADR-018).
+///
+/// For the canonical Hello World scene (5 passes, 6 signals, all empty
+/// `outputs`), the optimization is structurally a no-op: hash-consing
+/// during the build phase already merges all `SignalRead(s)` e-nodes
+/// for the same `s` into a single e-class (rule 3, `read_merge`), and
+/// there are no `SignalWrite` e-nodes for rules 1 and 2 to act on.
+/// The extracted dep graph is structurally identical to the input
+/// from [`compile_with_deps`].
+///
+/// # Errors
+///
+/// Returns [`CompileError`] only if lexing, parsing, or codegen fails.
+/// Both [`schedule_lowering`], [`incremental_analysis`], and
+/// [`egraph_optimization`](crate::egraph::egraph_optimization) are
+/// infallible.
+///
+/// # Example
+///
+/// ```
+/// use alkalive_compiler::compile_full;
+///
+/// let src = r#"
+/// module HelloWorld {
+///   scene {
+///     background: #000000
+///     text "Hello World!" {
+///       color: gold
+///       font-size: 64
+///       rotation: y-axis 0.5
+///       position: center
+///     }
+///     input-field {
+///       placeholder: "Type here..."
+///       position: below text
+///     }
+///   }
+/// }
+/// "#;
+/// let (scheduled, dep_graph) = compile_full(src).expect("hello world should compile");
+/// assert_eq!(scheduled.algorithm.module_name, "HelloWorld");
+/// // 5 passes -> 5 dependency-graph nodes (Hello World has no signal
+/// // outputs, so the e-graph optimizer preserves all passes).
+/// assert_eq!(dep_graph.nodes.len(), scheduled.schedule.passes.len());
+/// ```
+pub fn compile_full(src: &str) -> Result<(ScheduledScene, DependencyGraph), CompileError> {
+    let scheduled = compile_scheduled(src)?;
+    let dep_graph = incremental_analysis(&scheduled);
+    let optimized = egraph_optimization(&dep_graph);
+    Ok((scheduled, optimized))
 }
 
 /// Top-level error for the full `compile` pipeline (lex+parse+lower).
@@ -783,5 +850,137 @@ module HelloWorld {
         let scheduled = compile_scheduled(src).unwrap();
         assert_eq!(scheduled_with_deps.algorithm, scheduled.algorithm);
         assert_eq!(scheduled_with_deps.schedule.passes.len(), scheduled.schedule.passes.len());
+    }
+
+    // ---- ADR-026: compile_full() tests ----
+
+    #[test]
+    fn compile_full_full_pipeline_ok() {
+        let (scheduled, dep_graph) = compile_full(
+            r#"module M { scene { text "Hi" { } input-field { } } }"#,
+        )
+        .expect("compile_full should succeed");
+        // The scheduled scene matches what compile_scheduled returns.
+        assert_eq!(scheduled.algorithm.module_name, "M");
+        assert!(scheduled.algorithm.has_text());
+        assert!(scheduled.algorithm.has_input_field());
+        // 5 passes -> 5 dep-graph nodes (Hello World has no signal
+        // outputs, so the e-graph optimizer preserves all passes).
+        assert_eq!(dep_graph.nodes.len(), scheduled.schedule.passes.len());
+        assert_eq!(dep_graph.nodes.len(), 5);
+    }
+
+    #[test]
+    fn compile_full_text_only_has_two_nodes() {
+        let (scheduled, dep_graph) =
+            compile_full(r#"module M { scene { text "Hi" { } } }"#).unwrap();
+        // Clear + TitleText = 2 passes -> 2 nodes.
+        assert_eq!(scheduled.schedule.passes.len(), 2);
+        assert_eq!(dep_graph.nodes.len(), 2);
+    }
+
+    #[test]
+    fn compile_full_empty_scene_has_one_node() {
+        let (scheduled, dep_graph) = compile_full("module M { scene { } }").unwrap();
+        assert_eq!(scheduled.schedule.passes.len(), 1);
+        assert_eq!(dep_graph.nodes.len(), 1);
+        assert_eq!(dep_graph.nodes[0].description, "Clear");
+    }
+
+    #[test]
+    fn compile_full_propagates_parse_errors() {
+        let err = compile_full("module { }").unwrap_err();
+        assert!(matches!(err, CompileError::Parse(_)));
+    }
+
+    #[test]
+    fn compile_full_propagates_codegen_errors() {
+        let err = compile_full("module M { }").unwrap_err();
+        assert!(matches!(err, CompileError::Codegen(_)));
+    }
+
+    #[test]
+    fn compile_full_preserves_pass_count_for_hello_world() {
+        // Hello World has no signal outputs, so the e-graph optimizer
+        // is a structural no-op: all 5 passes are preserved.
+        let (scheduled, dep_graph) = compile_full(
+            r#"
+module HelloWorld {
+  scene {
+    background: #000000
+    text "Hello World!" {
+      color: gold
+      font-size: 64
+      rotation: y-axis 0.5
+      position: center
+    }
+    input-field {
+      placeholder: "Type here..."
+      position: below text
+    }
+  }
+}
+"#,
+        )
+        .expect("hello world should compile");
+        assert_eq!(scheduled.schedule.passes.len(), 5);
+        assert_eq!(dep_graph.nodes.len(), 5);
+    }
+
+    #[test]
+    fn compile_full_dep_graph_inputs_preserved_for_hello_world() {
+        // The e-graph optimizer must not change which signals each pass
+        // reads (for Hello World, where there are no writes to forward
+        // or eliminate).
+        let (scheduled, dep_graph_optimized) = compile_full(
+            r#"
+module HelloWorld {
+  scene {
+    background: #000000
+    text "Hello World!" {
+      color: gold
+      font-size: 64
+      rotation: y-axis 0.5
+      position: center
+    }
+    input-field {
+      placeholder: "Type here..."
+      position: below text
+    }
+  }
+}
+"#,
+        )
+        .unwrap();
+        let dep_graph_unoptimized = incremental_analysis(&scheduled);
+        // Same number of nodes.
+        assert_eq!(dep_graph_optimized.nodes.len(), dep_graph_unoptimized.nodes.len());
+        // For each pass, the set of input signals should be the same
+        // (order may differ due to topological sort, so we compare as
+        // sets).
+        for unopt in &dep_graph_unoptimized.nodes {
+            let opt = dep_graph_optimized
+                .node_for_pass(unopt.pass_index)
+                .expect("optimized graph should have a node for each pass");
+            let unopt_inputs: std::collections::HashSet<_> = unopt.inputs.iter().collect();
+            let opt_inputs: std::collections::HashSet<_> = opt.inputs.iter().collect();
+            assert_eq!(
+                unopt_inputs, opt_inputs,
+                "pass {:?} inputs changed: {:?} -> {:?}",
+                unopt.description, unopt.inputs, opt.inputs
+            );
+        }
+    }
+
+    #[test]
+    fn compile_full_passes_match_compile_scheduled() {
+        // The scheduled scene produced by compile_full must equal what
+        // compile_scheduled returns (the e-graph optimizer must not
+        // mutate the scheduled scene — it only touches the dep graph).
+        let src = r#"module Same { scene { text "Hi" { } input-field { } } }"#;
+        let (scheduled_full, _graph) = compile_full(src).unwrap();
+        let scheduled = compile_scheduled(src).unwrap();
+        assert_eq!(scheduled_full.algorithm, scheduled.algorithm);
+        assert_eq!(scheduled_full.schedule.passes.len(), scheduled.schedule.passes.len());
     }
 }
