@@ -2663,7 +2663,7 @@ mod tests {
     #[test]
     fn node_cost_for_leaf_signal_read() {
         let mut eg = EGraph::new();
-        let id = eg.add(ENode {
+        let _id = eg.add(ENode {
             op: EOp::SignalRead(SignalId(0)),
             children: vec![],
         });
