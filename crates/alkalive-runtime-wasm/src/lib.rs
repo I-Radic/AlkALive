@@ -337,6 +337,17 @@ fn build_scene_from_scheduled(
 fn build_scene_from_algorithm(
     algorithm: &alkalive_compiler::AlgorithmIR,
 ) -> alkalive_backend_wgpu::TextSceneData {
+    // ADR-027 Phase 2 + ADR-025: inspect collection monotonicity metadata to
+    // decide whether the incremental engine can use seminaïve evaluation.
+    // For the Hello-World scene there are no collections, so this is a no-op;
+    // the infrastructure is in place for scenes that declare collections.
+    if alkalive_compiler::has_seminive_collections(algorithm) {
+        let _strategies = alkalive_compiler::collection_strategies(algorithm);
+        // In a full runtime, each strategy would configure the incremental
+        // engine to process only new elements (SeminiveNew) or skip removed
+        // elements (SeminiveRemoved) for the named collection.
+    }
+
     let mut scene = alkalive_backend_wgpu::TextSceneData::default();
 
     // Extract text node

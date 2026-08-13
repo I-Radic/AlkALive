@@ -84,7 +84,34 @@ pub fn lower(module: &ModuleDecl) -> Result<AlgorithmIR, CodegenError> {
         ir.nodes.push(node_ir);
     }
 
+    // ADR-027 Phase 2: lower collection declarations with monotonicity metadata.
+    for item in &module.items {
+        if let crate::ast::ItemDecl::Let(l) = item {
+            ir.collections.push(lower_collection_decl(l));
+        }
+    }
+
     Ok(ir)
+}
+
+/// Lower an [`crate::ast::LetDecl`] to a [`crate::ir::CollectionDeclIR`],
+/// resolving the effective monotonicity (attribute form takes precedence
+/// over type-qualifier form).
+fn lower_collection_decl(l: &crate::ast::LetDecl) -> crate::ir::CollectionDeclIR {
+    use crate::ast::BaseType;
+    use crate::ir::{CollectionDeclIR, Monotonicity};
+    // For Vec<T>, the element type is the inner Type's display string.
+    // For non-Vec types, use the whole Type's display string.
+    let element_type = match &l.ty.base {
+        BaseType::Vec(elem) => format!("{}", elem),
+        _ => format!("{}", l.ty),
+    };
+    let monotonicity = Monotonicity::from_qualifier(crate::typechecker::effective_qualifier(l));
+    CollectionDeclIR {
+        name: l.name.clone(),
+        element_type,
+        monotonicity,
+    }
 }
 
 fn lower_node(node: &NodeDecl, scene: &SceneDecl) -> Result<NodeIR, CodegenError> {

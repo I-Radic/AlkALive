@@ -50,6 +50,10 @@ pub struct AlgorithmIR {
     pub background: (u8, u8, u8),
     /// Ordered list of scene nodes.
     pub nodes: Vec<NodeIR>,
+    /// Collection declarations with monotonicity metadata (ADR-027 Phase 2).
+    /// The runtime uses this to enable seminaïve evaluation: only new
+    /// elements are processed on reactive updates for `monotone` collections.
+    pub collections: Vec<CollectionDeclIR>,
 }
 
 /// Backward-compatible alias for [`AlgorithmIR`].
@@ -106,6 +110,74 @@ pub enum PositionIR {
     Custom(f32, f32),
 }
 
+// ======================================================================
+// ADR-027 Phase 2 — Monotonicity metadata in the IR
+// ======================================================================
+
+/// The monotonicity of a collection, lowered from [`crate::ast::Qualifier`].
+///
+/// The runtime's incremental engine (ADR-025) uses this to decide whether
+/// a collection can be processed seminaïvely (only new elements) or must
+/// be fully re-evaluated.
+///
+/// - `Monotone`: the collection only grows. Seminaïve evaluation processes
+///   only the newly-added elements on each reactive update.
+/// - `Antitone`: the collection only shrinks. The runtime can skip
+///   elements that have been removed since the last frame.
+/// - `Unrestricted`: no monotonicity guarantee. Full re-evaluation is
+///   required on each reactive update.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Monotonicity {
+    /// No monotonicity constraint (the default). Full re-evaluation required.
+    #[default]
+    Unrestricted,
+    /// Collection only grows. Seminaïve evaluation: process only new elements.
+    Monotone,
+    /// Collection only shrinks. Skip removed elements.
+    Antitone,
+}
+
+impl fmt::Display for Monotonicity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Monotonicity::Unrestricted => write!(f, "unrestricted"),
+            Monotonicity::Monotone => write!(f, "monotone"),
+            Monotonicity::Antitone => write!(f, "antitone"),
+        }
+    }
+}
+
+impl Monotonicity {
+    /// Returns `true` iff seminaïve evaluation (process only new elements)
+    /// is safe for this collection.
+    pub fn supports_seminive(&self) -> bool {
+        matches!(self, Monotonicity::Monotone)
+    }
+
+    /// Lower an [`crate::ast::Qualifier`] to the IR [`Monotonicity`].
+    pub fn from_qualifier(q: crate::ast::Qualifier) -> Self {
+        match q {
+            crate::ast::Qualifier::Unrestricted => Monotonicity::Unrestricted,
+            crate::ast::Qualifier::Monotone => Monotonicity::Monotone,
+            crate::ast::Qualifier::Antitone => Monotonicity::Antitone,
+        }
+    }
+}
+
+/// A collection declaration lowered to the IR, carrying monotonicity metadata.
+///
+/// Produced by [`crate::codegen::lower`] from [`crate::ast::ItemDecl::Let`].
+/// Consumed by the runtime to enable seminaïve evaluation (ADR-025).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CollectionDeclIR {
+    /// The collection's name as written in source.
+    pub name: String,
+    /// The element type as a display string (e.g. `"i32"`, `"string"`).
+    pub element_type: String,
+    /// The monotonicity of this collection.
+    pub monotonicity: Monotonicity,
+}
+
 impl ColorIR {
     /// Returns the `(R, G, B)` triple for this color.
     pub fn rgb(self) -> (u8, u8, u8) {
@@ -145,6 +217,7 @@ impl AlgorithmIR {
             module_name: module_name.into(),
             background: (0, 0, 0),
             nodes: Vec::new(),
+            collections: Vec::new(),
         }
     }
 
@@ -191,6 +264,20 @@ impl AlgorithmIR {
                 out.push(',');
             }
             push_node_json(&mut out, node);
+        }
+        // ADR-027 Phase 2: serialize collection declarations with monotonicity.
+        out.push_str("],\"collections\":[");
+        for (i, col) in self.collections.iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            out.push_str("{\"name\":\"");
+            push_json_escaped(&mut out, &col.name);
+            out.push_str("\",\"element_type\":\"");
+            push_json_escaped(&mut out, &col.element_type);
+            out.push_str("\",\"monotonicity\":\"");
+            out.push_str(&col.monotonicity.to_string());
+            out.push_str("\"}");
         }
         out.push_str("]}");
         out

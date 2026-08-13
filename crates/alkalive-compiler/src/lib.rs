@@ -99,6 +99,7 @@ pub mod lexer;
 pub mod lints;
 pub mod parser;
 pub mod schedule;
+pub mod seminative;
 pub mod typechecker;
 
 // Re-export the primary public surface at the crate root for convenience.
@@ -118,11 +119,16 @@ pub use egraph::{
 };
 pub use incremental::{incremental_analysis, DepNode, DepNodeId, DependencyGraph, SignalId};
 pub use ir::{mint_module_id, AlgorithmIR, ColorIR, NodeIR, PositionIR, SceneIR};
+pub use ir::{CollectionDeclIR, Monotonicity};
 pub use lexer::{tokenize, LexError, Lexer, Token, TokenKind};
 pub use lints::{run_lints, LintReport, LintSet, LintSeverity};
 pub use parser::{parse, ParseError, Parser};
 pub use schedule::{
     schedule_lowering, BatchingStrategy, PassKind, RenderPass, ScheduleIR, ScheduledScene, ShaderId,
+};
+pub use seminative::{
+    collection_strategies, collection_strategy, has_seminive_collections, seminive_eligible_count,
+    EvaluationStrategy,
 };
 pub use typechecker::{
     check_module, effective_qualifier, param_qualifier, qualifier_is_subtype, type_is_subtype,
