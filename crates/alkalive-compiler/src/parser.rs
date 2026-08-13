@@ -13,7 +13,8 @@
 use core::fmt;
 
 use crate::ast::{
-    Color, InputFieldNode, ModuleDecl, NodeDecl, PositionDecl, RotationDecl, SceneDecl, TextNode,
+    Attribute, Color, InputFieldNode, ModuleDecl, NodeDecl, PositionDecl, RotationDecl,
+    SceneDecl, TextNode,
 };
 use crate::lexer::{Token, TokenKind};
 
@@ -57,6 +58,9 @@ impl Parser {
     /// Parse the token stream into a [`ModuleDecl`].
     pub fn parse(&mut self) -> Result<ModuleDecl, ParseError> {
         self.skip_newlines();
+        // File-level attributes (e.g. `#![deny(monotonicity)]`) may
+        // appear before the `module` keyword and are parsed inside
+        // `parse_module`.
         let mut module = self.parse_module()?;
         // Allow trailing newlines after the module body.
         self.skip_newlines();
@@ -64,9 +68,6 @@ impl Parser {
         if !matches!(self.peek().kind, TokenKind::Eof) {
             return Err(self.unexpected("end of input"));
         }
-        // Parse any scene declared inside the module.
-        // `parse_module` already consumed the scene if present, but we
-        // re-check here for a second scene (which is an error).
         let _ = &mut module; // borrow-check noop
         Ok(module)
     }
@@ -138,6 +139,9 @@ impl Parser {
     // ----------------------------------------------------------------------
 
     fn parse_module(&mut self) -> Result<ModuleDecl, ParseError> {
+        // File-level attributes (e.g. `#![deny(monotonicity)]`) may appear
+        // before the `module` keyword.
+        let attributes = self.parse_shebang_attributes()?;
         let kw = self.expect(TokenKind::Module)?;
         let line = kw.line;
         let col = kw.col;
@@ -155,7 +159,7 @@ impl Parser {
                     self.advance();
                     break;
                 }
-                TokenKind::Scene => {
+                TokenKind::Scene | TokenKind::At => {
                     if scene.is_some() {
                         return Err(self.unexpected_msg(
                             "duplicate `scene` block; a module may declare at most one scene",
@@ -176,12 +180,16 @@ impl Parser {
         Ok(ModuleDecl {
             name,
             scene,
+            attributes,
             line,
             col,
         })
     }
 
     fn parse_scene(&mut self) -> Result<SceneDecl, ParseError> {
+        // The scene block itself may carry leading attributes (rare, but
+        // supported by the grammar).
+        let attributes = self.parse_leading_attributes()?;
         let kw = self.expect(TokenKind::Scene)?;
         let line = kw.line;
         let col = kw.col;
@@ -193,12 +201,27 @@ impl Parser {
         let mut nodes: Vec<NodeDecl> = Vec::new();
 
         loop {
+            // Leading `@ident` attributes attach to the *next* node
+            // declaration. They cannot be applied to the `background`
+            // property or the closing `}`.
+            let attrs = self.parse_leading_attributes()?;
             match self.peek().kind {
                 TokenKind::RBrace => {
+                    if !attrs.is_empty() {
+                        return Err(self.unexpected_msg(
+                            "attributes must be followed by `text` or `input-field`; found `}`",
+                        ));
+                    }
                     self.advance();
                     break;
                 }
                 TokenKind::Background => {
+                    if !attrs.is_empty() {
+                        return Err(self.unexpected_msg(
+                            "attributes cannot be applied to the `background` property; \
+                             expected `text` or `input-field`",
+                        ));
+                    }
                     let color = self.parse_background_property()?;
                     background = Some(color);
                     self.skip_newlines();
@@ -212,12 +235,12 @@ impl Parser {
                             "`text` must be followed by a string literal",
                         ));
                     }
-                    let node = self.parse_text_node()?;
+                    let node = self.parse_text_node(attrs)?;
                     nodes.push(NodeDecl::Text(node));
                     self.skip_newlines();
                 }
                 TokenKind::InputField => {
-                    let node = self.parse_input_field_node()?;
+                    let node = self.parse_input_field_node(attrs)?;
                     nodes.push(NodeDecl::InputField(node));
                     self.skip_newlines();
                 }
@@ -235,6 +258,7 @@ impl Parser {
         Ok(SceneDecl {
             background,
             nodes,
+            attributes,
             line,
             col,
         })
@@ -248,7 +272,7 @@ impl Parser {
     }
 
     /// `text "..." { props* }`
-    fn parse_text_node(&mut self) -> Result<TextNode, ParseError> {
+    fn parse_text_node(&mut self, attributes: Vec<Attribute>) -> Result<TextNode, ParseError> {
         let kw = self.expect(TokenKind::Text)?;
         let line = kw.line;
         let col = kw.col;
@@ -299,13 +323,17 @@ impl Parser {
             font_size,
             rotation,
             position,
+            attributes,
             line,
             col,
         })
     }
 
     /// `input-field { props* }`
-    fn parse_input_field_node(&mut self) -> Result<InputFieldNode, ParseError> {
+    fn parse_input_field_node(
+        &mut self,
+        attributes: Vec<Attribute>,
+    ) -> Result<InputFieldNode, ParseError> {
         let kw = self.expect(TokenKind::InputField)?;
         let line = kw.line;
         let col = kw.col;
@@ -343,6 +371,7 @@ impl Parser {
         Ok(InputFieldNode {
             placeholder,
             position,
+            attributes,
             line,
             col,
         })
@@ -469,6 +498,84 @@ impl Parser {
                 line: tok.line,
                 col: tok.col,
             })
+    }
+
+    // ------------------------------------------------------------------
+    // Attribute parsing (ADR-027 Phase 1)
+    // ------------------------------------------------------------------
+
+    /// Parse zero or more leading `@ident` attribute annotations.
+    ///
+    /// Each attribute is a single `@` followed by an identifier. The
+    /// identifier is NOT a reserved keyword — `monotone` and `antitone`
+    /// are ordinary identifiers so the lint pass can recognise them
+    /// without growing the keyword set.
+    ///
+    /// Returns an empty `Vec` if no `@` is present at the cursor. This
+    /// keeps the call site backward-compatible: existing `.alk` files
+    /// without attributes produce an empty list and parse unchanged.
+    fn parse_leading_attributes(&mut self) -> Result<Vec<Attribute>, ParseError> {
+        let mut attrs = Vec::new();
+        while matches!(self.peek().kind, TokenKind::At) {
+            // Clone line/col before the next mutable borrow.
+            let (at_line, at_col) = {
+                let at_tok = self.advance(); // consume `@`
+                (at_tok.line, at_tok.col)
+            };
+            let name_tok = self.expect(TokenKind::Ident)?;
+            attrs.push(Attribute {
+                name: name_tok.value.clone(),
+                line: at_line,
+                col: at_col,
+            });
+            self.skip_newlines();
+        }
+        Ok(attrs)
+    }
+
+    /// Parse zero or more file-level shebang attributes (`#![...]`).
+    ///
+    /// Syntax:
+    /// ```text
+    /// ShebangAttr := '#!' '[' Ident ( '(' Ident ')' )? ']'
+    /// ```
+    ///
+    /// The resulting [`Attribute::name`] is `"ident"` if no parens are
+    /// present, or `"ident(arg)"` if they are. For example,
+    /// `#![deny(monotonicity)]` becomes
+    /// `Attribute { name: "deny(monotonicity)", ... }`.
+    ///
+    /// Returns an empty `Vec` if no `#!` is present at the cursor.
+    fn parse_shebang_attributes(&mut self) -> Result<Vec<Attribute>, ParseError> {
+        let mut attrs = Vec::new();
+        while matches!(self.peek().kind, TokenKind::Shebang) {
+            // Clone line/col before the next mutable borrow.
+            let (bang_line, bang_col) = {
+                let bang_tok = self.advance(); // consume `#!`
+                (bang_tok.line, bang_tok.col)
+            };
+            self.expect(TokenKind::LBracket)?;
+            let name_tok = self.expect(TokenKind::Ident)?;
+            let mut name = name_tok.value.clone();
+            // Optional `( arg )` payload.
+            if matches!(self.peek().kind, TokenKind::LParen) {
+                self.advance(); // consume `(`
+                let arg_tok = self.expect(TokenKind::Ident)?;
+                let arg = arg_tok.value.clone();
+                self.expect(TokenKind::RParen)?;
+                name.push('(');
+                name.push_str(&arg);
+                name.push(')');
+            }
+            self.expect(TokenKind::RBracket)?;
+            attrs.push(Attribute {
+                name,
+                line: bang_line,
+                col: bang_col,
+            });
+            self.skip_newlines();
+        }
+        Ok(attrs)
     }
 }
 
@@ -777,5 +884,146 @@ module M { // inline comment
         let err = parse("not a module").unwrap_err();
         let s = format!("{}", err);
         assert!(s.contains("parse error at 1:1"), "got: {}", s);
+    }
+
+    // ------------------------------------------------------------------
+    // Attribute parsing (ADR-027 Phase 1)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn parse_monotone_attribute_on_text_node() {
+        let m = parse_ok(r#"module M { scene { @monotone text "Hi" { } } }"#);
+        let s = m.scene.expect("scene");
+        match &s.nodes[0] {
+            NodeDecl::Text(t) => {
+                assert_eq!(t.content, "Hi");
+                assert_eq!(t.attributes.len(), 1);
+                assert_eq!(t.attributes[0].name, "monotone");
+                assert_eq!(t.attributes[0].line, 1);
+                assert_eq!(t.attributes[0].col, 20); // position of `@`
+            }
+            other => panic!("expected Text, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_antitone_attribute_on_input_field() {
+        let m = parse_ok(r#"module M { scene { @antitone input-field { } } }"#);
+        let s = m.scene.expect("scene");
+        match &s.nodes[0] {
+            NodeDecl::InputField(f) => {
+                assert_eq!(f.attributes.len(), 1);
+                assert_eq!(f.attributes[0].name, "antitone");
+            }
+            other => panic!("expected InputField, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_multiple_attributes_on_node() {
+        let m =
+            parse_ok(r#"module M { scene { @monotone @antitone text "Hi" { } } }"#);
+        let s = m.scene.expect("scene");
+        match &s.nodes[0] {
+            NodeDecl::Text(t) => {
+                assert_eq!(t.attributes.len(), 2);
+                assert_eq!(t.attributes[0].name, "monotone");
+                assert_eq!(t.attributes[1].name, "antitone");
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn parse_shebang_deny_monotonicity_attribute() {
+        let src = "#![deny(monotonicity)]\nmodule M { scene { } }";
+        let m = parse_ok(src);
+        assert_eq!(m.attributes.len(), 1);
+        assert_eq!(m.attributes[0].name, "deny(monotonicity)");
+        assert_eq!(m.attributes[0].line, 1);
+        assert_eq!(m.attributes[0].col, 1);
+    }
+
+    #[test]
+    fn parse_shebang_attribute_without_parens() {
+        // A bare `#![deny]` (no parens) is also accepted by the grammar.
+        let src = "#![deny]\nmodule M { scene { } }";
+        let m = parse_ok(src);
+        assert_eq!(m.attributes.len(), 1);
+        assert_eq!(m.attributes[0].name, "deny");
+    }
+
+    #[test]
+    fn parse_shebang_attribute_after_comment() {
+        // Shebang attributes may follow `//` line comments at the top of file.
+        let src = "// top-level comment\n#![deny(monotonicity)]\nmodule M { scene { } }";
+        let m = parse_ok(src);
+        assert_eq!(m.attributes.len(), 1);
+        assert_eq!(m.attributes[0].name, "deny(monotonicity)");
+    }
+
+    #[test]
+    fn parse_shebang_attribute_missing_bracket_errors() {
+        let err = parse("#![deny(monotonicity)\nmodule M { scene { } }").unwrap_err();
+        assert!(
+            err.message.contains("`]`") || err.message.contains("bracket"),
+            "got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn parse_attribute_on_background_errors() {
+        let err = parse(r#"module M { scene { @monotone background: #000000 } }"#).unwrap_err();
+        assert!(
+            err.message.contains("cannot be applied to the `background`"),
+            "got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn parse_trailing_attribute_errors() {
+        // An attribute must be followed by a node declaration, not `}`.
+        let err = parse(r#"module M { scene { text "Hi" { } @monotone } }"#).unwrap_err();
+        assert!(
+            err.message.contains("attributes must be followed"),
+            "got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn parse_existing_alk_without_attributes_unchanged() {
+        // The canonical Hello-World source must parse to the same AST as
+        // before (all attribute Vecs empty).
+        let src = r#"
+module HelloWorld {
+  scene {
+    background: #000000
+    text "Hello World!" {
+      color: gold
+      font-size: 64
+      rotation: y-axis 0.5
+      position: center
+    }
+    input-field {
+      placeholder: "Type here..."
+      position: below text
+    }
+  }
+}
+"#;
+        let m = parse_ok(src);
+        assert!(m.attributes.is_empty(), "module attributes should be empty");
+        let s = m.scene.expect("scene");
+        assert!(s.attributes.is_empty(), "scene attributes should be empty");
+        for n in &s.nodes {
+            assert!(
+                n.attributes().is_empty(),
+                "node {:?} should have no attributes",
+                n
+            );
+        }
     }
 }

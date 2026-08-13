@@ -88,6 +88,24 @@ pub enum TokenKind {
     Colon,
     /// `.`
     Dot,
+    /// `@` — introduces a leading attribute (e.g. `@monotone`). The
+    /// attribute name is lexed as a separate [`TokenKind::Ident`] token
+    /// immediately afterwards, so `@monotone` becomes `At` then
+    /// `Ident("monotone")`.
+    At,
+    /// `#!` — file-level attribute introducer (e.g. `#![deny(monotonicity)]`).
+    /// Must appear at the start of the file before the `module` keyword.
+    Shebang,
+    /// `[` — opening square bracket. Currently used only inside shebang
+    /// file-level attribute payloads (e.g. `#![deny(monotonicity)]`).
+    LBracket,
+    /// `]` — closing square bracket.
+    RBracket,
+    /// `(` — opening parenthesis. Currently used only inside shebang
+    /// attribute payloads (e.g. `#![deny(monotonicity)]`).
+    LParen,
+    /// `)` — closing parenthesis.
+    RParen,
 
     // ---- Structural ----
     /// A newline (`\n`). Emitted so the parser may use it as a soft
@@ -119,6 +137,12 @@ impl fmt::Display for TokenKind {
             TokenKind::RBrace => write!(f, "`}}`"),
             TokenKind::Colon => write!(f, "`:`"),
             TokenKind::Dot => write!(f, "`.`"),
+            TokenKind::At => write!(f, "`@`"),
+            TokenKind::Shebang => write!(f, "`#!`"),
+            TokenKind::LBracket => write!(f, "`[`"),
+            TokenKind::RBracket => write!(f, "`]`"),
+            TokenKind::LParen => write!(f, "`(`"),
+            TokenKind::RParen => write!(f, "`)`"),
             TokenKind::Newline => write!(f, "newline"),
             TokenKind::Eof => write!(f, "end of input"),
         }
@@ -164,6 +188,12 @@ impl Token {
                 | TokenKind::RBrace
                 | TokenKind::Colon
                 | TokenKind::Dot
+                | TokenKind::At
+                | TokenKind::Shebang
+                | TokenKind::LBracket
+                | TokenKind::RBracket
+                | TokenKind::LParen
+                | TokenKind::RParen
                 | TokenKind::Newline
                 | TokenKind::Eof
         )
@@ -313,7 +343,37 @@ impl<'src> Lexer<'src> {
                 self.advance_byte();
                 Ok(Token::new(TokenKind::Dot, ".", line, col))
             }
-            b'#' => self.lex_hex_color(line, col),
+            b'@' => {
+                self.advance_byte();
+                Ok(Token::new(TokenKind::At, "@", line, col))
+            }
+            b'[' => {
+                self.advance_byte();
+                Ok(Token::new(TokenKind::LBracket, "[", line, col))
+            }
+            b']' => {
+                self.advance_byte();
+                Ok(Token::new(TokenKind::RBracket, "]", line, col))
+            }
+            b'(' => {
+                self.advance_byte();
+                Ok(Token::new(TokenKind::LParen, "(", line, col))
+            }
+            b')' => {
+                self.advance_byte();
+                Ok(Token::new(TokenKind::RParen, ")", line, col))
+            }
+            b'#' => {
+                // `#!` is a file-level attribute introducer; otherwise `#`
+                // begins a hex color literal.
+                if self.bytes.get(self.pos + 1) == Some(&b'!') {
+                    self.advance_byte(); // consume '#'
+                    self.advance_byte(); // consume '!'
+                    Ok(Token::new(TokenKind::Shebang, "#!", line, col))
+                } else {
+                    self.lex_hex_color(line, col)
+                }
+            }
             b'"' => self.lex_string(line, col),
             b'0'..=b'9' | b'-' | b'+' => self.lex_number(line, col),
             b'a'..=b'z' | b'A'..=b'Z' | b'_' => self.lex_ident(line, col),
@@ -723,10 +783,101 @@ mod tests {
 
     #[test]
     fn lex_unexpected_byte_errors() {
-        let err = tokenize("@").unwrap_err();
+        // `;` is not part of the Hello-World `.alk` subset.
+        let err = tokenize(";").unwrap_err();
         assert!(err.message.contains("unexpected byte"), "got: {}", err.message);
         assert_eq!(err.line, 1);
         assert_eq!(err.col, 1);
+    }
+
+    #[test]
+    fn lex_at_sign_token() {
+        // `@` is the attribute introducer; it is now its own token kind.
+        let toks = tokenize("@").unwrap();
+        assert_eq!(toks[0].kind, TokenKind::At);
+        assert_eq!(toks[0].value, "@");
+        assert_eq!(toks[0].line, 1);
+        assert_eq!(toks[0].col, 1);
+        assert_eq!(toks[1].kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn lex_monotone_attribute() {
+        // `@monotone` lexes as `At` followed by `Ident("monotone")` —
+        // the attribute name is NOT a reserved keyword.
+        let toks = tokenize("@monotone").unwrap();
+        let filtered = kinds_no_nl(&toks);
+        assert_eq!(filtered, vec![TokenKind::At, TokenKind::Ident, TokenKind::Eof]);
+        assert_eq!(toks[0].kind, TokenKind::At);
+        assert_eq!(toks[1].kind, TokenKind::Ident);
+        assert_eq!(toks[1].value, "monotone");
+        assert!(!toks[1].is_keyword(), "monotone must NOT be a keyword");
+    }
+
+    #[test]
+    fn lex_antitone_attribute() {
+        let toks = tokenize("@antitone").unwrap();
+        let filtered = kinds_no_nl(&toks);
+        assert_eq!(filtered, vec![TokenKind::At, TokenKind::Ident, TokenKind::Eof]);
+        assert_eq!(toks[1].value, "antitone");
+    }
+
+    #[test]
+    fn lex_shebang_token() {
+        // `#!` is the file-level attribute introducer.
+        let toks = tokenize("#!").unwrap();
+        assert_eq!(toks[0].kind, TokenKind::Shebang);
+        assert_eq!(toks[0].value, "#!");
+        assert_eq!(toks[1].kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn lex_shebang_does_not_swallow_hex_color() {
+        // A bare `#` followed by hex digits is still a hex color.
+        let toks = tokenize("#FFD700").unwrap();
+        assert_eq!(toks[0].kind, TokenKind::HexColor);
+        assert_eq!(toks[0].value, "FFD700");
+    }
+
+    #[test]
+    fn lex_brackets_and_parens() {
+        // `[`, `]`, `(`, `)` are now their own punctuation tokens (used by
+        // the shebang attribute payload `#![...]`).
+        let toks = tokenize("[ ] ( )").unwrap();
+        let filtered = kinds_no_nl(&toks);
+        assert_eq!(
+            filtered,
+            vec![
+                TokenKind::LBracket,
+                TokenKind::RBracket,
+                TokenKind::LParen,
+                TokenKind::RParen,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn lex_shebang_deny_monotonicity_payload() {
+        // `#![deny(monotonicity)]` lexes as Shebang + LBracket + Ident +
+        // LParen + Ident + RParen + RBracket.
+        let toks = tokenize("#![deny(monotonicity)]").unwrap();
+        let filtered = kinds_no_nl(&toks);
+        assert_eq!(
+            filtered,
+            vec![
+                TokenKind::Shebang,
+                TokenKind::LBracket,
+                TokenKind::Ident,    // deny
+                TokenKind::LParen,
+                TokenKind::Ident,    // monotonicity
+                TokenKind::RParen,
+                TokenKind::RBracket,
+                TokenKind::Eof,
+            ]
+        );
+        assert_eq!(toks[2].value, "deny");
+        assert_eq!(toks[4].value, "monotonicity");
     }
 
     #[test]
@@ -824,6 +975,12 @@ module HelloWorld {
             TokenKind::RBrace,
             TokenKind::Colon,
             TokenKind::Dot,
+            TokenKind::At,
+            TokenKind::Shebang,
+            TokenKind::LBracket,
+            TokenKind::RBracket,
+            TokenKind::LParen,
+            TokenKind::RParen,
             TokenKind::Newline,
             TokenKind::Eof,
         ];

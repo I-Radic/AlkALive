@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use alkalive_compiler::ir::{ColorIR, NodeIR, PositionIR, SceneIR};
-use alkalive_compiler::{compile, CompileError};
+use alkalive_compiler::{compile, compile_with_lints, CompileError};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
@@ -55,6 +55,7 @@ fn run(args: &[String]) -> Result<(), String> {
 fn run_compile(args: &[String]) -> Result<(), String> {
     let mut input_path: Option<PathBuf> = None;
     let mut output_path: Option<PathBuf> = None;
+    let mut lint = false;
     let mut i = 0;
     while i < args.len() {
         let arg = &args[i];
@@ -66,8 +67,14 @@ fn run_compile(args: &[String]) -> Result<(), String> {
                 }
                 output_path = Some(PathBuf::from(&args[i]));
             }
+            "--lint" => {
+                lint = true;
+            }
             "-h" | "--help" => {
-                println!("Usage: alkalive-compiler compile <input.alk> -o <output.scene>");
+                println!("Usage: alkalive-compiler compile <input.alk> -o <output.scene> [--lint]");
+                println!();
+                println!("Flags:");
+                println!("  --lint   Run lint passes and print findings to stderr (ADR-027 P1).");
                 return Ok(());
             }
             other if other.starts_with('-') => {
@@ -90,24 +97,53 @@ fn run_compile(args: &[String]) -> Result<(), String> {
         "missing -o <output.scene>; usage: alkalive-compiler compile <input.alk> -o <output.scene>".to_string()
     })?;
 
-    compile_file(&input_path, &output_path)
+    compile_file(&input_path, &output_path, lint)
 }
 
-fn compile_file(input: &Path, output: &Path) -> Result<(), String> {
+fn compile_file(input: &Path, output: &Path, lint: bool) -> Result<(), String> {
     let src = fs::read_to_string(input)
         .map_err(|e| format!("failed to read `{}`: {}", input.display(), e))?;
 
-    let ir = compile(&src).map_err(|e| format_compile_error(&e, input))?;
+    let ir = if lint {
+        let (ir, lint_set) =
+            compile_with_lints(&src).map_err(|e| format_compile_error(&e, input))?;
+        // Surface lint findings to stderr.
+        if !lint_set.is_empty() {
+            eprintln!(
+                "alkalive-compiler: {} lint finding(s) for `{}`:",
+                lint_set.len(),
+                input.display()
+            );
+            for report in lint_set.iter() {
+                eprintln!("  {}", report.render());
+            }
+        }
+        if lint_set.has_errors() {
+            let deny_count = lint_set
+                .iter()
+                .filter(|r| r.severity == alkalive_compiler::LintSeverity::Deny)
+                .count();
+            return Err(format!(
+                "{} lint pass reported {} error(s); aborting",
+                input.display(),
+                deny_count
+            ));
+        }
+        ir
+    } else {
+        compile(&src).map_err(|e| format_compile_error(&e, input))?
+    };
 
     let json = scene_ir_to_json(&ir);
     fs::write(output, json.as_bytes())
         .map_err(|e| format!("failed to write `{}`: {}", output.display(), e))?;
 
     eprintln!(
-        "alkalive-compiler: compiled `{}` -> `{}` ({} nodes)",
+        "alkalive-compiler: compiled `{}` -> `{}` ({} nodes){}",
         input.display(),
         output.display(),
-        ir.nodes.len()
+        ir.nodes.len(),
+        if lint { " [+lint]" } else { "" }
     );
 
     Ok(())
@@ -200,14 +236,18 @@ fn print_usage() {
     eprintln!("AlkALive compiler — lexes/parses .alk source and emits a SceneIR JSON artifact");
     eprintln!();
     eprintln!("USAGE:");
-    eprintln!("  alkalive-compiler compile <input.alk> -o <output.scene>");
+    eprintln!("  alkalive-compiler compile <input.alk> -o <output.scene> [--lint]");
     eprintln!();
     eprintln!("ARGS:");
     eprintln!("  <input.alk>          Path to the .alk source file");
     eprintln!("  -o, --output <path>  Output path for the scene IR (JSON)");
     eprintln!();
+    eprintln!("FLAGS:");
+    eprintln!("  --lint               Run lint passes (ADR-027 Phase 1) and print");
+    eprintln!("                       findings to stderr. Aborts on `Deny` findings.");
+    eprintln!();
     eprintln!("EXAMPLE:");
-    eprintln!("  alkalive-compiler compile examples/hello.alk -o /tmp/hello.scene");
+    eprintln!("  alkalive-compiler compile examples/hello.alk -o /tmp/hello.scene --lint");
 }
 
 #[cfg(test)]
@@ -335,5 +375,53 @@ mod tests {
     #[test]
     fn run_help_succeeds() {
         run(&["alkalive-compiler".into(), "help".into()]).expect("help should succeed");
+    }
+
+    #[test]
+    fn run_compile_lint_flag_parses_without_error() {
+        // `--lint` should be parsed without "unknown flag" error. The
+        // command will then fail because no input file is provided.
+        let err = run(&[
+            "alkalive-compiler".into(),
+            "compile".into(),
+            "--lint".into(),
+        ])
+        .unwrap_err();
+        assert!(
+            !err.contains("unknown flag"),
+            "--lint should be accepted: got {}",
+            err
+        );
+        assert!(err.contains("missing input file"), "got: {}", err);
+    }
+
+    #[test]
+    fn run_compile_lint_help_succeeds() {
+        run(&[
+            "alkalive-compiler".into(),
+            "compile".into(),
+            "-h".into(),
+        ])
+        .expect("compile -h should succeed");
+    }
+
+    #[test]
+    fn run_compile_lint_flag_position_independent() {
+        // `--lint` may appear before or after `-o`. It must always be
+        // accepted.
+        let err = run(&[
+            "alkalive-compiler".into(),
+            "compile".into(),
+            "-o".into(),
+            "out.scene".into(),
+            "--lint".into(),
+        ])
+        .unwrap_err();
+        assert!(
+            !err.contains("unknown flag"),
+            "got: {}",
+            err
+        );
+        assert!(err.contains("missing input file"), "got: {}", err);
     }
 }

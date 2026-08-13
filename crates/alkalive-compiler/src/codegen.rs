@@ -224,6 +224,28 @@ pub fn compile(src: &str) -> Result<SceneIR, CompileError> {
     lower(&module).map_err(CompileError::Codegen)
 }
 
+/// Convenience: tokenize + parse + lint + lower in one call.
+///
+/// This is the ADR-027 Phase 1 entry point. It runs the lint pass
+/// *after* parsing but *before* codegen, returning both the lowered
+/// [`SceneIR`] and the [`LintSet`] of findings. The legacy [`compile`]
+/// function remains lint-free for backward compatibility.
+///
+/// Lint findings are surfaced to the caller — this function does NOT
+/// abort compilation when `deny_monotonicity` is set. Callers that want
+/// hard errors should inspect [`LintSet::has_errors`] and act accordingly.
+///
+/// # Errors
+///
+/// Returns [`CompileError`] only if lexing, parsing, or codegen fails.
+/// Lint findings never produce a `CompileError`.
+pub fn compile_with_lints(src: &str) -> Result<(SceneIR, crate::lints::LintSet), CompileError> {
+    let module = crate::parser::parse(src).map_err(CompileError::Parse)?;
+    let lint_set = crate::lints::run_lints(&module);
+    let ir = lower(&module).map_err(CompileError::Codegen)?;
+    Ok((ir, lint_set))
+}
+
 /// Top-level error for the full `compile` pipeline (lex+parse+lower).
 #[derive(Debug, Clone)]
 pub enum CompileError {

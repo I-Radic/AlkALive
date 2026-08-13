@@ -12,6 +12,9 @@
 //!                [parser] ──► ast::ModuleDecl
 //!                  │
 //!                  ▼
+//!                [lints]   ──► LintSet   (ADR-027 Phase 1)
+//!                  │
+//!                  ▼
 //!                [codegen] ──► ir::SceneIR
 //! ```
 //!
@@ -40,10 +43,16 @@
 //!
 //! # Zero-dependency library surface
 //!
-//! The library modules (`lexer`, `ast`, `parser`, `ir`, `codegen`) use
-//! only `alkalive-core` (an internal workspace crate) and `std`/`core`.
-//! The optional `cli` feature pulls in `serde_json` for the binary; it
-//! does NOT affect the library's public API.
+//! The library modules (`lexer`, `ast`, `parser`, `ir`, `codegen`,
+//! `lints`) use only `alkalive-core` (an internal workspace crate) and
+//! `std`/`core`. The optional `cli` feature pulls in `serde_json` for the
+//! binary; it does NOT affect the library's public API.
+//!
+//! # Lints (ADR-027 Phase 1)
+//!
+//! Use [`compile_with_lints`] to obtain both the lowered [`ir::SceneIR`]
+//! and the [`lints::LintSet`] produced by the lint passes. The legacy
+//! [`compile`] function remains lint-free for backward compatibility.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -51,16 +60,19 @@
 pub mod ast;
 pub mod codegen;
 pub mod ir;
+pub mod lints;
 pub mod lexer;
 pub mod parser;
 
 // Re-export the primary public surface at the crate root for convenience.
 pub use ast::{
-    Color, InputFieldNode, ModuleDecl, NodeDecl, PositionDecl, RotationDecl, SceneDecl, TextNode,
+    Attribute, Color, InputFieldNode, ModuleDecl, NodeDecl, PositionDecl, RotationDecl,
+    SceneDecl, TextNode,
 };
-pub use codegen::{lower, compile, CodegenError, CompileError, DEFAULT_FONT_SIZE};
+pub use codegen::{lower, compile, compile_with_lints, CodegenError, CompileError, DEFAULT_FONT_SIZE};
 pub use ir::{mint_module_id, ColorIR, NodeIR, PositionIR, SceneIR};
 pub use lexer::{tokenize, LexError, Lexer, Token, TokenKind};
+pub use lints::{run_lints, LintReport, LintSet, LintSeverity};
 pub use parser::{parse, ParseError, Parser};
 
 /// Re-export of [`alkalive_core::ModuleId`] so downstream consumers can
