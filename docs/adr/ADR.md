@@ -207,15 +207,68 @@ JS dynamic typing makes type errors runtime phenomena (P4.1) [7,19,22]; the prot
 Adopt option (a): a statically-typed, module- and object-oriented language compiling to WASM, with first-class UI modules and explicit ownership/visibility; predictable AOT performance. Rejected: (b) retain dynamic typing; (c) optional static typing à la TypeScript (doesn't change the runtime).
 
 ### Status
-Proposed.
+Amended by [ADR-027](ADR_027_monotonicity_types_phased.md) Phase 2 (Monotonicity Qualifiers subsection below). Originally Proposed.
 
 ### Consequences
 - **Positive:** type errors become compile-time; encapsulation is a language primitive; WASM's predictable AOT ceiling replaces JIT heuristics; first-class modules give precise HMR/test/dependency units.
 - **Negative:** new language ecosystem must be built (adoption risk — P9.5); abandons DOM/HTML/CSS as substrate (explicit architectural commitment).
-- **Cross-references:** [ADR 009](#adr-009-two-level-type-verification) (type verification); [ADR 013](#adr-013-no-wasmdom-boundary-in-the-hot-path) (hot-path); [ADR 018](#adr-018-capability-scoped-imports--component-model-tree-shaking) (capability-scoped imports); [ADR 021](#adr-021-main-thread--on-demand-wasm-threads-with-socket-ipc) (scheduling model — resolved).
+- **Cross-references:** [ADR 009](#adr-009-two-level-type-verification) (type verification); [ADR 013](#adr-013-no-wasmdom-boundary-in-the-hot-path) (hot-path); [ADR 018](#adr-018-capability-scoped-imports--component-model-tree-shaking) (capability-scoped imports); [ADR 021](#adr-021-main-thread--on-demand-wasm-threads-with-socket-ipc) (scheduling model — resolved); [ADR 027](ADR_027_monotonicity_types_phased.md) (monotonicity qualifiers — Phase 2 implemented).
 
 ### Confidence
 **High.** The dynamic-typing and JIT-unpredictability evidence is direct [7,19,22,13,20,21], and WASM's AOT profile is well-established [1,2,6].
+
+### Monotonicity Qualifiers (ADR-027 Phase 2 Amendment)
+
+*Added by [ADR-027](ADR_027_monotonicity_types_phased.md) Phase 2 (implemented).*
+
+The statically-typed language defined by this ADR is extended to include
+`monotone` and `antitone` as **first-class type qualifiers** on collection
+types. They are reserved keywords in the lexer (breaking change from Phase 1,
+where they were plain identifiers — see ADR-027 for the migration path).
+
+**Qualifier syntax.** A type is `Qualifier? BaseType`, where:
+
+```
+Type       := ('monotone' | 'antitone')? BaseType
+BaseType   := 'i32' | 'f32' | 'string' | 'bool' | 'Vec' '<' Type '>' | Ident
+```
+
+In source this reads as:
+
+- `Vec<T>` — unrestricted (the default; qualifier omitted)
+- `monotone Vec<T>` — collection may only grow (shrink ops rejected)
+- `antitone Vec<T>` — collection may only shrink (grow ops rejected)
+
+Qualifiers may appear on `let` bindings, function parameters, function return
+types, and nested inside `Vec<...>` element types (covariant).
+
+**Subtyping lattice.**
+
+```
+        unrestricted (bottom — most permissive value)
+       /                  \
+   monotone            antitone   (incomparable tops)
+```
+
+- `unrestricted <: monotone` and `unrestricted <: antitone` (an unrestricted
+  value is admissible wherever a monotone or antitone one is required).
+- `monotone` and `antitone` are **not comparable**.
+- `monotone` / `antitone` are **not** subtypes of `unrestricted` (a qualified
+  value cannot escape to a context that might violate its invariant).
+- `Vec<T>` is covariant in its element type: `Vec<unrestricted i32> <:
+  monotone Vec<monotone i32>`.
+
+**Compile-time enforcement.** Qualifiers are enforced **solely by the type
+checker** (`crates/alkalive-compiler/src/typechecker.rs`), not at runtime.
+Violations are hard compile-time errors (`CompileError::Type(TypeErrorSet)`),
+not runtime panics. The runtime consumes the resolved qualifiers as IR metadata
+(`ir::Monotonicity` on `CollectionDeclIR`) purely as an *optimisation hint*
+for seminaïve evaluation (ADR-025) — never as a soundness backstop.
+
+**Cross-references.**
+- [ADR 027](ADR_027_monotonicity_types_phased.md) — full phased design; Phase 2 implemented.
+- [ADR 009](#adr-009-two-level-type-verification) — amended in parallel to add monotonicity as a third verification dimension.
+- [ADR 025](ADR_025_incremental_computation.md) — Phase 2 IR metadata enables seminaïve evaluation.
 
 ---
 
@@ -228,15 +281,55 @@ The language goal (P4.1, P4.6) [3,5] wants a sound static type system compiling 
 Adopt option (a): a two-level guarantee — the compiler proves source-level soundness, and WASM verifies compiled well-formedness (structural only). Rejected: (b) claim end-to-end semantic verification (overclaim); (c) runtime-only type checks (fails P4.1).
 
 ### Status
-Proposed.
+Amended by [ADR-027](ADR_027_monotonicity_types_phased.md) Phase 2 (Monotonicity Verification Dimension subsection below). Originally Proposed.
 
 ### Consequences
 - **Positive:** honest, compositional guarantee; source soundness + WASM well-formedness are independently meaningful.
 - **Negative:** source-level soundness scope depends on [ADR 008](#adr-008-statically-typed-moduleoo-language-compiling-to-wasm)'s language design (escape hatches weaken it).
-- **Cross-references:** [ADR 008](#adr-008-statically-typed-moduleoo-language-compiling-to-wasm) (language design determines soundness scope); [ADR 018](#adr-018-capability-scoped-imports--component-model-tree-shaking) (module-boundary verification).
+- **Cross-references:** [ADR 008](#adr-008-statically-typed-moduleoo-language-compiling-to-wasm) (language design determines soundness scope); [ADR 018](#adr-018-capability-scoped-imports--component-model-tree-shaking) (module-boundary verification); [ADR 027](ADR_027_monotonicity_types_phased.md) (monotonicity — adds a third verification dimension).
 
 ### Confidence
-**Medium.** The WASM well-formedness portion is high-confidence; source-level soundness depends on the as-yet-undesigned language's escape-hatch discipline.
+**Medium.** The WASM well-formedness portion is high-confidence; source-level soundness depends on the as-yet-undesigned language's escape-hatch discipline. The monotonicity-qualifier dimension added by ADR-027 Phase 2 is **High** (implemented and tested).
+
+### Monotonicity Verification Dimension (ADR-027 Phase 2 Amendment)
+
+*Added by [ADR-027](ADR_027_monotonicity_types_phased.md) Phase 2 (implemented).*
+
+This ADR originally specified a **two-level** guarantee: (1) source-level
+soundness, (2) WASM structural well-formedness. ADR-027 Phase 2 adds a third
+verification dimension: **monotonicity-qualifier enforcement**.
+
+The three levels of verification now compose as follows:
+
+1. **Source-level type soundness** — the compiler's type checker proves that
+   the program is type-correct at the source level (variables resolve, return
+   types match, etc.). This is the level originally specified by ADR-009.
+2. **Monotonicity-qualifier enforcement** — the same type checker proves that
+   `monotone` / `antitone` qualifiers flow correctly through the program:
+   function parameters respect declared qualifiers, method calls do not violate
+   the grow/shrink invariant, and return values are subtype-compatible with
+   declared return types. Monotonicity violations are **compile-time type
+   errors**, not runtime panics: a `monotone Vec<T>` that calls `.remove()` is
+   rejected at `compile_typecheck()` time with `CompileError::Type(TypeErrorSet)`.
+3. **WASM structural well-formedness** — the WASM validator verifies the
+   compiled binary's structural type correctness (the existing level 2 of
+   ADR-009; unchanged).
+
+The three levels are independent and additive: a program may pass level 1 and
+3 yet fail level 2 (e.g., source is well-typed and the WASM is well-formed, but
+a `monotone` collection was shrunk). Conversely, level 2 has no impact on the
+WASM binary structure (qualifiers are erased before code generation); it only
+informs runtime optimisation via IR metadata.
+
+The monotonicity dimension is implemented by
+`crates/alkalive-compiler/src/typechecker.rs` and integrated into the public
+compiler entry point `compile_typecheck(src)` in
+`crates/alkalive-compiler/src/codegen.rs`.
+
+**Cross-references.**
+- [ADR 027](ADR_027_monotonicity_types_phased.md) — full phased design; Phase 2 implemented.
+- [ADR 008](#adr-008-statically-typed-moduleoo-language-compiling-to-wasm) — amended in parallel to formally include `monotone`/`antitone` as type qualifiers in the language design.
+- [ADR 025](ADR_025_incremental_computation.md) — runtime consumes IR `Monotonicity` metadata for seminaïve evaluation (optimisation, not verification).
 
 ---
 
