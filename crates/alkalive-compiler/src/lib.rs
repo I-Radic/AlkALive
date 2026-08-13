@@ -1,7 +1,9 @@
 //! AlkALive compiler frontend.
 //!
 //! Lexes, parses, and lowers `.alk` source files (Hello-World subset)
-//! into a runtime-consumable [`ir::SceneIR`].
+//! into a runtime-consumable [`ir::AlgorithmIR`] (the *algorithm* IR), then
+//! applies the ADR-024 [`schedule::schedule_lowering`] pass to produce a
+//! [`schedule::ScheduledScene`] (algorithm + schedule).
 //!
 //! # Pipeline
 //!
@@ -15,7 +17,10 @@
 //!                [lints]   ──► LintSet   (ADR-027 Phase 1)
 //!                  │
 //!                  ▼
-//!                [codegen] ──► ir::SceneIR
+//!                [codegen] ──► ir::AlgorithmIR
+//!                  │
+//!                  ▼
+//!                [schedule_lowering] ──► schedule::ScheduledScene  (ADR-024)
 //! ```
 //!
 //! # Example
@@ -44,15 +49,22 @@
 //! # Zero-dependency library surface
 //!
 //! The library modules (`lexer`, `ast`, `parser`, `ir`, `codegen`,
-//! `lints`) use only `alkalive-core` (an internal workspace crate) and
-//! `std`/`core`. The optional `cli` feature pulls in `serde_json` for the
-//! binary; it does NOT affect the library's public API.
+//! `lints`, `schedule`) use only `alkalive-core` (an internal workspace
+//! crate) and `std`/`core`. The optional `cli` feature pulls in `serde_json`
+//! for the binary; it does NOT affect the library's public API.
 //!
 //! # Lints (ADR-027 Phase 1)
 //!
-//! Use [`compile_with_lints`] to obtain both the lowered [`ir::SceneIR`]
+//! Use [`compile_with_lints`] to obtain both the lowered [`ir::AlgorithmIR`]
 //! and the [`lints::LintSet`] produced by the lint passes. The legacy
 //! [`compile`] function remains lint-free for backward compatibility.
+//!
+//! # ADR-024 — Algorithm/Schedule Separation
+//!
+//! The legacy [`SceneIR`](ir::SceneIR) type is now an alias for
+//! [`AlgorithmIR`](ir::AlgorithmIR). Use [`compile_scheduled`] to obtain a
+//! [`schedule::ScheduledScene`] containing both the algorithm and the
+//! default schedule.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -63,17 +75,22 @@ pub mod ir;
 pub mod lints;
 pub mod lexer;
 pub mod parser;
+pub mod schedule;
 
 // Re-export the primary public surface at the crate root for convenience.
 pub use ast::{
     Attribute, Color, InputFieldNode, ModuleDecl, NodeDecl, PositionDecl, RotationDecl,
     SceneDecl, TextNode,
 };
-pub use codegen::{lower, compile, compile_with_lints, CodegenError, CompileError, DEFAULT_FONT_SIZE};
-pub use ir::{mint_module_id, ColorIR, NodeIR, PositionIR, SceneIR};
+pub use codegen::{lower, compile, compile_with_lints, compile_scheduled, CodegenError, CompileError, DEFAULT_FONT_SIZE};
+pub use ir::{mint_module_id, AlgorithmIR, ColorIR, NodeIR, PositionIR, SceneIR};
 pub use lexer::{tokenize, LexError, Lexer, Token, TokenKind};
 pub use lints::{run_lints, LintReport, LintSet, LintSeverity};
 pub use parser::{parse, ParseError, Parser};
+pub use schedule::{
+    schedule_lowering, BatchingStrategy, PassKind, RenderPass, ScheduledScene, ScheduleIR,
+    ShaderId,
+};
 
 /// Re-export of [`alkalive_core::ModuleId`] so downstream consumers can
 /// reference the type without adding `alkalive-core` as a direct dependency.
@@ -149,5 +166,61 @@ module HelloWorld {
             "got: {}",
             s
         );
+    }
+
+    // ---- ADR-024: compile_scheduled() integration tests ----
+
+    #[test]
+    fn compile_scheduled_hello_world() {
+        let scheduled =
+            compile_scheduled(HELLO_WORLD).expect("hello world should compile (scheduled)");
+        // Algorithm should match the legacy compile() output.
+        assert_eq!(scheduled.algorithm.module_name, "HelloWorld");
+        assert!(scheduled.algorithm.has_text());
+        assert!(scheduled.algorithm.has_input_field());
+        // Five passes: Clear, InputFieldBackground, InputFieldBorder, TitleText, InputText.
+        assert_eq!(scheduled.schedule.passes.len(), 5);
+        // pass_order is identity by default.
+        assert_eq!(scheduled.schedule.pass_order, vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn compile_scheduled_matches_compile_algorithm() {
+        // The algorithm produced by compile_scheduled must equal what
+        // compile() returns (the schedule lowering pass must not mutate
+        // the algorithm IR).
+        let just_algo = compile(HELLO_WORLD).unwrap();
+        let scheduled = compile_scheduled(HELLO_WORLD).unwrap();
+        assert_eq!(scheduled.algorithm, just_algo);
+    }
+
+    #[test]
+    fn compile_scheduled_pass_kinds_in_expected_order() {
+        let scheduled = compile_scheduled(HELLO_WORLD).unwrap();
+        let kinds: Vec<_> = scheduled
+            .schedule
+            .passes
+            .iter()
+            .map(|p| p.kind)
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                schedule::PassKind::Clear,
+                schedule::PassKind::InputFieldBackground,
+                schedule::PassKind::InputFieldBorder,
+                schedule::PassKind::TitleText,
+                schedule::PassKind::InputText,
+            ]
+        );
+    }
+
+    #[test]
+    fn scene_ir_alias_compiles_with_new_name() {
+        // The type alias `SceneIR = AlgorithmIR` must work: callers can
+        // use either name interchangeably.
+        let ir_as_alias: SceneIR = compile(HELLO_WORLD).unwrap();
+        let ir_as_algo: AlgorithmIR = compile(HELLO_WORLD).unwrap();
+        assert_eq!(ir_as_alias, ir_as_algo);
     }
 }

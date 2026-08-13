@@ -1,5 +1,5 @@
 //! Codegen — lowers the [`crate::ast::ModuleDecl`] to a validated
-//! [`crate::ir::SceneIR`].
+//! [`crate::ir::AlgorithmIR`] (the *algorithm* IR, per ADR-024).
 //!
 //! This is the *semantic* pass: defaults are applied, named colors are
 //! resolved, positions are validated, and missing required fields are
@@ -25,7 +25,8 @@ use crate::ast::{
     Color, ModuleDecl, NodeDecl, PositionDecl, RotationDecl, SceneDecl, TextNode,
     InputFieldNode,
 };
-use crate::ir::{mint_module_id, ColorIR, NodeIR, PositionIR, SceneIR};
+use crate::ir::{mint_module_id, AlgorithmIR, ColorIR, NodeIR, PositionIR};
+use crate::schedule::{schedule_lowering, ScheduledScene};
 
 /// A semantic (codegen) error.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,10 +54,16 @@ impl core::error::Error for CodegenError {}
 /// Default text font size when none is declared.
 pub const DEFAULT_FONT_SIZE: f32 = 32.0;
 
-/// Lower a parsed [`ModuleDecl`] to a validated [`SceneIR`].
-pub fn lower(module: &ModuleDecl) -> Result<SceneIR, CodegenError> {
+/// Lower a parsed [`ModuleDecl`] to a validated [`AlgorithmIR`].
+///
+/// Per ADR-024, this returns the *algorithm* IR — the pure scene
+/// description with no rendering-strategy fields. (Legacy callers may
+/// know this type as `SceneIR`; the alias is re-exported at the crate
+/// root.) Use [`compile_scheduled`] to additionally produce the default
+/// rendering schedule.
+pub fn lower(module: &ModuleDecl) -> Result<AlgorithmIR, CodegenError> {
     let module_id = mint_module_id(&module.name);
-    let mut ir = SceneIR::new(module_id, &module.name);
+    let mut ir = AlgorithmIR::new(module_id, &module.name);
 
     let scene = module.scene.as_ref().ok_or(CodegenError {
         message: format!(
@@ -219,7 +226,11 @@ fn lower_position(p: &PositionDecl, line: u32, col: u32) -> Result<PositionIR, C
 }
 
 /// Convenience: tokenize + parse + lower in one call.
-pub fn compile(src: &str) -> Result<SceneIR, CompileError> {
+///
+/// Returns the *algorithm* IR ([`AlgorithmIR`], aliased as `SceneIR`).
+/// Per ADR-024, this is the pure scene description with no rendering
+/// strategy — use [`compile_scheduled`] if you also need the schedule.
+pub fn compile(src: &str) -> Result<AlgorithmIR, CompileError> {
     let module = crate::parser::parse(src).map_err(CompileError::Parse)?;
     lower(&module).map_err(CompileError::Codegen)
 }
@@ -228,7 +239,7 @@ pub fn compile(src: &str) -> Result<SceneIR, CompileError> {
 ///
 /// This is the ADR-027 Phase 1 entry point. It runs the lint pass
 /// *after* parsing but *before* codegen, returning both the lowered
-/// [`SceneIR`] and the [`LintSet`] of findings. The legacy [`compile`]
+/// [`AlgorithmIR`] and the [`LintSet`] of findings. The legacy [`compile`]
 /// function remains lint-free for backward compatibility.
 ///
 /// Lint findings are surfaced to the caller — this function does NOT
@@ -239,11 +250,60 @@ pub fn compile(src: &str) -> Result<SceneIR, CompileError> {
 ///
 /// Returns [`CompileError`] only if lexing, parsing, or codegen fails.
 /// Lint findings never produce a `CompileError`.
-pub fn compile_with_lints(src: &str) -> Result<(SceneIR, crate::lints::LintSet), CompileError> {
+pub fn compile_with_lints(
+    src: &str,
+) -> Result<(AlgorithmIR, crate::lints::LintSet), CompileError> {
     let module = crate::parser::parse(src).map_err(CompileError::Parse)?;
     let lint_set = crate::lints::run_lints(&module);
     let ir = lower(&module).map_err(CompileError::Codegen)?;
     Ok((ir, lint_set))
+}
+
+/// Convenience: tokenize + parse + lower + schedule-lower in one call.
+///
+/// This is the ADR-024 entry point. It runs the full pipeline:
+/// `.alk source → AlgorithmIR → ScheduledScene`. The returned
+/// [`ScheduledScene`] contains both the algorithm (what to render) and
+/// the default [`ScheduleIR`](crate::schedule::ScheduleIR) (how to
+/// render it).
+///
+/// # Errors
+///
+/// Returns [`CompileError`] only if lexing, parsing, or codegen fails.
+/// The [`schedule_lowering`] pass is infallible (it never fails for a
+/// well-formed [`AlgorithmIR`]).
+///
+/// # Example
+///
+/// ```
+/// use alkalive_compiler::compile_scheduled;
+///
+/// let src = r#"
+/// module HelloWorld {
+///   scene {
+///     background: #000000
+///     text "Hello World!" {
+///       color: gold
+///       font-size: 64
+///       rotation: y-axis 0.5
+///       position: center
+///     }
+///     input-field {
+///       placeholder: "Type here..."
+///       position: below text
+///     }
+///   }
+/// }
+/// "#;
+/// let scheduled = compile_scheduled(src).expect("hello world should compile");
+/// assert_eq!(scheduled.algorithm.module_name, "HelloWorld");
+/// // Five passes: Clear, InputFieldBackground, InputFieldBorder, TitleText, InputText.
+/// assert_eq!(scheduled.schedule.passes.len(), 5);
+/// ```
+pub fn compile_scheduled(src: &str) -> Result<ScheduledScene, CompileError> {
+    let algorithm = compile(src)?;
+    let schedule = schedule_lowering(&algorithm);
+    Ok(ScheduledScene { algorithm, schedule })
 }
 
 /// Top-level error for the full `compile` pipeline (lex+parse+lower).
@@ -283,7 +343,7 @@ mod tests {
     use super::*;
     use crate::parser::parse;
 
-    fn lower_ok(src: &str) -> SceneIR {
+    fn lower_ok(src: &str) -> AlgorithmIR {
         let m = parse(src).unwrap_or_else(|e| panic!("parse failed: {}", e));
         lower(&m).unwrap_or_else(|e| panic!("lower failed: {}", e))
     }
@@ -536,5 +596,63 @@ module HelloWorld {
         let err = lower_err(r#"module M { scene { text "Hi" { color: purple } } }"#);
         let s = format!("{}", err);
         assert!(s.contains("codegen error at"), "got: {}", s);
+    }
+
+    // ---- ADR-024: compile_scheduled() tests ----
+
+    #[test]
+    fn compile_scheduled_full_pipeline_ok() {
+        let scheduled = compile_scheduled(
+            r#"module M { scene { text "Hi" { } input-field { } } }"#,
+        )
+        .expect("compile_scheduled should succeed");
+        assert_eq!(scheduled.algorithm.module_name, "M");
+        assert!(scheduled.algorithm.has_text());
+        assert!(scheduled.algorithm.has_input_field());
+        // Clear + InputFieldBackground + InputFieldBorder + TitleText + InputText = 5 passes.
+        assert_eq!(scheduled.schedule.passes.len(), 5);
+        assert_eq!(scheduled.schedule.pass_order.len(), 5);
+    }
+
+    #[test]
+    fn compile_scheduled_text_only_has_two_passes() {
+        let scheduled =
+            compile_scheduled(r#"module M { scene { text "Hi" { } } }"#).unwrap();
+        // Clear + TitleText = 2 passes.
+        assert_eq!(scheduled.schedule.passes.len(), 2);
+        assert_eq!(scheduled.schedule.passes[0].kind, crate::schedule::PassKind::Clear);
+        assert_eq!(
+            scheduled.schedule.passes[1].kind,
+            crate::schedule::PassKind::TitleText
+        );
+    }
+
+    #[test]
+    fn compile_scheduled_empty_scene_has_only_clear_pass() {
+        let scheduled = compile_scheduled("module M { scene { } }").unwrap();
+        assert_eq!(scheduled.schedule.passes.len(), 1);
+        assert_eq!(scheduled.schedule.passes[0].kind, crate::schedule::PassKind::Clear);
+    }
+
+    #[test]
+    fn compile_scheduled_propagates_parse_errors() {
+        let err = compile_scheduled("module { }").unwrap_err();
+        assert!(matches!(err, CompileError::Parse(_)));
+    }
+
+    #[test]
+    fn compile_scheduled_propagates_codegen_errors() {
+        let err = compile_scheduled("module M { }").unwrap_err();
+        assert!(matches!(err, CompileError::Codegen(_)));
+    }
+
+    #[test]
+    fn compile_scheduled_algorithm_matches_compile_output() {
+        // The algorithm field of compile_scheduled should be byte-for-byte
+        // identical to what compile() returns.
+        let src = r#"module Same { scene { text "Hi" { } input-field { } } }"#;
+        let just_algo = compile(src).unwrap();
+        let scheduled = compile_scheduled(src).unwrap();
+        assert_eq!(scheduled.algorithm, just_algo);
     }
 }

@@ -6,10 +6,23 @@
 //! [`ColorIR::Gold`]. The runtime consumes this directly without needing
 //! to know about the `.alk` source syntax.
 //!
-//! The IR also carries a [`module_id`](SceneIR::module_id) minted from the
-//! module name (deterministic FNV-1a hash) and the
-//! [`module_name`](SceneIR::module_name) string, so the runtime can route
-//! the scene to the correct [`alkalive_core::Module`] instance.
+//! The IR also carries a [`module_id`](AlgorithmIR::module_id) minted from
+//! the module name (deterministic FNV-1a hash) and the
+//! [`module_name`](AlgorithmIR::module_name) string, so the runtime can
+//! route the scene to the correct [`alkalive_core::Module`] instance.
+//!
+//! # ADR-024 — Algorithm/Schedule Separation
+//!
+//! As of ADR-024, this struct is the pure *algorithm* IR — it contains
+//! only scene description data (what to render), with no rendering-strategy
+//! fields (how to render). It has been **renamed to [`AlgorithmIR`]** to
+//! reflect this role. The legacy name [`SceneIR`] is preserved as a type
+//! alias for backward compatibility.
+//!
+//! The rendering strategy (pass order, shader selection, batching) now
+//! lives in the separate [`ScheduleIR`](crate::schedule::ScheduleIR),
+//! produced by the [`schedule_lowering`](crate::schedule::schedule_lowering)
+//! pass.
 
 #![forbid(unsafe_code)]
 
@@ -17,9 +30,17 @@ use core::fmt;
 
 use alkalive_core::ModuleId;
 
-/// The root IR. Produced by [`crate::codegen::lower`].
+/// The root algorithm IR — the pure scene description (what to render).
+///
+/// Produced by [`crate::codegen::lower`]. Per ADR-024, this is the
+/// *algorithm* IR: it contains only scene description data (nodes,
+/// background, identity) with no rendering-strategy fields (those live in
+/// [`ScheduleIR`](crate::schedule::ScheduleIR)).
+///
+/// The legacy name `SceneIR` is preserved as a type alias for backward
+/// compatibility — see [`SceneIR`] at the bottom of this module.
 #[derive(Debug, Clone, PartialEq)]
-pub struct SceneIR {
+pub struct AlgorithmIR {
     /// Stable, deterministic identifier minted from the module name
     /// (FNV-1a 64-bit hash). Wrapped in [`ModuleId`] for type safety.
     pub module_id: ModuleId,
@@ -30,6 +51,14 @@ pub struct SceneIR {
     /// Ordered list of scene nodes.
     pub nodes: Vec<NodeIR>,
 }
+
+/// Backward-compatible alias for [`AlgorithmIR`].
+///
+/// Per ADR-024, the struct previously known as `SceneIR` was renamed to
+/// `AlgorithmIR` to reflect its role as the pure *algorithm* (scene
+/// description) IR. The legacy name is preserved as a type alias so
+/// existing consumers continue to compile unchanged.
+pub type SceneIR = AlgorithmIR;
 
 /// A node in the scene.
 #[derive(Debug, Clone, PartialEq)]
@@ -71,7 +100,7 @@ pub enum PositionIR {
     /// Centered in the viewport.
     Center,
     /// Below the text node (only meaningful when a text node precedes
-    /// this one in [`SceneIR::nodes`]).
+    /// this one in [`AlgorithmIR::nodes`]).
     BelowText,
     /// Explicit normalized coordinates `(x, y)` in `[0, 1]`.
     Custom(f32, f32),
@@ -104,9 +133,12 @@ impl fmt::Display for PositionIR {
     }
 }
 
-impl SceneIR {
-    /// Construct a new `SceneIR` with the given module identity and an
+impl AlgorithmIR {
+    /// Construct a new `AlgorithmIR` with the given module identity and an
     /// empty node list. Background defaults to black.
+    ///
+    /// (Legacy callers may know this type as `SceneIR`; the alias is
+    /// exported at the crate root.)
     pub fn new(module_id: ModuleId, module_name: impl Into<String>) -> Self {
         Self {
             module_id,

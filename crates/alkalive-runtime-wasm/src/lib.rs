@@ -4,8 +4,9 @@
 //! It compiles to a `cdylib` (WASM) that owns the entire rendering pipeline:
 //!
 //! 1. **Scene loading** — embeds the compiled `.alk` source at build time
-//!    via `include_str!`, then lowers it to a `SceneIR` at startup via
-//!    [`alkalive_compiler::compile`].
+//!    via `include_str!`, then lowers it to a `ScheduledScene` at startup
+//!    via [`alkalive_compiler::compile_scheduled`] (ADR-024: produces both
+//!    the `AlgorithmIR` and the default `ScheduleIR`).
 //! 2. **GPU backend init** — acquires the WebGL2 context from the canvas
 //!    via [`alkalive_backend_wgpu::WgpuRenderer::init_from_canvas`].
 //! 3. **Frame loop** — owns the `requestAnimationFrame` loop *from inside
@@ -25,6 +26,13 @@
 //!
 //! No frame loop, no input routing, no scene creation in JS. Per ADR 013,
 //! there is no WASM/DOM boundary in the hot path.
+//!
+//! # ADR-024 — Algorithm/Schedule Separation
+//!
+//! The runtime stores both the [`ScheduleIR`] (rendering strategy) and the
+//! [`TextSceneData`] (per-frame scene state derived from the algorithm).
+//! The GPU backend reads the schedule at frame time to determine pass
+//! order, replacing previously hardcoded rendering logic.
 //!
 //! # Cross-target compilation
 //!
@@ -46,8 +54,9 @@ use wasm_bindgen_futures::spawn_local;
 
 /// The canonical Hello World `.alk` source, embedded at build time.
 ///
-/// This is compiled to a `SceneIR` at startup via
-/// [`alkalive_compiler::compile`], then lowered to a
+/// This is compiled to a `ScheduledScene` at startup via
+/// [`alkalive_compiler::compile_scheduled`] (ADR-024: produces both the
+/// `AlgorithmIR` and the default `ScheduleIR`), then lowered to a
 /// [`TextSceneData`](alkalive_backend_wgpu::TextSceneData) for the renderer.
 const HELLO_ALK_SRC: &str = include_str!("../../../examples/hello.alk");
 
@@ -56,13 +65,18 @@ const HELLO_ALK_SRC: &str = include_str!("../../../examples/hello.alk");
 // ---------------------------------------------------------------------------
 
 /// The global runtime state. Holds the GPU renderer, the per-frame scene
-/// data, animation time, and the user's input text buffer.
+/// data, the rendering schedule (ADR-024), animation time, and the user's
+/// input text buffer.
 struct Runtime {
     /// The WebGL2 GPU renderer. Owns the canvas's WebGL2 context, shader
     /// program, glyph atlas texture, and vertex buffers.
     renderer: alkalive_backend_wgpu::WgpuRenderer,
     /// The per-frame scene description (text, colors, rotation speed).
+    /// Derived from the algorithm IR's text node.
     scene: alkalive_backend_wgpu::TextSceneData,
+    /// The rendering schedule (ADR-024) — pass order, shader selection,
+    /// batching strategy. Drives data-driven dispatch in `render_frame`.
+    schedule: alkalive_compiler::ScheduleIR,
     /// Elapsed time in seconds (drives the rotation animation).
     time: f32,
     /// The user's input text buffer (forwarded from the IME input element).
@@ -122,13 +136,16 @@ pub fn start(canvas: web_sys::HtmlCanvasElement, ime_input: web_sys::HtmlInputEl
         web_sys::console::error_1(&format!("AlkALive panic: {}", info).into());
     }));
 
-    // 2. Compile the embedded `.alk` source to a SceneIR.
-    let ir = alkalive_compiler::compile(HELLO_ALK_SRC).map_err(|e| {
+    // 2. Compile the embedded `.alk` source to a ScheduledScene (ADR-024:
+    //    produces both the AlgorithmIR and the default ScheduleIR).
+    let scheduled = alkalive_compiler::compile_scheduled(HELLO_ALK_SRC).map_err(|e| {
         JsValue::from_str(&format!("AlkALive compile error: {:?}", e))
     })?;
 
-    // 3. Lower the SceneIR to the renderer's TextSceneData.
-    let scene = build_scene_from_ir(&ir);
+    // 3. Lower the ScheduledScene's algorithm to the renderer's TextSceneData,
+    //    and keep the schedule for data-driven dispatch in render_frame.
+    let scene = build_scene_from_scheduled(&scheduled);
+    let schedule = scheduled.schedule.clone();
 
     // 4. Read the canvas's display dimensions. The HTML shell sizes the
     //    canvas via CSS (`width: 100vw; height: 100vh;`), so client_width
@@ -140,7 +157,7 @@ pub fn start(canvas: web_sys::HtmlCanvasElement, ime_input: web_sys::HtmlInputEl
     //    future resolves once the WebGL2 context is acquired, shaders are
     //    compiled, and the glyph atlas texture is created.
     spawn_local(async move {
-        if let Err(e) = init_runtime(canvas, ime_input, width, height, scene).await {
+        if let Err(e) = init_runtime(canvas, ime_input, width, height, scene, schedule).await {
             web_sys::console::error_1(&e);
         }
     });
@@ -158,6 +175,7 @@ async fn init_runtime(
     width: u32,
     height: u32,
     scene: alkalive_backend_wgpu::TextSceneData,
+    schedule: alkalive_compiler::ScheduleIR,
 ) -> Result<(), JsValue> {
     // 1. Initialize the WebGL2 renderer (async — acquires the GPU context).
     let renderer = alkalive_backend_wgpu::WgpuRenderer::init_from_canvas(canvas.clone(), width, height)
@@ -170,6 +188,7 @@ async fn init_runtime(
         *rt.borrow_mut() = Some(Runtime {
             renderer,
             scene,
+            schedule,
             time: 0.0,
             input_text: String::new(),
             original_text,
@@ -196,19 +215,37 @@ async fn init_runtime(
 }
 
 // ---------------------------------------------------------------------------
-// Scene IR → TextSceneData conversion
+// ScheduledScene → TextSceneData conversion (ADR-024)
 // ---------------------------------------------------------------------------
 
-/// Build a [`TextSceneData`] from a compiled [`SceneIR`].
+/// Build a [`TextSceneData`] from a compiled [`ScheduledScene`].
 ///
 /// Picks the first [`NodeIR::Text`](alkalive_compiler::NodeIR::Text) in the
-/// scene and translates its fields. Falls back to the default
+/// algorithm IR and translates its fields. Falls back to the default
 /// golden-on-black "Hello World!" scene if no text node is present.
-fn build_scene_from_ir(ir: &alkalive_compiler::SceneIR) -> alkalive_backend_wgpu::TextSceneData {
+///
+/// The schedule itself is *not* consumed here — it is stored separately on
+/// the [`Runtime`] and passed to the renderer at frame time for data-driven
+/// dispatch.
+fn build_scene_from_scheduled(
+    scheduled: &alkalive_compiler::ScheduledScene,
+) -> alkalive_backend_wgpu::TextSceneData {
+    build_scene_from_algorithm(&scheduled.algorithm)
+}
+
+/// Build a [`TextSceneData`] from an [`AlgorithmIR`] (the algorithm portion
+/// of a [`ScheduledScene`]).
+///
+/// This is the legacy conversion path — it existed before ADR-024 as
+/// `build_scene_from_ir`. It is retained as a private helper so the
+/// algorithm-to-`TextSceneData` mapping is testable in isolation.
+fn build_scene_from_algorithm(
+    algorithm: &alkalive_compiler::AlgorithmIR,
+) -> alkalive_backend_wgpu::TextSceneData {
     let mut scene = alkalive_backend_wgpu::TextSceneData::default();
 
     // Extract text node
-    for node in &ir.nodes {
+    for node in &algorithm.nodes {
         if let alkalive_compiler::NodeIR::Text {
             content,
             color,
@@ -221,7 +258,7 @@ fn build_scene_from_ir(ir: &alkalive_compiler::SceneIR) -> alkalive_backend_wgpu
             scene.text = content.clone();
             scene.font_size = *font_size;
             scene.rotation_speed = *rotation_speed;
-            scene.background = ir.background;
+            scene.background = algorithm.background;
             scene.text_color = (
                 r as f32 / 255.0,
                 g as f32 / 255.0,
@@ -232,7 +269,7 @@ fn build_scene_from_ir(ir: &alkalive_compiler::SceneIR) -> alkalive_backend_wgpu
     }
 
     // Extract input field node
-    for node in &ir.nodes {
+    for node in &algorithm.nodes {
         if let alkalive_compiler::NodeIR::InputField { placeholder, .. } = node {
             scene.input_placeholder = placeholder.clone();
         }
@@ -408,7 +445,11 @@ fn start_frame_loop() {
                 // crate compatible with the native stub of WgpuRenderer
                 // which doesn't expose `elapsed_seconds`.)
                 runtime.time += 1.0 / 60.0;
-                runtime.renderer.render_frame(&runtime.scene, runtime.time);
+                // ADR-024: pass the schedule to the renderer so it can do
+                // data-driven dispatch over the schedule's passes.
+                runtime
+                    .renderer
+                    .render_frame(&runtime.scene, &runtime.schedule, runtime.time);
             }
         });
 

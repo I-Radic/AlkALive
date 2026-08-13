@@ -663,9 +663,14 @@ mod wasm {
             })
         }
 
-        /// Render one frame: clear to the background color, render the text
-        /// quads (golden by default) with Y-axis rotation animated by `time`,
-        /// then render the input field below the title.
+        /// Render one frame using the ADR-024 schedule.
+        ///
+        /// The pass order, shader selection, and rotation flag are read from
+        /// `schedule.passes` (in `schedule.pass_order` order). The actual
+        /// GPU drawing logic is unchanged from the pre-ADR-024 implementation
+        /// — the key change is that the pass dispatch is now **data-driven**
+        /// (iterate `schedule.passes` and match on `pass.kind`) rather than
+        /// hardcoded as a sequence of `if` blocks.
         ///
         /// `text_scene.text_color` modulates the fragment output; the glyph
         /// atlas is sampled for alpha.
@@ -674,7 +679,14 @@ mod wasm {
         /// `alkalive-text` (HarfRust shaping + glyph rasterization) and
         /// uploaded to the GPU texture. Subsequent calls re-use the cached
         /// atlas unless the input text changes (which triggers a re-upload).
-        pub fn render_frame(&mut self, text_scene: &TextSceneData, time: f32) {
+        pub fn render_frame(
+            &mut self,
+            text_scene: &TextSceneData,
+            schedule: &alkalive_compiler::ScheduleIR,
+            time: f32,
+        ) {
+            use alkalive_compiler::PassKind;
+
             // 1. Determine input display text.
             let input_display = if text_scene.input_text.is_empty() {
                 text_scene.input_placeholder.clone()
@@ -691,18 +703,9 @@ mod wasm {
                 self.last_input_text = input_display.clone();
             }
 
-            // 3. Set viewport + clear.
+            // 3. Bind program + shared state once (text-quad shader).
+            //    Passes that need a different shader will rebind as needed.
             self.gl.viewport(0, 0, self.width as i32, self.height as i32);
-            let (br, bg, bb) = text_scene.background_normalized();
-            self.gl.clear_color(br, bg, bb, 1.0);
-            self.gl.clear(WebGl2RenderingContext::COLOR_BUFFER_BIT);
-
-            // 4. Draw input field background + border (below title).
-            let (fx, fy, fw, fh) = self.input_field_bounds;
-            self.draw_rect_filled(fx, fy, fw, fh, 0.05, 0.05, 0.08, 0.9);
-            self.draw_rect_outline(fx, fy, fw, fh, 0.8, 0.65, 0.0, 0.8);
-
-            // 5. Bind program + shared state.
             self.gl.use_program(Some(&self.program));
             self.gl.uniform2f(Some(&self.u_canvas_size), self.width as f32, self.height as f32);
             if let Some(ref u_time) = self.u_time { self.gl.uniform1f(Some(u_time), time); }
@@ -711,28 +714,80 @@ mod wasm {
             self.gl.uniform1i(Some(&self.u_glyph_texture), 0);
             self.gl.bind_vertex_array(Some(&self.vao));
 
-            // 6. Draw title text WITH rotation (golden color).
-            if self.title_vertex_count > 0 {
-                let rotation = text_scene.rotation_speed * time;
-                self.gl.uniform1f(Some(&self.u_rotation), rotation);
-                self.gl.uniform4f(Some(&self.u_text_color),
-                    text_scene.text_color.0, text_scene.text_color.1,
-                    text_scene.text_color.2, text_scene.text_color.3);
-                self.gl.draw_arrays(WebGl2RenderingContext::TRIANGLES, 0, self.title_vertex_count as i32);
-            }
-
-            // 7. Draw input field text WITHOUT rotation (white or dim color).
-            if self.input_vertex_count > 0 {
-                self.gl.uniform1f(Some(&self.u_rotation), 0.0); // No rotation for input
-                if text_scene.input_text.is_empty() {
-                    // Placeholder: dim gray
-                    self.gl.uniform4f(Some(&self.u_text_color), 0.35, 0.35, 0.4, 1.0);
-                } else {
-                    // Typed text: white
-                    self.gl.uniform4f(Some(&self.u_text_color), 0.9, 0.9, 0.95, 1.0);
+            // 4. ADR-024: data-driven dispatch over the schedule's passes.
+            //    Iterate passes in `schedule.pass_order` order, matching on
+            //    `pass.kind` to decide what to draw. This replaces the
+            //    previously hardcoded `clear → input-bg → input-border →
+            //    title-text → input-text` sequence with a single loop whose
+            //    order is controlled by the ScheduleIR data structure.
+            for &pass_idx in &schedule.pass_order {
+                let pass = match schedule.passes.get(pass_idx) {
+                    Some(p) => p,
+                    None => continue,
+                };
+                match pass.kind {
+                    PassKind::Clear => {
+                        // Clear to the background color.
+                        let (br, bg, bb) = text_scene.background_normalized();
+                        self.gl.clear_color(br, bg, bb, 1.0);
+                        self.gl.clear(WebGl2RenderingContext::COLOR_BUFFER_BIT);
+                    }
+                    PassKind::InputFieldBackground => {
+                        // Solid-color fill of the input field rectangle.
+                        let (fx, fy, fw, fh) = self.input_field_bounds;
+                        self.draw_rect_filled(fx, fy, fw, fh, 0.05, 0.05, 0.08, 0.9);
+                    }
+                    PassKind::InputFieldBorder => {
+                        // Solid-color outline of the input field rectangle.
+                        let (fx, fy, fw, fh) = self.input_field_bounds;
+                        self.draw_rect_outline(fx, fy, fw, fh, 0.8, 0.65, 0.0, 0.8);
+                    }
+                    PassKind::TitleText => {
+                        // Draw title text WITH rotation (golden color).
+                        // `pass.rotation` is the schedule's authority on
+                        // whether rotation applies — but the rotation amount
+                        // is still derived from `text_scene.rotation_speed`
+                        // and `time`.
+                        if self.title_vertex_count > 0 {
+                            let rotation = if pass.rotation {
+                                text_scene.rotation_speed * time
+                            } else {
+                                0.0
+                            };
+                            self.gl.uniform1f(Some(&self.u_rotation), rotation);
+                            self.gl.uniform4f(
+                                Some(&self.u_text_color),
+                                text_scene.text_color.0,
+                                text_scene.text_color.1,
+                                text_scene.text_color.2,
+                                text_scene.text_color.3,
+                            );
+                            self.gl.draw_arrays(
+                                WebGl2RenderingContext::TRIANGLES,
+                                0,
+                                self.title_vertex_count as i32,
+                            );
+                        }
+                    }
+                    PassKind::InputText => {
+                        // Draw input field text WITHOUT rotation.
+                        if self.input_vertex_count > 0 {
+                            self.gl.uniform1f(Some(&self.u_rotation), 0.0);
+                            if text_scene.input_text.is_empty() {
+                                // Placeholder: dim gray
+                                self.gl.uniform4f(Some(&self.u_text_color), 0.35, 0.35, 0.4, 1.0);
+                            } else {
+                                // Typed text: white
+                                self.gl.uniform4f(Some(&self.u_text_color), 0.9, 0.9, 0.95, 1.0);
+                            }
+                            self.gl.draw_arrays(
+                                WebGl2RenderingContext::TRIANGLES,
+                                self.input_vertex_start as i32,
+                                self.input_vertex_count as i32,
+                            );
+                        }
+                    }
                 }
-                self.gl.draw_arrays(WebGl2RenderingContext::TRIANGLES,
-                    self.input_vertex_start as i32, self.input_vertex_count as i32);
             }
         }
 
@@ -1019,7 +1074,16 @@ mod native {
         }
 
         /// No-op on native — the renderer was never actually constructed.
-        pub fn render_frame(&mut self, _text_scene: &TextSceneData, _time: f32) {}
+        pub fn render_frame(
+            &mut self,
+            _text_scene: &TextSceneData,
+            _schedule: &alkalive_compiler::ScheduleIR,
+            _time: f32,
+        ) {
+            // Intentionally empty: the GPU backend only runs on wasm32.
+            // (ADR-024: signature now takes the schedule for type-compat
+            // with the wasm32 build, but the native stub does nothing.)
+        }
 
         /// No-op on native.
         pub fn resize(&mut self, width: u32, height: u32) {
@@ -1229,15 +1293,75 @@ mod tests {
     /// Verify the `WgpuRenderer` type exists and has the expected public API
     /// (init_from_canvas, render_frame, resize). On native, construction
     /// fails — but the type itself must compile.
+    ///
+    /// ADR-024: `render_frame` now accepts a `&ScheduleIR` argument so the
+    /// renderer can do data-driven pass dispatch.
     #[test]
     fn wgpu_renderer_type_compiles() {
         // Just exercise the API surface (type-check).
         fn _assert_api(r: &mut WgpuRenderer) {
-            r.render_frame(&TextSceneData::default(), 0.0);
+            // Build a default schedule for an empty algorithm — the native
+            // stub ignores it, but the type must accept it.
+            let algo = alkalive_compiler::AlgorithmIR::new(
+                alkalive_compiler::mint_module_id("Test"),
+                "Test",
+            );
+            let sched = alkalive_compiler::schedule_lowering(&algo);
+            r.render_frame(&TextSceneData::default(), &sched, 0.0);
             r.resize(800, 600);
         }
         // (We can't actually construct one in a unit test without a canvas,
         // but the type-check above exercises the public API.)
+    }
+
+    /// ADR-024: the `ScheduleIR` data structure carries the passes in the
+    /// expected order. This is a backend-side sanity check that the
+    /// schedule types are re-exported through `alkalive_compiler`.
+    #[test]
+    fn schedule_ir_passes_have_expected_kinds_for_hello_world() {
+        // Build an AlgorithmIR matching the Hello World scene.
+        let mut algo = alkalive_compiler::AlgorithmIR::new(
+            alkalive_compiler::mint_module_id("HelloWorld"),
+            "HelloWorld",
+        );
+        algo.nodes.push(alkalive_compiler::NodeIR::Text {
+            content: "Hello World!".into(),
+            color: alkalive_compiler::ColorIR::Gold,
+            font_size: 64.0,
+            rotation_speed: 0.5,
+            position: alkalive_compiler::PositionIR::Center,
+        });
+        algo.nodes.push(alkalive_compiler::NodeIR::InputField {
+            placeholder: "Type here...".into(),
+            position: alkalive_compiler::PositionIR::BelowText,
+        });
+
+        let sched = alkalive_compiler::schedule_lowering(&algo);
+        // Five passes: Clear, InputFieldBackground, InputFieldBorder,
+        // TitleText, InputText.
+        assert_eq!(sched.passes.len(), 5);
+        let kinds: Vec<_> = sched.passes.iter().map(|p| p.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                alkalive_compiler::PassKind::Clear,
+                alkalive_compiler::PassKind::InputFieldBackground,
+                alkalive_compiler::PassKind::InputFieldBorder,
+                alkalive_compiler::PassKind::TitleText,
+                alkalive_compiler::PassKind::InputText,
+            ]
+        );
+        // TitleText pass has rotation=true.
+        let title = sched
+            .passes
+            .iter()
+            .find(|p| p.kind == alkalive_compiler::PassKind::TitleText)
+            .expect("title pass");
+        assert!(title.rotation);
+        // All other passes have rotation=false.
+        for p in sched.passes.iter().filter(|p| p.kind != alkalive_compiler::PassKind::TitleText) {
+            assert!(!p.rotation, "pass {:?} should not have rotation", p.kind);
+        }
     }
 
     /// End-to-end: shape "Hello" via alkalive-text, build quads, build

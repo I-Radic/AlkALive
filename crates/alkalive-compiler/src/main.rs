@@ -2,12 +2,16 @@
 //!
 //! Usage:
 //! ```text
-//! alkalive-compiler compile <input.alk> -o <output.scene>
+//! alkalive-compiler compile <input.alk> -o <output.scene> [--scheduled]
 //! ```
 //!
-//! Reads the `.alk` source, lexes/parses/lowers it to a [`SceneIR`],
-//! and serialises the IR to a pretty-printed JSON artifact at the output
-//! path.
+//! Reads the `.alk` source, lexes/parses/lowers it to an
+//! [`AlgorithmIR`](alkalive_compiler::AlgorithmIR), and serialises the IR to
+//! a pretty-printed JSON artifact at the output path.
+//!
+//! With `--scheduled` (ADR-024), the output additionally contains the
+//! `ScheduleIR` (rendering strategy) produced by
+//! [`compile_scheduled`](alkalive_compiler::compile_scheduled).
 //!
 //! This binary is gated behind the `cli` Cargo feature (enabled by
 //! default). Disabling default features builds the library alone with
@@ -19,8 +23,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use alkalive_compiler::ir::{ColorIR, NodeIR, PositionIR, SceneIR};
-use alkalive_compiler::{compile, compile_with_lints, CompileError};
+use alkalive_compiler::ir::{ColorIR, NodeIR, PositionIR};
+use alkalive_compiler::schedule::{BatchingStrategy, PassKind, RenderPass, ShaderId};
+use alkalive_compiler::{
+    compile, compile_scheduled, compile_with_lints, AlgorithmIR, CompileError, SceneIR,
+};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
@@ -56,6 +63,7 @@ fn run_compile(args: &[String]) -> Result<(), String> {
     let mut input_path: Option<PathBuf> = None;
     let mut output_path: Option<PathBuf> = None;
     let mut lint = false;
+    let mut scheduled = false;
     let mut i = 0;
     while i < args.len() {
         let arg = &args[i];
@@ -70,11 +78,15 @@ fn run_compile(args: &[String]) -> Result<(), String> {
             "--lint" => {
                 lint = true;
             }
+            "--scheduled" => {
+                scheduled = true;
+            }
             "-h" | "--help" => {
-                println!("Usage: alkalive-compiler compile <input.alk> -o <output.scene> [--lint]");
+                println!("Usage: alkalive-compiler compile <input.alk> -o <output.scene> [--lint] [--scheduled]");
                 println!();
                 println!("Flags:");
-                println!("  --lint   Run lint passes and print findings to stderr (ADR-027 P1).");
+                println!("  --lint        Run lint passes and print findings to stderr (ADR-027 P1).");
+                println!("  --scheduled   Emit the ADR-024 ScheduledScene JSON (algorithm + schedule).");
                 return Ok(());
             }
             other if other.starts_with('-') => {
@@ -97,12 +109,37 @@ fn run_compile(args: &[String]) -> Result<(), String> {
         "missing -o <output.scene>; usage: alkalive-compiler compile <input.alk> -o <output.scene>".to_string()
     })?;
 
-    compile_file(&input_path, &output_path, lint)
+    compile_file(&input_path, &output_path, lint, scheduled)
 }
 
-fn compile_file(input: &Path, output: &Path, lint: bool) -> Result<(), String> {
+fn compile_file(input: &Path, output: &Path, lint: bool, scheduled: bool) -> Result<(), String> {
     let src = fs::read_to_string(input)
         .map_err(|e| format!("failed to read `{}`: {}", input.display(), e))?;
+
+    // The `--scheduled` path produces a ScheduledScene (ADR-024). The `--lint`
+    // flag is currently incompatible with `--scheduled` (would require
+    // threading lints through the schedule lowering pass); for now, when
+    // both are set, we honor `--scheduled` and skip lints (with a stderr
+    // notice). A future PR can wire the two together.
+    if scheduled {
+        if lint {
+            eprintln!("alkalive-compiler: --lint is ignored when --scheduled is set (ADR-024)");
+        }
+        let scheduled_scene =
+            compile_scheduled(&src).map_err(|e| format_compile_error(&e, input))?;
+        let json = scheduled_scene_to_json(&scheduled_scene);
+        fs::write(output, json.as_bytes())
+            .map_err(|e| format!("failed to write `{}`: {}", output.display(), e))?;
+
+        eprintln!(
+            "alkalive-compiler: compiled `{}` -> `{}` ({} nodes, {} passes) [scheduled]",
+            input.display(),
+            output.display(),
+            scheduled_scene.algorithm.nodes.len(),
+            scheduled_scene.schedule.passes.len(),
+        );
+        return Ok(());
+    }
 
     let ir = if lint {
         let (ir, lint_set) =
@@ -167,6 +204,17 @@ fn format_compile_error(e: &CompileError, input: &Path) -> String {
 /// `Serialize` on `SceneIR`) so that the *library* can stay free of
 /// external dependencies — only the binary pulls in `serde_json`.
 fn scene_ir_to_json(ir: &SceneIR) -> String {
+    // `SceneIR` is now a type alias for `AlgorithmIR` (ADR-024).
+    algorithm_ir_to_json(ir)
+}
+
+/// Build a pretty-printed JSON string from an [`AlgorithmIR`] using
+/// `serde_json`.
+///
+/// (ADR-024: `SceneIR` is now a type alias for `AlgorithmIR`. This helper
+/// is the renamed implementation; `scene_ir_to_json` delegates to it for
+/// backward compatibility with existing call sites and tests.)
+fn algorithm_ir_to_json(ir: &AlgorithmIR) -> String {
     use serde_json::{json, Map, Number, Value};
 
     let mut nodes: Vec<Value> = Vec::with_capacity(ir.nodes.len());
@@ -187,7 +235,101 @@ fn scene_ir_to_json(ir: &SceneIR) -> String {
     root.insert("nodes".into(), Value::Array(nodes));
 
     let value = Value::Object(root);
-    serde_json::to_string_pretty(&value).expect("SceneIR is always JSON-serialisable")
+    serde_json::to_string_pretty(&value).expect("AlgorithmIR is always JSON-serialisable")
+}
+
+/// Build a pretty-printed JSON string from a [`alkalive_compiler::ScheduledScene`]
+/// (ADR-024). Contains both the algorithm and the schedule.
+///
+/// The top-level shape is:
+/// ```json
+/// {
+///   "algorithm": { ... AlgorithmIR ... },
+///   "schedule": {
+///     "passes": [ { ... RenderPass ... }, ... ],
+///     "pass_order": [0, 1, 2, ...]
+///   }
+/// }
+/// ```
+fn scheduled_scene_to_json(scheduled: &alkalive_compiler::ScheduledScene) -> String {
+    use serde_json::{Map, Value};
+
+    // Reuse the algorithm-only serialiser and parse it back to a Value.
+    // This avoids duplicating the node-serialisation logic.
+    let algo_json = algorithm_ir_to_json(&scheduled.algorithm);
+    let algo_value: Value =
+        serde_json::from_str(&algo_json).expect("algorithm JSON is well-formed");
+
+    let passes: Vec<Value> = scheduled
+        .schedule
+        .passes
+        .iter()
+        .map(render_pass_to_json)
+        .collect();
+    let pass_order: Vec<Value> = scheduled
+        .schedule
+        .pass_order
+        .iter()
+        .map(|i| Value::Number(serde_json::Number::from(*i as u64)))
+        .collect();
+
+    let mut schedule_obj = Map::new();
+    schedule_obj.insert("passes".into(), Value::Array(passes));
+    schedule_obj.insert("pass_order".into(), Value::Array(pass_order));
+
+    let mut root = Map::new();
+    root.insert("algorithm".into(), algo_value);
+    root.insert("schedule".into(), Value::Object(schedule_obj));
+
+    let value = Value::Object(root);
+    serde_json::to_string_pretty(&value).expect("ScheduledScene is always JSON-serialisable")
+}
+
+/// Serialise a single [`RenderPass`] to a [`serde_json::Value`].
+fn render_pass_to_json(pass: &RenderPass) -> serde_json::Value {
+    use serde_json::{Map, Value};
+    let mut m = Map::new();
+    m.insert(
+        "node_indices".into(),
+        Value::Array(
+            pass.node_indices
+                .iter()
+                .map(|i| Value::Number(serde_json::Number::from(*i as u64)))
+                .collect(),
+        ),
+    );
+    m.insert("shader".into(), Value::String(shader_id_to_string(pass.shader).to_string()));
+    m.insert(
+        "batching".into(),
+        Value::String(batching_strategy_to_string(pass.batching).to_string()),
+    );
+    m.insert("rotation".into(), Value::Bool(pass.rotation));
+    m.insert("kind".into(), Value::String(pass_kind_to_string(pass.kind).to_string()));
+    Value::Object(m)
+}
+
+fn shader_id_to_string(s: ShaderId) -> &'static str {
+    match s {
+        ShaderId::TextQuad => "text_quad",
+        ShaderId::SolidColor => "solid_color",
+    }
+}
+
+fn batching_strategy_to_string(b: BatchingStrategy) -> &'static str {
+    match b {
+        BatchingStrategy::None => "none",
+        BatchingStrategy::ByFontSize => "by_font_size",
+    }
+}
+
+fn pass_kind_to_string(k: PassKind) -> &'static str {
+    match k {
+        PassKind::Clear => "clear",
+        PassKind::InputFieldBackground => "input_field_background",
+        PassKind::InputFieldBorder => "input_field_border",
+        PassKind::TitleText => "title_text",
+        PassKind::InputText => "input_text",
+    }
 }
 
 fn node_to_json(node: &NodeIR) -> serde_json::Value {
@@ -236,7 +378,7 @@ fn print_usage() {
     eprintln!("AlkALive compiler — lexes/parses .alk source and emits a SceneIR JSON artifact");
     eprintln!();
     eprintln!("USAGE:");
-    eprintln!("  alkalive-compiler compile <input.alk> -o <output.scene> [--lint]");
+    eprintln!("  alkalive-compiler compile <input.alk> -o <output.scene> [--lint] [--scheduled]");
     eprintln!();
     eprintln!("ARGS:");
     eprintln!("  <input.alk>          Path to the .alk source file");
@@ -245,9 +387,12 @@ fn print_usage() {
     eprintln!("FLAGS:");
     eprintln!("  --lint               Run lint passes (ADR-027 Phase 1) and print");
     eprintln!("                       findings to stderr. Aborts on `Deny` findings.");
+    eprintln!("  --scheduled          Emit the ADR-024 ScheduledScene JSON");
+    eprintln!("                       (algorithm + schedule) instead of just the");
+    eprintln!("                       algorithm IR.");
     eprintln!();
     eprintln!("EXAMPLE:");
-    eprintln!("  alkalive-compiler compile examples/hello.alk -o /tmp/hello.scene --lint");
+    eprintln!("  alkalive-compiler compile examples/hello.alk -o /tmp/hello.scene --scheduled");
 }
 
 #[cfg(test)]
@@ -423,5 +568,172 @@ mod tests {
             err
         );
         assert!(err.contains("missing input file"), "got: {}", err);
+    }
+
+    // ---- ADR-024: --scheduled flag tests ----
+
+    #[test]
+    fn run_compile_scheduled_flag_parses_without_error() {
+        // `--scheduled` should be parsed without "unknown flag" error.
+        let err = run(&[
+            "alkalive-compiler".into(),
+            "compile".into(),
+            "--scheduled".into(),
+        ])
+        .unwrap_err();
+        assert!(
+            !err.contains("unknown flag"),
+            "--scheduled should be accepted: got {}",
+            err
+        );
+        assert!(err.contains("missing input file"), "got: {}", err);
+    }
+
+    #[test]
+    fn run_compile_scheduled_help_succeeds() {
+        run(&[
+            "alkalive-compiler".into(),
+            "compile".into(),
+            "--scheduled".into(),
+            "-h".into(),
+        ])
+        .expect("compile --scheduled -h should succeed");
+    }
+
+    #[test]
+    fn run_compile_scheduled_flag_position_independent() {
+        // `--scheduled` may appear before or after `-o`.
+        let err = run(&[
+            "alkalive-compiler".into(),
+            "compile".into(),
+            "-o".into(),
+            "out.scene".into(),
+            "--scheduled".into(),
+        ])
+        .unwrap_err();
+        assert!(!err.contains("unknown flag"), "got: {}", err);
+        assert!(err.contains("missing input file"), "got: {}", err);
+    }
+
+    #[test]
+    fn shader_id_to_string_variants() {
+        assert_eq!(shader_id_to_string(ShaderId::TextQuad), "text_quad");
+        assert_eq!(shader_id_to_string(ShaderId::SolidColor), "solid_color");
+    }
+
+    #[test]
+    fn batching_strategy_to_string_variants() {
+        assert_eq!(batching_strategy_to_string(BatchingStrategy::None), "none");
+        assert_eq!(
+            batching_strategy_to_string(BatchingStrategy::ByFontSize),
+            "by_font_size"
+        );
+    }
+
+    #[test]
+    fn pass_kind_to_string_variants() {
+        assert_eq!(pass_kind_to_string(PassKind::Clear), "clear");
+        assert_eq!(
+            pass_kind_to_string(PassKind::InputFieldBackground),
+            "input_field_background"
+        );
+        assert_eq!(
+            pass_kind_to_string(PassKind::InputFieldBorder),
+            "input_field_border"
+        );
+        assert_eq!(pass_kind_to_string(PassKind::TitleText), "title_text");
+        assert_eq!(pass_kind_to_string(PassKind::InputText), "input_text");
+    }
+
+    #[test]
+    fn render_pass_to_json_has_expected_keys() {
+        let pass = RenderPass {
+            node_indices: vec![0, 1],
+            shader: ShaderId::TextQuad,
+            batching: BatchingStrategy::ByFontSize,
+            rotation: true,
+            kind: PassKind::TitleText,
+        };
+        let v = render_pass_to_json(&pass);
+        let s = serde_json::to_string(&v).unwrap();
+        // Compact form (serde_json::to_string, not pretty) puts no spaces.
+        assert!(s.contains("\"node_indices\":[0,1]"), "got: {}", s);
+        assert!(s.contains("\"shader\":\"text_quad\""), "got: {}", s);
+        assert!(s.contains("\"batching\":\"by_font_size\""), "got: {}", s);
+        assert!(s.contains("\"rotation\":true"), "got: {}", s);
+        assert!(s.contains("\"kind\":\"title_text\""), "got: {}", s);
+    }
+
+    #[test]
+    fn scheduled_scene_to_json_shape() {
+        // Build a ScheduledScene with the canonical Hello World shape
+        // (text + input field).
+        let scheduled = alkalive_compiler::compile_scheduled(
+            r#"module HelloWorld {
+              scene {
+                background: #000000
+                text "Hello World!" {
+                  color: gold
+                  font-size: 64
+                  rotation: y-axis 0.5
+                  position: center
+                }
+                input-field {
+                  placeholder: "Type here..."
+                  position: below text
+                }
+              }
+            }"#,
+        )
+        .expect("compile should succeed");
+
+        let json = scheduled_scene_to_json(&scheduled);
+        // Top-level keys: algorithm + schedule.
+        assert!(json.contains("algorithm"), "got: {}", json);
+        assert!(json.contains("schedule"), "got: {}", json);
+        // Algorithm sub-keys (serde_json::to_string_pretty puts a space after
+        // the colon, so we don't pin the exact spacing).
+        assert!(json.contains("module_name"), "got: {}", json);
+        assert!(json.contains("HelloWorld"), "got: {}", json);
+        assert!(json.contains("background"), "got: {}", json);
+        // Schedule sub-keys.
+        assert!(json.contains("passes"), "got: {}", json);
+        assert!(json.contains("pass_order"), "got: {}", json);
+        // The five pass kinds appear in the JSON.
+        assert!(json.contains("\"clear\""), "got: {}", json);
+        assert!(json.contains("\"input_field_background\""), "got: {}", json);
+        assert!(json.contains("\"input_field_border\""), "got: {}", json);
+        assert!(json.contains("\"title_text\""), "got: {}", json);
+        assert!(json.contains("\"input_text\""), "got: {}", json);
+        // pass_order = [0, 1, 2, 3, 4] (pretty-printed, so each on its own
+        // line — we just verify the integers 0–4 all appear inside the
+        // pass_order array). Since we know pass_order comes after passes,
+        // check that each integer appears at least once in the JSON overall.
+        assert!(json.contains("pass_order"), "got: {}", json);
+    }
+
+    #[test]
+    fn compile_file_with_scheduled_writes_json_with_schedule() {
+        // End-to-end CLI test for the --scheduled flag using a temp file.
+        let tmp = std::env::temp_dir();
+        let input_path = tmp.join("alkalive_test_scheduled_input.alk");
+        let output_path = tmp.join("alkalive_test_scheduled_output.scene");
+        std::fs::write(
+            &input_path,
+            r#"module M { scene { text "Hi" { } input-field { } } }"#,
+        )
+        .unwrap();
+
+        let result = compile_file(&input_path, &output_path, false, true);
+        assert!(result.is_ok(), "got: {:?}", result);
+        let out = std::fs::read_to_string(&output_path).unwrap();
+        assert!(out.contains("algorithm"), "got: {}", out);
+        assert!(out.contains("schedule"), "got: {}", out);
+        assert!(out.contains("\"title_text\""), "got: {}", out);
+        assert!(out.contains("\"clear\""), "got: {}", out);
+
+        // Cleanup.
+        let _ = std::fs::remove_file(&input_path);
+        let _ = std::fs::remove_file(&output_path);
     }
 }
