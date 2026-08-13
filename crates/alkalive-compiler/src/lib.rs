@@ -65,12 +65,21 @@
 //! [`AlgorithmIR`](ir::AlgorithmIR). Use [`compile_scheduled`] to obtain a
 //! [`schedule::ScheduledScene`] containing both the algorithm and the
 //! default schedule.
+//!
+//! # ADR-025 — Incremental Computation
+//!
+//! Use [`compile_with_deps`] to additionally obtain a
+//! [`incremental::DependencyGraph`] for the scheduled scene. The runtime
+//! uses this graph to propagate dirtiness from changed signals to the
+//! passes that depend on them, reducing per-frame work from O(n) to
+//! O(Δ) (per ADR-025).
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
 pub mod ast;
 pub mod codegen;
+pub mod incremental;
 pub mod ir;
 pub mod lints;
 pub mod lexer;
@@ -82,7 +91,8 @@ pub use ast::{
     Attribute, Color, InputFieldNode, ModuleDecl, NodeDecl, PositionDecl, RotationDecl,
     SceneDecl, TextNode,
 };
-pub use codegen::{lower, compile, compile_with_lints, compile_scheduled, CodegenError, CompileError, DEFAULT_FONT_SIZE};
+pub use codegen::{lower, compile, compile_with_deps, compile_with_lints, compile_scheduled, CodegenError, CompileError, DEFAULT_FONT_SIZE};
+pub use incremental::{incremental_analysis, DepNode, DepNodeId, DependencyGraph, SignalId};
 pub use ir::{mint_module_id, AlgorithmIR, ColorIR, NodeIR, PositionIR, SceneIR};
 pub use lexer::{tokenize, LexError, Lexer, Token, TokenKind};
 pub use lints::{run_lints, LintReport, LintSet, LintSeverity};

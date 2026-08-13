@@ -34,6 +34,24 @@
 //! The GPU backend reads the schedule at frame time to determine pass
 //! order, replacing previously hardcoded rendering logic.
 //!
+//! # ADR-025 — Incremental Computation
+//!
+//! The runtime additionally stores a [`DependencyGraph`] (built at startup
+//! by [`alkalive_compiler::incremental_analysis`]) and a
+//! [`SignalStore`](signal_store::SignalStore) (updated per frame by the
+//! input listeners, the resize listener, and the frame loop itself). On
+//! each frame, the runtime compares signal versions to determine which
+//! signals changed, then propagates dirtiness through the graph: only the
+//! passes whose inputs include a changed signal are passed to
+//! [`WgpuRenderer::render_frame_with_dirty`] for re-evaluation.
+//!
+//! For small scenes (algorithm node count below
+//! [`SMALL_SCENE_THRESHOLD`]), the runtime bypasses the dependency graph
+//! entirely and uses the legacy full-rebuild path — the per-frame
+//! bookkeeping cost may exceed the savings for small scenes (R1
+//! mitigation per ADR-025). The canonical Hello World scene has 2
+//! algorithm nodes, well below the threshold of 50.
+//!
 //! # Cross-target compilation
 //!
 //! The crate compiles on both native and `wasm32` targets. On native, the
@@ -47,6 +65,8 @@ use std::cell::RefCell;
 
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::spawn_local;
+
+pub mod signal_store;
 
 // ---------------------------------------------------------------------------
 // Embedded scene source — the WASM binary owns the scene data.
@@ -64,9 +84,18 @@ const HELLO_ALK_SRC: &str = include_str!("../../../examples/hello.alk");
 // Runtime state — thread-local (WASM is single-threaded).
 // ---------------------------------------------------------------------------
 
+/// Below this algorithm-node count, the runtime bypasses the dependency
+/// graph and uses the legacy full-rebuild path (R1 mitigation per ADR-025:
+/// the per-frame bookkeeping cost may exceed the savings for small scenes).
+///
+/// The canonical Hello World scene has 2 algorithm nodes (text +
+/// input-field), well below this threshold — so the incremental path is
+/// dormant for Hello World and kicks in only for larger scenes.
+pub const SMALL_SCENE_THRESHOLD: usize = 50;
+
 /// The global runtime state. Holds the GPU renderer, the per-frame scene
-/// data, the rendering schedule (ADR-024), animation time, and the user's
-/// input text buffer.
+/// data, the rendering schedule (ADR-024), the dependency graph + signal
+/// store (ADR-025), animation time, and the user's input text buffer.
 struct Runtime {
     /// The WebGL2 GPU renderer. Owns the canvas's WebGL2 context, shader
     /// program, glyph atlas texture, and vertex buffers.
@@ -77,6 +106,24 @@ struct Runtime {
     /// The rendering schedule (ADR-024) — pass order, shader selection,
     /// batching strategy. Drives data-driven dispatch in `render_frame`.
     schedule: alkalive_compiler::ScheduleIR,
+    /// The dependency graph (ADR-025) — one node per schedule pass,
+    /// annotated with the signal IDs each pass reads. Built at startup
+    /// by [`alkalive_compiler::incremental_analysis`]. Used by
+    /// [`SignalStore::propagate`](signal_store::SignalStore::propagate)
+    /// to map changed signals to dirty passes.
+    dep_graph: alkalive_compiler::DependencyGraph,
+    /// The signal store (ADR-025) — key-value map of signal values with
+    /// `u64` version counters. Updated by the input listeners, the
+    /// resize listener, and the frame loop itself (which sets `TIME`
+    /// every tick). On each frame, [`check_changes`](signal_store::SignalStore::check_changes)
+    /// returns the changed signals; `propagate` maps them to dirty
+    /// passes via `dep_graph`.
+    signals: signal_store::SignalStore,
+    /// Whether the scene is small enough to bypass the dependency graph
+    /// (R1 mitigation per ADR-025). True when
+    /// `algorithm.nodes.len() < SMALL_SCENE_THRESHOLD` at startup. The
+    /// Hello World scene (2 nodes) is always small.
+    is_small_scene: bool,
     /// Elapsed time in seconds (drives the rotation animation).
     time: f32,
     /// The user's input text buffer (forwarded from the IME input element).
@@ -137,8 +184,10 @@ pub fn start(canvas: web_sys::HtmlCanvasElement, ime_input: web_sys::HtmlInputEl
     }));
 
     // 2. Compile the embedded `.alk` source to a ScheduledScene (ADR-024:
-    //    produces both the AlgorithmIR and the default ScheduleIR).
-    let scheduled = alkalive_compiler::compile_scheduled(HELLO_ALK_SRC).map_err(|e| {
+    //    produces both the AlgorithmIR and the default ScheduleIR) PLUS a
+    //    DependencyGraph (ADR-025: one node per schedule pass, annotated
+    //    with the signal IDs each pass reads).
+    let (scheduled, dep_graph) = alkalive_compiler::compile_with_deps(HELLO_ALK_SRC).map_err(|e| {
         JsValue::from_str(&format!("AlkALive compile error: {:?}", e))
     })?;
 
@@ -147,17 +196,27 @@ pub fn start(canvas: web_sys::HtmlCanvasElement, ime_input: web_sys::HtmlInputEl
     let scene = build_scene_from_scheduled(&scheduled);
     let schedule = scheduled.schedule.clone();
 
-    // 4. Read the canvas's display dimensions. The HTML shell sizes the
+    // 4. Determine whether this is a "small scene" (R1 mitigation per
+    //    ADR-025). The Hello World scene has 2 algorithm nodes — well
+    //    below SMALL_SCENE_THRESHOLD (50) — so the runtime uses the
+    //    legacy full-rebuild path and the dependency graph is dormant.
+    let is_small_scene = scheduled.algorithm.nodes.len() < SMALL_SCENE_THRESHOLD;
+
+    // 5. Read the canvas's display dimensions. The HTML shell sizes the
     //    canvas via CSS (`width: 100vw; height: 100vh;`), so client_width
     //    / client_height give us the desired drawing-buffer size.
     let width = canvas.client_width().max(1) as u32;
     let height = canvas.client_height().max(1) as u32;
 
-    // 5. Kick off async GPU backend init. The WgpuRenderer::init_from_canvas
+    // 6. Kick off async GPU backend init. The WgpuRenderer::init_from_canvas
     //    future resolves once the WebGL2 context is acquired, shaders are
     //    compiled, and the glyph atlas texture is created.
     spawn_local(async move {
-        if let Err(e) = init_runtime(canvas, ime_input, width, height, scene, schedule).await {
+        if let Err(e) = init_runtime(
+            canvas, ime_input, width, height, scene, schedule, dep_graph, is_small_scene,
+        )
+        .await
+        {
             web_sys::console::error_1(&e);
         }
     });
@@ -176,38 +235,74 @@ async fn init_runtime(
     height: u32,
     scene: alkalive_backend_wgpu::TextSceneData,
     schedule: alkalive_compiler::ScheduleIR,
+    dep_graph: alkalive_compiler::DependencyGraph,
+    is_small_scene: bool,
 ) -> Result<(), JsValue> {
     // 1. Initialize the WebGL2 renderer (async — acquires the GPU context).
     let renderer = alkalive_backend_wgpu::WgpuRenderer::init_from_canvas(canvas.clone(), width, height)
         .await
         .map_err(|e| JsValue::from_str(&format!("AlkALive renderer init failed: {}", e)))?;
 
-    // 2. Store the runtime state in thread-local storage.
+    // 2. Build the SignalStore with the well-known signals' initial values.
+    //    These mirror the values baked into `scene` at startup — the
+    //    versions all start at 1 (set once), so the first `check_changes`
+    //    call will report all six signals as changed (which is correct:
+    //    every pass is dirty on the first frame).
+    let mut signals = signal_store::SignalStore::new();
+    signals.set(
+        alkalive_compiler::SignalId(0), // INPUT_TEXT
+        signal_store::SignalValue::Text(scene.input_text.clone()),
+    );
+    signals.set(
+        alkalive_compiler::SignalId(1), // TIME
+        signal_store::SignalValue::Float(0.0),
+    );
+    signals.set(
+        alkalive_compiler::SignalId(2), // FONT_SIZE
+        signal_store::SignalValue::Float(scene.font_size),
+    );
+    signals.set(
+        alkalive_compiler::SignalId(3), // ROTATION_SPEED
+        signal_store::SignalValue::Float(scene.rotation_speed),
+    );
+    signals.set(
+        alkalive_compiler::SignalId(4), // CANVAS_WIDTH
+        signal_store::SignalValue::Uint(width),
+    );
+    signals.set(
+        alkalive_compiler::SignalId(5), // CANVAS_HEIGHT
+        signal_store::SignalValue::Uint(height),
+    );
+
+    // 3. Store the runtime state in thread-local storage.
     let original_text = scene.text.clone();
     RUNTIME.with(|rt| {
         *rt.borrow_mut() = Some(Runtime {
             renderer,
             scene,
             schedule,
+            dep_graph,
+            signals,
+            is_small_scene,
             time: 0.0,
             input_text: String::new(),
             original_text,
         });
     });
 
-    // 3. Set up keyboard input forwarding from the hidden IME input.
+    // 4. Set up keyboard input forwarding from the hidden IME input.
     setup_input_forwarding(&ime_input)?;
 
-    // 4. Set up click handler — clicking the input field focuses the IME input.
+    // 5. Set up click handler — clicking the input field focuses the IME input.
     setup_click_handler(&canvas, &ime_input)?;
 
-    // 5. Set up the window resize listener.
+    // 6. Set up the window resize listener.
     setup_resize_listener()?;
 
-    // 6. Focus the IME input so it receives keyboard events.
+    // 7. Focus the IME input so it receives keyboard events.
     let _ = ime_input.focus();
 
-    // 7. Start the requestAnimationFrame loop, owned by WASM.
+    // 8. Start the requestAnimationFrame loop, owned by WASM.
     start_frame_loop();
 
     web_sys::console::log_1(&"AlkALive runtime ready — rendering Hello World.".into());
@@ -295,6 +390,12 @@ fn setup_input_forwarding(ime_input: &web_sys::HtmlInputElement) -> Result<(), J
     // Forwards printable chars, Backspace, and Enter to the runtime's text
     // buffer. Arrow keys, modifiers, and other non-printable keys are
     // ignored (no prevent_default).
+    //
+    // ADR-025: in addition to updating `runtime.scene.input_text` (the
+    // renderer's per-frame state), the listener also writes the
+    // `INPUT_TEXT` signal to `runtime.signals` so the next frame's
+    // `check_changes` detects the change and marks the dependent passes
+    // (TitleText, InputText) dirty.
     let on_keydown = Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(move |e: web_sys::KeyboardEvent| {
         let key = e.key();
         let mut handled = false;
@@ -323,6 +424,12 @@ fn setup_input_forwarding(ime_input: &web_sys::HtmlInputElement) -> Result<(), J
                 if handled {
                     // Update the input field text on the scene (not the title).
                     runtime.scene.input_text = runtime.input_text.clone();
+                    // ADR-025: bump the INPUT_TEXT signal so the dependency
+                    // graph marks the TitleText and InputText passes dirty.
+                    runtime.signals.set(
+                        alkalive_compiler::SignalId(0), // INPUT_TEXT
+                        signal_store::SignalValue::Text(runtime.input_text.clone()),
+                    );
                 }
             }
         });
@@ -340,12 +447,18 @@ fn setup_input_forwarding(ime_input: &web_sys::HtmlInputElement) -> Result<(), J
     // During IME composition (e.g. CJK input), the browser fires `input`
     // events with `data` containing the composed text. Forward it to the
     // runtime's buffer.
+    //
+    // ADR-025: same as keydown — bump the INPUT_TEXT signal.
     let on_input = Closure::<dyn FnMut(web_sys::InputEvent)>::new(move |e: web_sys::InputEvent| {
         if let Some(text) = e.data() {
             RUNTIME.with(|rt| {
                 if let Some(runtime) = rt.borrow_mut().as_mut() {
                     runtime.input_text.push_str(&text);
                     runtime.scene.input_text = runtime.input_text.clone();
+                    runtime.signals.set(
+                        alkalive_compiler::SignalId(0), // INPUT_TEXT
+                        signal_store::SignalValue::Text(runtime.input_text.clone()),
+                    );
                 }
             });
         }
@@ -379,6 +492,17 @@ fn setup_resize_listener() -> Result<(), JsValue> {
                         .and_then(|v| v.as_f64())
                         .unwrap_or(600.0) as u32;
                     runtime.renderer.resize(w.max(1), h.max(1));
+                    // ADR-025: bump the CANVAS_WIDTH / CANVAS_HEIGHT signals
+                    // so the dependency graph marks *all* passes dirty (every
+                    // pass reads the canvas dimensions for layout).
+                    runtime.signals.set(
+                        alkalive_compiler::SignalId(4), // CANVAS_WIDTH
+                        signal_store::SignalValue::Uint(w.max(1)),
+                    );
+                    runtime.signals.set(
+                        alkalive_compiler::SignalId(5), // CANVAS_HEIGHT
+                        signal_store::SignalValue::Uint(h.max(1)),
+                    );
                 }
             }
         });
@@ -440,16 +564,75 @@ fn start_frame_loop() {
         // Advance time + render one frame.
         RUNTIME.with(|rt| {
             if let Some(runtime) = rt.borrow_mut().as_mut() {
+                // ADR-025: bump the TIME signal every frame (drives the
+                // rotation animation in the TitleText pass). Even for
+                // small scenes (which bypass the dependency graph), this
+                // is harmless — the SignalStore is updated but the dirty
+                // list is never consulted.
+                runtime.signals.set(
+                    alkalive_compiler::SignalId(1), // TIME
+                    signal_store::SignalValue::Float(runtime.time),
+                );
+
                 // Advance time by a nominal 1/60s per frame. (We don't use
                 // the renderer's performance timer here, to keep the runtime
                 // crate compatible with the native stub of WgpuRenderer
                 // which doesn't expose `elapsed_seconds`.)
                 runtime.time += 1.0 / 60.0;
-                // ADR-024: pass the schedule to the renderer so it can do
-                // data-driven dispatch over the schedule's passes.
-                runtime
-                    .renderer
-                    .render_frame(&runtime.scene, &runtime.schedule, runtime.time);
+
+                // ADR-025: small-scene fallback (R1 mitigation). For small
+                // scenes (algorithm node count below SMALL_SCENE_THRESHOLD),
+                // bypass the dependency graph entirely and use the legacy
+                // full-rebuild path — the per-frame bookkeeping cost may
+                // exceed the savings for small scenes. The Hello World
+                // scene (2 nodes) is always small.
+                if runtime.is_small_scene {
+                    // Legacy path: render every frame unconditionally.
+                    // ADR-024: pass the schedule to the renderer so it can
+                    // do data-driven dispatch over the schedule's passes.
+                    runtime.renderer.render_frame(
+                        &runtime.scene,
+                        &runtime.schedule,
+                        runtime.time,
+                    );
+                } else {
+                    // ADR-025 incremental path: check which signals changed
+                    // since the last frame, propagate dirtiness through the
+                    // dependency graph, and pass the dirty pass indices to
+                    // the renderer so it can skip unchanged passes.
+                    let changed = runtime.signals.check_changes();
+                    if changed.is_empty() {
+                        // Nothing changed — skip rendering entirely. The
+                        // browser's swap chain preserves the previous frame
+                        // (the WebGL2 default framebuffer's contents are
+                        // undefined after a swap on some browsers, but for
+                        // an idle scene we accept the slight visual stall
+                        // in exchange for zero GPU work).
+                        //
+                        // Note: in practice this branch is rare because
+                        // TIME is bumped every frame (above), so the
+                        // `changed` list always includes TIME.
+                    } else {
+                        let dirty_nodes =
+                            runtime.signals.propagate(&changed, &runtime.dep_graph);
+                        let dirty_passes =
+                            runtime.signals.dirty_passes(&dirty_nodes, &runtime.dep_graph);
+                        // Pass dirty_passes to the renderer so it can skip
+                        // unchanged passes. The renderer's
+                        // `render_frame_with_dirty` is a hint-aware variant
+                        // of `render_frame` — for correctness with WebGL2's
+                        // single-buffered clear, it currently still runs
+                        // all passes when any are dirty (to avoid ghosts),
+                        // but the dirty info is plumbed through for future
+                        // optimization (e.g. per-pass render targets).
+                        runtime.renderer.render_frame_with_dirty(
+                            &runtime.scene,
+                            &runtime.schedule,
+                            runtime.time,
+                            &dirty_passes,
+                        );
+                    }
+                }
             }
         });
 

@@ -25,6 +25,7 @@ use crate::ast::{
     Color, ModuleDecl, NodeDecl, PositionDecl, RotationDecl, SceneDecl, TextNode,
     InputFieldNode,
 };
+use crate::incremental::{incremental_analysis, DependencyGraph};
 use crate::ir::{mint_module_id, AlgorithmIR, ColorIR, NodeIR, PositionIR};
 use crate::schedule::{schedule_lowering, ScheduledScene};
 
@@ -304,6 +305,59 @@ pub fn compile_scheduled(src: &str) -> Result<ScheduledScene, CompileError> {
     let algorithm = compile(src)?;
     let schedule = schedule_lowering(&algorithm);
     Ok(ScheduledScene { algorithm, schedule })
+}
+
+/// Convenience: tokenize + parse + lower + schedule-lower + incremental
+/// analysis in one call.
+///
+/// This is the ADR-025 entry point. It runs the full pipeline:
+/// `.alk source → AlgorithmIR → ScheduledScene → DependencyGraph`. The
+/// returned tuple contains both the [`ScheduledScene`] (algorithm + default
+/// schedule, per ADR-024) and the [`DependencyGraph`] (per ADR-025) that
+/// the runtime uses to propagate dirtiness from changed signals to the
+/// passes that depend on them.
+///
+/// The dependency graph is computed *from* the scheduled scene via
+/// [`incremental_analysis`], so it is consistent with the schedule's pass
+/// list. The graph is infallible once `compile_scheduled` has succeeded
+/// (the analysis is a pure data-shuffle with no failure modes).
+///
+/// # Errors
+///
+/// Returns [`CompileError`] only if lexing, parsing, or codegen fails.
+/// Both [`schedule_lowering`] and [`incremental_analysis`] are infallible.
+///
+/// # Example
+///
+/// ```
+/// use alkalive_compiler::compile_with_deps;
+///
+/// let src = r#"
+/// module HelloWorld {
+///   scene {
+///     background: #000000
+///     text "Hello World!" {
+///       color: gold
+///       font-size: 64
+///       rotation: y-axis 0.5
+///       position: center
+///     }
+///     input-field {
+///       placeholder: "Type here..."
+///       position: below text
+///     }
+///   }
+/// }
+/// "#;
+/// let (scheduled, dep_graph) = compile_with_deps(src).expect("hello world should compile");
+/// assert_eq!(scheduled.algorithm.module_name, "HelloWorld");
+/// // 5 passes -> 5 dependency-graph nodes.
+/// assert_eq!(dep_graph.nodes.len(), scheduled.schedule.passes.len());
+/// ```
+pub fn compile_with_deps(src: &str) -> Result<(ScheduledScene, DependencyGraph), CompileError> {
+    let scheduled = compile_scheduled(src)?;
+    let dep_graph = incremental_analysis(&scheduled);
+    Ok((scheduled, dep_graph))
 }
 
 /// Top-level error for the full `compile` pipeline (lex+parse+lower).
@@ -654,5 +708,80 @@ module HelloWorld {
         let just_algo = compile(src).unwrap();
         let scheduled = compile_scheduled(src).unwrap();
         assert_eq!(scheduled.algorithm, just_algo);
+    }
+
+    // ---- ADR-025: compile_with_deps() tests ----
+
+    #[test]
+    fn compile_with_deps_full_pipeline_ok() {
+        let (scheduled, dep_graph) = compile_with_deps(
+            r#"module M { scene { text "Hi" { } input-field { } } }"#,
+        )
+        .expect("compile_with_deps should succeed");
+        // The scheduled scene matches what compile_scheduled returns.
+        assert_eq!(scheduled.algorithm.module_name, "M");
+        assert!(scheduled.algorithm.has_text());
+        assert!(scheduled.algorithm.has_input_field());
+        // 5 passes -> 5 dep-graph nodes.
+        assert_eq!(dep_graph.nodes.len(), scheduled.schedule.passes.len());
+        assert_eq!(dep_graph.nodes.len(), 5);
+    }
+
+    #[test]
+    fn compile_with_deps_text_only_has_two_nodes() {
+        let (scheduled, dep_graph) =
+            compile_with_deps(r#"module M { scene { text "Hi" { } } }"#).unwrap();
+        // Clear + TitleText = 2 passes -> 2 nodes.
+        assert_eq!(scheduled.schedule.passes.len(), 2);
+        assert_eq!(dep_graph.nodes.len(), 2);
+    }
+
+    #[test]
+    fn compile_with_deps_empty_scene_has_one_node() {
+        let (scheduled, dep_graph) = compile_with_deps("module M { scene { } }").unwrap();
+        assert_eq!(scheduled.schedule.passes.len(), 1);
+        assert_eq!(dep_graph.nodes.len(), 1);
+        assert_eq!(dep_graph.nodes[0].description, "Clear");
+    }
+
+    #[test]
+    fn compile_with_deps_propagates_parse_errors() {
+        let err = compile_with_deps("module { }").unwrap_err();
+        assert!(matches!(err, CompileError::Parse(_)));
+    }
+
+    #[test]
+    fn compile_with_deps_propagates_codegen_errors() {
+        let err = compile_with_deps("module M { }").unwrap_err();
+        assert!(matches!(err, CompileError::Codegen(_)));
+    }
+
+    #[test]
+    fn compile_with_deps_graph_matches_incremental_analysis() {
+        // The dep graph produced by compile_with_deps must equal what
+        // incremental_analysis produces from the scheduled scene.
+        let src = r#"module Same { scene { text "Hi" { } input-field { } } }"#;
+        let (scheduled, dep_graph) = compile_with_deps(src).unwrap();
+        let manual_graph = crate::incremental::incremental_analysis(&scheduled);
+        assert_eq!(dep_graph.nodes.len(), manual_graph.nodes.len());
+        for (a, b) in dep_graph.nodes.iter().zip(manual_graph.nodes.iter()) {
+            assert_eq!(a.id, b.id);
+            assert_eq!(a.inputs, b.inputs);
+            assert_eq!(a.outputs, b.outputs);
+            assert_eq!(a.pass_index, b.pass_index);
+            assert_eq!(a.description, b.description);
+        }
+    }
+
+    #[test]
+    fn compile_with_deps_passes_match_compile_scheduled() {
+        // The scheduled scene produced by compile_with_deps must equal what
+        // compile_scheduled returns (the incremental analysis must not
+        // mutate the scheduled scene).
+        let src = r#"module Same { scene { text "Hi" { } input-field { } } }"#;
+        let (scheduled_with_deps, _graph) = compile_with_deps(src).unwrap();
+        let scheduled = compile_scheduled(src).unwrap();
+        assert_eq!(scheduled_with_deps.algorithm, scheduled.algorithm);
+        assert_eq!(scheduled_with_deps.schedule.passes.len(), scheduled.schedule.passes.len());
     }
 }

@@ -685,6 +685,82 @@ mod wasm {
             schedule: &alkalive_compiler::ScheduleIR,
             time: f32,
         ) {
+            self.render_frame_internal(text_scene, schedule, time, None);
+        }
+
+        /// Render one frame with ADR-025 dirty-pass info.
+        ///
+        /// This is the incremental-computation variant of [`render_frame`].
+        /// It accepts a list of *dirty pass indices* — passes whose signal
+        /// inputs changed since the last frame and therefore need to
+        /// re-execute. Passes not in the list are skipped.
+        ///
+        /// # Current behaviour
+        ///
+        /// For correctness with WebGL2's single-buffered clear, the
+        /// current implementation runs *all* passes when `dirty_passes` is
+        /// non-empty (skipping only the `Clear` pass would leave ghosts of
+        /// the previous frame's stale passes). When `dirty_passes` is
+        /// empty, the renderer is a no-op — the previous frame is
+        /// preserved.
+        ///
+        /// The `dirty_passes` parameter is therefore plumbed through but
+        /// currently used only for the empty/non-empty decision. A future
+        /// wave will use per-pass render targets to truly skip
+        /// non-dirty passes (per ADR-025 §"Consequences").
+        ///
+        /// # Arguments
+        ///
+        /// * `text_scene` — the per-frame scene description.
+        /// * `schedule` — the rendering schedule (ADR-024).
+        /// * `time` — the animation time (drives rotation).
+        /// * `dirty_passes` — the indices of passes whose inputs changed
+        ///   since the last frame (computed by the runtime's
+        ///   `SignalStore::propagate` + `dirty_passes`).
+        pub fn render_frame_with_dirty(
+            &mut self,
+            text_scene: &TextSceneData,
+            schedule: &alkalive_compiler::ScheduleIR,
+            time: f32,
+            dirty_passes: &[usize],
+        ) {
+            // If no passes are dirty, skip rendering entirely — the
+            // previous frame is preserved (per ADR-025, "only re-submit
+            // draw calls for passes whose inputs were dirty").
+            if dirty_passes.is_empty() {
+                return;
+            }
+            // At least one pass is dirty. For correctness, run the full
+            // render path (the dirty info is a hint that the renderer
+            // *could* use to skip unchanged passes, but the current
+            // single-buffered WebGL2 backend can't safely skip Clear
+            // without leaving ghosts of stale passes).
+            //
+            // The `Some(dirty_passes)` argument is forwarded to
+            // `render_frame_internal` so a future wave can implement
+            // per-pass skipping without changing this call site.
+            self.render_frame_internal(text_scene, schedule, time, Some(dirty_passes));
+        }
+
+        /// Internal frame-rendering routine shared by
+        /// [`render_frame`](Self::render_frame) and
+        /// [`render_frame_with_dirty`](Self::render_frame_with_dirty).
+        ///
+        /// `dirty_passes` is `None` for the legacy full-rebuild path and
+        /// `Some(&[usize])` for the incremental path. The current
+        /// implementation ignores the contents of `dirty_passes` (it only
+        /// uses the empty/non-empty check at the
+        /// [`render_frame_with_dirty`](Self::render_frame_with_dirty)
+        /// call site), but accepts it so the per-pass dispatch loop can
+        /// be made dirty-aware in a future wave without changing the
+        /// internal signature.
+        fn render_frame_internal(
+            &mut self,
+            text_scene: &TextSceneData,
+            schedule: &alkalive_compiler::ScheduleIR,
+            time: f32,
+            _dirty_passes: Option<&[usize]>,
+        ) {
             use alkalive_compiler::PassKind;
 
             // 1. Determine input display text.
@@ -695,6 +771,11 @@ mod wasm {
             };
 
             // 2. Re-upload atlas if needed (first frame or input changed).
+            //    ADR-025 note: this is the "primitive form of dirty
+            //    tracking" (one bit: `last_input_text != input_display`).
+            //    The dependency-graph path generalises this to per-signal
+            //    dirty tracking, but the renderer's per-frame GPU upload
+            //    still keys off this single comparison.
             if !self.atlas_uploaded || self.last_input_text != input_display {
                 if let Err(e) = self.upload_text_atlas(&text_scene.text, &input_display, text_scene.font_size) {
                     web_sys::console::error_1(&format!("atlas upload failed: {}", e).into());
@@ -1083,6 +1164,22 @@ mod native {
             // Intentionally empty: the GPU backend only runs on wasm32.
             // (ADR-024: signature now takes the schedule for type-compat
             // with the wasm32 build, but the native stub does nothing.)
+        }
+
+        /// No-op on native (ADR-025: dirty-pass-aware variant).
+        ///
+        /// This is the type-compatible stub for the wasm32
+        /// [`render_frame_with_dirty`](super::WgpuRenderer::render_frame_with_dirty)
+        /// method. It accepts the dirty pass indices but does nothing —
+        /// the native build never has a real renderer.
+        pub fn render_frame_with_dirty(
+            &mut self,
+            _text_scene: &TextSceneData,
+            _schedule: &alkalive_compiler::ScheduleIR,
+            _time: f32,
+            _dirty_passes: &[usize],
+        ) {
+            // Intentionally empty: the GPU backend only runs on wasm32.
         }
 
         /// No-op on native.
