@@ -1138,7 +1138,7 @@ mod wasm {
             //    avoids re-parsing the 170 KB TTF on every keystroke).
             if self.font_registry.is_none() {
                 let font_bytes: &[u8] =
-                    include_bytes!("../../alkalive-app/assets/Roboto-Regular.ttf");
+                    include_bytes!("../assets/Roboto-Regular.ttf");
                 let mut registry = HarfRustFontRegistry::new();
                 let loaded_id = registry
                     .load_bundle(font_bytes)
@@ -1703,7 +1703,7 @@ mod tests {
         };
         use std::sync::Arc;
 
-        let font_bytes: &[u8] = include_bytes!("../../alkalive-app/assets/Roboto-Regular.ttf");
+        let font_bytes: &[u8] = include_bytes!("../assets/Roboto-Regular.ttf");
         let mut registry = HarfRustFontRegistry::new();
         let loaded_id = registry.load_bundle(font_bytes).expect("font load");
         let req = FontRequest {
