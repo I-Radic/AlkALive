@@ -279,7 +279,10 @@ mod tests {
             position: PositionIR::BelowText,
         });
         let schedule = schedule_lowering(&algo);
-        ScheduledScene { algorithm: algo, schedule }
+        ScheduledScene {
+            algorithm: algo,
+            schedule,
+        }
     }
 
     /// Build a scheduled scene with only text (Clear + TitleText = 2 passes).
@@ -293,7 +296,10 @@ mod tests {
             position: PositionIR::Center,
         });
         let schedule = schedule_lowering(&algo);
-        ScheduledScene { algorithm: algo, schedule }
+        ScheduledScene {
+            algorithm: algo,
+            schedule,
+        }
     }
 
     // ---- SignalValue basics ----
@@ -355,7 +361,10 @@ mod tests {
         s.set(signals::INPUT_TEXT, SignalValue::Text("hi".into()));
         // First set bumps version 0 -> 1.
         assert_eq!(s.version(signals::INPUT_TEXT), 1);
-        assert_eq!(s.get(signals::INPUT_TEXT), Some(&SignalValue::Text("hi".into())));
+        assert_eq!(
+            s.get(signals::INPUT_TEXT),
+            Some(&SignalValue::Text("hi".into()))
+        );
         assert!(!s.is_empty());
         assert_eq!(s.len(), 1);
     }
@@ -367,7 +376,10 @@ mod tests {
         assert_eq!(s.version(signals::INPUT_TEXT), 1);
         s.set(signals::INPUT_TEXT, SignalValue::Text("b".into()));
         assert_eq!(s.version(signals::INPUT_TEXT), 2);
-        assert_eq!(s.get(signals::INPUT_TEXT), Some(&SignalValue::Text("b".into())));
+        assert_eq!(
+            s.get(signals::INPUT_TEXT),
+            Some(&SignalValue::Text("b".into()))
+        );
     }
 
     #[test]
@@ -578,8 +590,7 @@ mod tests {
         let s = SignalStore::new();
 
         // Pass dirty_nodes in reverse order.
-        let mut reversed: Vec<DepNodeId> =
-            graph.nodes.iter().map(|n| n.id).collect();
+        let mut reversed: Vec<DepNodeId> = graph.nodes.iter().map(|n| n.id).collect();
         reversed.reverse();
         let passes = s.dirty_passes(&reversed, &graph);
         // Should be 0,1,2,3,4 (graph order), not 4,3,2,1,0.

@@ -259,6 +259,35 @@ void main() {
 }
 "#;
 
+/// Rect vertex shader (GLSL ES 3.00). Draws a full-viewport quad; the
+/// fragment shader clips to the rect bounds. This replaces the scissor+clear
+/// hack and correctly respects alpha blending.
+pub const RECT_VERTEX_SHADER_SRC: &str = r#"#version 300 es
+precision highp float;
+layout(location = 0) in vec2 position;  // clip-space [-1,1]
+void main() {
+    gl_Position = vec4(position, 0.0, 1.0);
+}
+"#;
+
+/// Rect fragment shader (GLSL ES 3.00). Draws a uniform-color rectangle
+/// with proper alpha blending.
+pub const RECT_FRAGMENT_SHADER_SRC: &str = r#"#version 300 es
+precision highp float;
+uniform vec4 u_rect;   // pixel-space bounds: (x0, y0, x1, y1)
+uniform vec4 u_color;  // RGBA
+uniform vec2 u_canvas; // canvas size in pixels
+out vec4 frag_color;
+void main() {
+    float px = gl_FragCoord.x;
+    float py = u_canvas.y - gl_FragCoord.y;  // flip Y to Y-down
+    if (px < u_rect.x || px > u_rect.z || py < u_rect.y || py > u_rect.w) {
+        discard;
+    }
+    frag_color = u_color;
+}
+"#;
+
 // ---------------------------------------------------------------------------
 // Vertex-buffer generation (target-agnostic — unit-tested on native)
 // ---------------------------------------------------------------------------
@@ -345,12 +374,25 @@ fn build_text_quads(
     let mut quads = Vec::with_capacity(run.glyph_ids.len());
     let mut pen_x = 0.0f32;
     for (i, &glyph_id) in run.glyph_ids.iter().enumerate() {
-        let key = GlyphKey { font_id: run.font_id, glyph_id, phase: 0, size_px: font_size as u16 };
+        let key = GlyphKey {
+            font_id: run.font_id,
+            glyph_id,
+            phase: 0,
+            size_px: font_size as u16,
+        };
         let slot = atlas.ensure(key);
-        if slot.size.0 < 0.5 || slot.size.1 < 0.5 { pen_x += run.advances[i]; continue; }
+        if slot.size.0 < 0.5 || slot.size.1 < 0.5 {
+            pen_x += run.advances[i];
+            continue;
+        }
         quads.push(alkalive_text::Quad {
-            position: (pen_x + run.offsets[i].0 + slot.bearing.0, run.offsets[i].1 - slot.bearing.1),
-            size: slot.size, uv: slot.uv, page: slot.page,
+            position: (
+                pen_x + run.offsets[i].0 + slot.bearing.0,
+                run.offsets[i].1 - slot.bearing.1,
+            ),
+            size: slot.size,
+            uv: slot.uv,
+            page: slot.page,
         });
         pen_x += run.advances[i];
     }
@@ -426,9 +468,8 @@ mod wasm {
     use std::sync::Arc;
     use wasm_bindgen::JsCast;
     use web_sys::{
-        HtmlCanvasElement, Performance, WebGl2RenderingContext, WebGlBuffer,
-        WebGlProgram, WebGlShader, WebGlTexture, WebGlUniformLocation,
-        WebGlVertexArrayObject,
+        HtmlCanvasElement, Performance, WebGl2RenderingContext, WebGlBuffer, WebGlProgram,
+        WebGlShader, WebGlTexture, WebGlUniformLocation, WebGlVertexArrayObject,
     };
 
     /// A GPU renderer that renders text and a background directly to a canvas
@@ -441,16 +482,30 @@ mod wasm {
         canvas: HtmlCanvasElement,
         /// The WebGL2 rendering context. `None` only if context loss occurs.
         gl: WebGl2RenderingContext,
-        /// The compiled shader program (vertex + fragment).
+        /// The compiled text shader program (vertex + fragment).
         program: WebGlProgram,
-        /// Vertex shader object (kept for re-link on context loss).
+        /// Text vertex shader object (kept for re-link on context loss).
         vs: WebGlShader,
-        /// Fragment shader object.
+        /// Text fragment shader object.
         fs: WebGlShader,
-        /// VAO holding the vertex buffer binding.
+        /// The rect shader program (for filled/outlined rectangles with alpha).
+        rect_program: WebGlProgram,
+        /// Rect vertex shader object.
+        rect_vs: WebGlShader,
+        /// Rect fragment shader object.
+        rect_fs: WebGlShader,
+        /// VAO holding the text vertex buffer binding.
         vao: WebGlVertexArrayObject,
-        /// The vertex buffer (positions + UVs, 6 verts per glyph quad).
+        /// VAO for the rect shader (a single full-viewport quad).
+        rect_vao: WebGlVertexArrayObject,
+        /// The text vertex buffer (positions + UVs, 6 verts per glyph quad).
         vbo: WebGlBuffer,
+        /// The rect vertex buffer (a single triangle-strip covering the viewport).
+        rect_vbo: WebGlBuffer,
+        /// Cached rect shader uniform locations.
+        rect_u_rect: WebGlUniformLocation,
+        rect_u_color: WebGlUniformLocation,
+        rect_u_canvas: WebGlUniformLocation,
         /// The glyph atlas texture (single-channel grayscale, 512×512).
         glyph_texture: WebGlTexture,
         /// Cached location of the `rotation` uniform.
@@ -485,6 +540,12 @@ mod wasm {
         input_vertex_count: u32,
         /// Input field bounds in pixels (x, y, w, h) for hit-testing.
         input_field_bounds: (f32, f32, f32, f32),
+        /// Cached font registry (avoids re-parsing the 170 KB TTF on every keystroke).
+        font_registry: Option<Arc<alkalive_text::HarfRustFontRegistry>>,
+        /// Cached font ID (resolved once from the registry).
+        font_id: Option<alkalive_text::FontId>,
+        /// Cached text shaper (avoids re-creating on every frame).
+        text_shaper: Option<alkalive_text::HarfRustTextShaper>,
     }
 
     impl WgpuRenderer {
@@ -505,10 +566,16 @@ mod wasm {
             let gl: WebGl2RenderingContext = canvas_ctx
                 .ok_or_else(|| "WebGL2 not supported by this browser".to_string())?
                 .dyn_into::<WebGl2RenderingContext>()
-                .map_err(|_| "getContext('webgl2') did not return a WebGL2RenderingContext".to_string())?;
+                .map_err(|_| {
+                    "getContext('webgl2') did not return a WebGL2RenderingContext".to_string()
+                })?;
 
             // Compile shaders.
-            let vs = compile_shader(&gl, WebGl2RenderingContext::VERTEX_SHADER, VERTEX_SHADER_SRC)?;
+            let vs = compile_shader(
+                &gl,
+                WebGl2RenderingContext::VERTEX_SHADER,
+                VERTEX_SHADER_SRC,
+            )?;
             let fs = compile_shader(
                 &gl,
                 WebGl2RenderingContext::FRAGMENT_SHADER,
@@ -547,7 +614,14 @@ mod wasm {
             // Set up vertex attribute pointers (vec2 position, vec2 uv).
             let stride = Vertex::STRIDE as i32;
             gl.enable_vertex_attrib_array(0);
-            gl.vertex_attrib_pointer_with_i32(0, 2, WebGl2RenderingContext::FLOAT, false, stride, 0);
+            gl.vertex_attrib_pointer_with_i32(
+                0,
+                2,
+                WebGl2RenderingContext::FLOAT,
+                false,
+                stride,
+                0,
+            );
             gl.enable_vertex_attrib_array(1);
             gl.vertex_attrib_pointer_with_i32(
                 1,
@@ -628,12 +702,71 @@ mod wasm {
             canvas.set_height(height);
             gl.viewport(0, 0, width as i32, height as i32);
 
-            // Enable alpha blending for text antialiasing.
+            // Enable alpha blending for text antialiasing and rect transparency.
             gl.enable(WebGl2RenderingContext::BLEND);
             gl.blend_func(
                 WebGl2RenderingContext::SRC_ALPHA,
                 WebGl2RenderingContext::ONE_MINUS_SRC_ALPHA,
             );
+
+            // ---- Rect shader program (replaces scissor+clear hack; respects alpha) ----
+            let rect_vs = compile_shader(
+                &gl,
+                WebGl2RenderingContext::VERTEX_SHADER,
+                RECT_VERTEX_SHADER_SRC,
+            )?;
+            let rect_fs = compile_shader(
+                &gl,
+                WebGl2RenderingContext::FRAGMENT_SHADER,
+                RECT_FRAGMENT_SHADER_SRC,
+            )?;
+            let rect_program = gl
+                .create_program()
+                .ok_or_else(|| "create_program() returned null for rect".to_string())?;
+            gl.attach_shader(&rect_program, &rect_vs);
+            gl.attach_shader(&rect_program, &rect_fs);
+            gl.link_program(&rect_program);
+            if gl
+                .get_program_parameter(&rect_program, WebGl2RenderingContext::LINK_STATUS)
+                .as_bool()
+                != Some(true)
+            {
+                let log = gl
+                    .get_program_info_log(&rect_program)
+                    .unwrap_or_else(|| "(no info log)".to_string());
+                return Err(format!("Rect program link failed: {}", log));
+            }
+
+            // Full-viewport quad for the rect shader (triangle strip).
+            let rect_vao = gl
+                .create_vertex_array()
+                .ok_or_else(|| "create_vertex_array() returned null for rect".to_string())?;
+            let rect_vbo = gl
+                .create_buffer()
+                .ok_or_else(|| "create_buffer() returned null for rect".to_string())?;
+            let quad: [f32; 8] = [-1.0, 1.0, -1.0, -1.0, 1.0, 1.0, 1.0, -1.0];
+            let quad_bytes: &[u8] =
+                unsafe { std::slice::from_raw_parts(quad.as_ptr() as *const u8, 32) };
+            gl.bind_vertex_array(Some(&rect_vao));
+            gl.bind_buffer(WebGl2RenderingContext::ARRAY_BUFFER, Some(&rect_vbo));
+            gl.buffer_data_with_u8_array(
+                WebGl2RenderingContext::ARRAY_BUFFER,
+                quad_bytes,
+                WebGl2RenderingContext::STATIC_DRAW,
+            );
+            gl.enable_vertex_attrib_array(0);
+            gl.vertex_attrib_pointer_with_i32(0, 2, WebGl2RenderingContext::FLOAT, false, 8, 0);
+            gl.bind_vertex_array(None);
+
+            let rect_u_rect = gl
+                .get_uniform_location(&rect_program, "u_rect")
+                .ok_or_else(|| "rect uniform 'u_rect' not found".to_string())?;
+            let rect_u_color = gl
+                .get_uniform_location(&rect_program, "u_color")
+                .ok_or_else(|| "rect uniform 'u_color' not found".to_string())?;
+            let rect_u_canvas = gl
+                .get_uniform_location(&rect_program, "u_canvas")
+                .ok_or_else(|| "rect uniform 'u_canvas' not found".to_string())?;
 
             Ok(Self {
                 canvas,
@@ -641,8 +774,16 @@ mod wasm {
                 program,
                 vs,
                 fs,
+                rect_program,
+                rect_vs,
+                rect_fs,
                 vao,
+                rect_vao,
                 vbo,
+                rect_vbo,
+                rect_u_rect,
+                rect_u_color,
+                rect_u_canvas,
                 glyph_texture,
                 u_rotation,
                 u_canvas_size,
@@ -660,6 +801,9 @@ mod wasm {
                 input_vertex_count: 0,
                 input_field_bounds: (0.0, 0.0, 0.0, 0.0),
                 vertex_count: 0,
+                font_registry: None,
+                font_id: None,
+                text_shaper: None,
             })
         }
 
@@ -777,7 +921,9 @@ mod wasm {
             //    dirty tracking, but the renderer's per-frame GPU upload
             //    still keys off this single comparison.
             if !self.atlas_uploaded || self.last_input_text != input_display {
-                if let Err(e) = self.upload_text_atlas(&text_scene.text, &input_display, text_scene.font_size) {
+                if let Err(e) =
+                    self.upload_text_atlas(&text_scene.text, &input_display, text_scene.font_size)
+                {
                     web_sys::console::error_1(&format!("atlas upload failed: {}", e).into());
                 }
                 self.atlas_uploaded = true;
@@ -786,12 +932,22 @@ mod wasm {
 
             // 3. Bind program + shared state once (text-quad shader).
             //    Passes that need a different shader will rebind as needed.
-            self.gl.viewport(0, 0, self.width as i32, self.height as i32);
+            self.gl
+                .viewport(0, 0, self.width as i32, self.height as i32);
             self.gl.use_program(Some(&self.program));
-            self.gl.uniform2f(Some(&self.u_canvas_size), self.width as f32, self.height as f32);
-            if let Some(ref u_time) = self.u_time { self.gl.uniform1f(Some(u_time), time); }
+            self.gl.uniform2f(
+                Some(&self.u_canvas_size),
+                self.width as f32,
+                self.height as f32,
+            );
+            if let Some(ref u_time) = self.u_time {
+                self.gl.uniform1f(Some(u_time), time);
+            }
             self.gl.active_texture(WebGl2RenderingContext::TEXTURE0);
-            self.gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(&self.glyph_texture));
+            self.gl.bind_texture(
+                WebGl2RenderingContext::TEXTURE_2D,
+                Some(&self.glyph_texture),
+            );
             self.gl.uniform1i(Some(&self.u_glyph_texture), 0);
             self.gl.bind_vertex_array(Some(&self.vao));
 
@@ -856,10 +1012,12 @@ mod wasm {
                             self.gl.uniform1f(Some(&self.u_rotation), 0.0);
                             if text_scene.input_text.is_empty() {
                                 // Placeholder: dim gray
-                                self.gl.uniform4f(Some(&self.u_text_color), 0.35, 0.35, 0.4, 1.0);
+                                self.gl
+                                    .uniform4f(Some(&self.u_text_color), 0.35, 0.35, 0.4, 1.0);
                             } else {
                                 // Typed text: white
-                                self.gl.uniform4f(Some(&self.u_text_color), 0.9, 0.9, 0.95, 1.0);
+                                self.gl
+                                    .uniform4f(Some(&self.u_text_color), 0.9, 0.9, 0.95, 1.0);
                             }
                             self.gl.draw_arrays(
                                 WebGl2RenderingContext::TRIANGLES,
@@ -872,39 +1030,40 @@ mod wasm {
             }
         }
 
-        /// Draw a filled rectangle using gl.LINES or gl.TRIANGLE_STRIP.
-        /// Uses a simple immediate-mode approach with a temporary buffer.
+        /// Draw a filled rectangle with proper alpha blending using the rect shader.
+        /// Replaces the old scissor+clear hack that silently ignored alpha.
         fn draw_rect_filled(&self, x: f32, y: f32, w: f32, h: f32, r: f32, g: f32, b: f32, a: f32) {
-            // We use scissor test for a filled rect — simplest approach in WebGL2
-            // without a separate shader. Clear the region to the desired color.
-            self.gl.enable(WebGl2RenderingContext::SCISSOR_TEST);
-            self.gl.scissor(x as i32, (self.height as f32 - y - h) as i32, w as i32, h as i32);
-            self.gl.clear_color(r, g, b, a);
-            self.gl.clear(WebGl2RenderingContext::COLOR_BUFFER_BIT);
-            self.gl.disable(WebGl2RenderingContext::SCISSOR_TEST);
+            self.gl.use_program(Some(&self.rect_program));
+            self.gl
+                .uniform4f(Some(&self.rect_u_rect), x, y, x + w, y + h);
+            self.gl.uniform4f(Some(&self.rect_u_color), r, g, b, a);
+            self.gl.uniform2f(
+                Some(&self.rect_u_canvas),
+                self.width as f32,
+                self.height as f32,
+            );
+            self.gl.bind_vertex_array(Some(&self.rect_vao));
+            self.gl
+                .draw_arrays(WebGl2RenderingContext::TRIANGLE_STRIP, 0, 4);
         }
 
-        /// Draw a rectangle outline using gl.LINES.
-        fn draw_rect_outline(&self, x: f32, y: f32, w: f32, h: f32, r: f32, g: f32, b: f32, a: f32) {
-            // Use scissor test for top, bottom, left, right edges
-            let line_w = 2.0;
-            self.gl.enable(WebGl2RenderingContext::SCISSOR_TEST);
-            self.gl.clear_color(r, g, b, a);
-
-            // Top edge
-            self.gl.scissor(x as i32, (self.height as f32 - y - line_w) as i32, w as i32, line_w as i32);
-            self.gl.clear(WebGl2RenderingContext::COLOR_BUFFER_BIT);
-            // Bottom edge
-            self.gl.scissor(x as i32, (self.height as f32 - y - h) as i32, w as i32, line_w as i32);
-            self.gl.clear(WebGl2RenderingContext::COLOR_BUFFER_BIT);
-            // Left edge
-            self.gl.scissor(x as i32, (self.height as f32 - y - h) as i32, line_w as i32, h as i32);
-            self.gl.clear(WebGl2RenderingContext::COLOR_BUFFER_BIT);
-            // Right edge
-            self.gl.scissor((x + w - line_w) as i32, (self.height as f32 - y - h) as i32, line_w as i32, h as i32);
-            self.gl.clear(WebGl2RenderingContext::COLOR_BUFFER_BIT);
-
-            self.gl.disable(WebGl2RenderingContext::SCISSOR_TEST);
+        /// Draw a rectangle outline (4 edges) with proper alpha blending.
+        fn draw_rect_outline(
+            &self,
+            x: f32,
+            y: f32,
+            w: f32,
+            h: f32,
+            r: f32,
+            g: f32,
+            b: f32,
+            a: f32,
+        ) {
+            let lw = 2.0; // line width in pixels
+            self.draw_rect_filled(x, y, w, lw, r, g, b, a); // top
+            self.draw_rect_filled(x, y + h - lw, w, lw, r, g, b, a); // bottom
+            self.draw_rect_filled(x, y, lw, h, r, g, b, a); // left
+            self.draw_rect_filled(x + w - lw, y, lw, h, r, g, b, a); // right
         }
 
         /// Resize the canvas + WebGL viewport.
@@ -964,56 +1123,116 @@ mod wasm {
         /// 4. Uploads the atlas page to the GPU as an R8 texture.
         /// 5. Builds a canvas-centered vertex buffer (6 verts per glyph).
         /// 6. Uploads the vertex buffer to the VBO.
-        fn upload_text_atlas(&mut self, title_text: &str, input_text: &str, font_size: f32) -> Result<(), String> {
+        fn upload_text_atlas(
+            &mut self,
+            title_text: &str,
+            input_text: &str,
+            font_size: f32,
+        ) -> Result<(), String> {
             use alkalive_text::{
-                FontRequest, FontRegistry, GlyphAtlas, GlyphKey, HarfRustFontRegistry,
+                FontRegistry, FontRequest, GlyphAtlas, GlyphKey, HarfRustFontRegistry,
                 HarfRustGlyphAtlas, HarfRustTextShaper, ShapeContext, TextShaper,
             };
 
-            // 1. Load the bundled Roboto-Regular font.
-            let font_bytes: &[u8] = include_bytes!("../../alkalive-app/assets/Roboto-Regular.ttf");
-            let mut registry = HarfRustFontRegistry::new();
-            let loaded_id = registry
-                .load_bundle(font_bytes)
-                .map_err(|e| format!("font load: {:?}", e))?;
-            let req = FontRequest {
-                family: "Roboto".to_string(),
-                weight: 400,
-                style: "normal",
-            };
-            let font_id = registry.resolve(&req).unwrap_or(loaded_id);
-            let registry_arc = Arc::new(registry);
+            // 1. Initialize or reuse the cached font registry + shaper (M7 fix:
+            //    avoids re-parsing the 170 KB TTF on every keystroke).
+            if self.font_registry.is_none() {
+                let font_bytes: &[u8] =
+                    include_bytes!("../../alkalive-app/assets/Roboto-Regular.ttf");
+                let mut registry = HarfRustFontRegistry::new();
+                let loaded_id = registry
+                    .load_bundle(font_bytes)
+                    .map_err(|e| format!("font load: {:?}", e))?;
+                let req = FontRequest {
+                    family: "Roboto".to_string(),
+                    weight: 400,
+                    style: "normal",
+                };
+                let font_id = registry.resolve(&req).unwrap_or(loaded_id);
+                let registry_arc = Arc::new(registry);
+                let shaper = HarfRustTextShaper::new(Arc::clone(&registry_arc));
+                self.font_registry = Some(registry_arc);
+                self.font_id = Some(font_id);
+                self.text_shaper = Some(shaper);
+            }
 
-            // 2. Shape the title text.
-            let shaper = HarfRustTextShaper::new(Arc::clone(&registry_arc));
-            let mut atlas = HarfRustGlyphAtlas::new(Arc::clone(&registry_arc));
+            let registry_arc = self.font_registry.as_ref().unwrap().clone();
+            let font_id = self.font_id.unwrap();
+            let shaper = self.text_shaper.as_ref().unwrap();
+
+            // 2. Create a fresh atlas (cheap — just allocates an empty 512×512 page).
+            let mut atlas = HarfRustGlyphAtlas::new(registry_arc);
             let title_font_size = font_size;
-            let input_font_size = font_size * 0.5; // Input text is half the title size
+            let input_font_size = font_size * 0.5;
 
-            let ctx_title = ShapeContext { font: font_id, size_px: title_font_size, direction: None };
-            let title_run = shaper.shape(title_text, &ctx_title).map_err(|e| format!("shape title: {:?}", e))?;
+            // 3. Shape the title + input text.
+            let ctx_title = ShapeContext {
+                font: font_id,
+                size_px: title_font_size,
+                direction: None,
+            };
+            let title_run = shaper
+                .shape(title_text, &ctx_title)
+                .map_err(|e| format!("shape title: {:?}", e))?;
 
-            // 3. Shape the input text (smaller font).
-            let ctx_input = ShapeContext { font: font_id, size_px: input_font_size, direction: None };
-            let input_run = shaper.shape(input_text, &ctx_input).map_err(|e| format!("shape input: {:?}", e))?;
+            let ctx_input = ShapeContext {
+                font: font_id,
+                size_px: input_font_size,
+                direction: None,
+            };
+            let input_run = shaper
+                .shape(input_text, &ctx_input)
+                .map_err(|e| format!("shape input: {:?}", e))?;
 
-            // 4. Rasterize title glyphs into the atlas and build quads.
+            // 4. Rasterize glyphs into the atlas and build quads.
             let title_quads = build_text_quads(&title_run, &mut atlas, title_font_size);
             let input_quads = build_text_quads(&input_run, &mut atlas, input_font_size);
 
-            // 5. Upload atlas page 0 to GPU.
-            let page_data = atlas.page_data(0).ok_or_else(|| "atlas page 0 missing".to_string())?;
-            self.gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(&self.glyph_texture));
-            self.gl.tex_image_2d_with_i32_and_i32_and_i32_and_format_and_type_and_opt_u8_array(
-                WebGl2RenderingContext::TEXTURE_2D, 0, WebGl2RenderingContext::R8 as i32,
-                512, 512, 0, WebGl2RenderingContext::RED, WebGl2RenderingContext::UNSIGNED_BYTE,
-                Some(page_data),
-            ).map_err(|e| format!("tex_image_2d upload failed: {:?}", e))?;
+            // 5. Multi-page atlas detection (C1 fix): if the atlas overflowed
+            //    to a second page, glyphs on page 1+ will render as blank
+            //    because we only upload page 0. Log a warning so the failure
+            //    is visible rather than silent.
+            if atlas.page_count() > 1 {
+                web_sys::console::warn_1(
+                    &format!(
+                        "AlkALive: glyph atlas overflowed to {} pages (only page 0 is uploaded). \
+                     Some glyphs may not render. Consider reducing font size or text length.",
+                        atlas.page_count()
+                    )
+                    .into(),
+                );
+            }
+
+            // 6. Upload atlas page 0 to GPU.
+            let page_data = atlas
+                .page_data(0)
+                .ok_or_else(|| "atlas page 0 missing".to_string())?;
+            self.gl.bind_texture(
+                WebGl2RenderingContext::TEXTURE_2D,
+                Some(&self.glyph_texture),
+            );
+            self.gl
+                .tex_image_2d_with_i32_and_i32_and_i32_and_format_and_type_and_opt_u8_array(
+                    WebGl2RenderingContext::TEXTURE_2D,
+                    0,
+                    WebGl2RenderingContext::R8 as i32,
+                    512,
+                    512,
+                    0,
+                    WebGl2RenderingContext::RED,
+                    WebGl2RenderingContext::UNSIGNED_BYTE,
+                    Some(page_data),
+                )
+                .map_err(|e| format!("tex_image_2d upload failed: {:?}", e))?;
 
             // 6. Build canvas-centered title quads (centered, will get rotation).
             let title_canvas_quads = quads_from_text(
-                &title_quads, title_run.metrics.ascent, title_run.metrics.descent,
-                title_run.metrics.total_advance, self.width as f32, self.height as f32,
+                &title_quads,
+                title_run.metrics.ascent,
+                title_run.metrics.descent,
+                title_run.metrics.total_advance,
+                self.width as f32,
+                self.height as f32,
             );
             let title_verts = build_vertex_buffer(&title_canvas_quads);
             self.title_vertex_count = title_verts.len() as u32;
@@ -1030,20 +1249,23 @@ mod wasm {
             let input_baseline_x = field_x + (field_w - input_run.metrics.total_advance) * 0.5;
             let input_baseline_y = field_y + field_h * 0.5 + input_run.metrics.ascent * 0.5;
 
-            let input_canvas_quads: Vec<GlyphQuad> = input_quads.iter().map(|q| {
-                let px = q.position.0;
-                let py = q.position.1;
-                GlyphQuad {
-                    center_x: input_baseline_x + px + q.size.0 * 0.5,
-                    center_y: input_baseline_y + py + q.size.1 * 0.5,
-                    w: q.size.0,
-                    h: q.size.1,
-                    u0: q.uv.x,
-                    v0: q.uv.y,
-                    u1: q.uv.x + q.uv.w,
-                    v1: q.uv.y + q.uv.h,
-                }
-            }).collect();
+            let input_canvas_quads: Vec<GlyphQuad> = input_quads
+                .iter()
+                .map(|q| {
+                    let px = q.position.0;
+                    let py = q.position.1;
+                    GlyphQuad {
+                        center_x: input_baseline_x + px + q.size.0 * 0.5,
+                        center_y: input_baseline_y + py + q.size.1 * 0.5,
+                        w: q.size.0,
+                        h: q.size.1,
+                        u0: q.uv.x,
+                        v0: q.uv.y,
+                        u1: q.uv.x + q.uv.w,
+                        v1: q.uv.y + q.uv.h,
+                    }
+                })
+                .collect();
             let input_verts = build_vertex_buffer(&input_canvas_quads);
             self.input_vertex_start = self.title_vertex_count;
             self.input_vertex_count = input_verts.len() as u32;
@@ -1053,14 +1275,18 @@ mod wasm {
             all_verts.extend(input_verts);
             self.vertex_count = all_verts.len() as u32;
 
-            self.gl.bind_buffer(WebGl2RenderingContext::ARRAY_BUFFER, Some(&self.vbo));
+            self.gl
+                .bind_buffer(WebGl2RenderingContext::ARRAY_BUFFER, Some(&self.vbo));
             let byte_len = all_verts.len() * std::mem::size_of::<Vertex>();
-            if byte_len == 0 { return Ok(()); }
-            let bytes: &[u8] = unsafe {
-                std::slice::from_raw_parts(all_verts.as_ptr() as *const u8, byte_len)
-            };
+            if byte_len == 0 {
+                return Ok(());
+            }
+            let bytes: &[u8] =
+                unsafe { std::slice::from_raw_parts(all_verts.as_ptr() as *const u8, byte_len) };
             self.gl.buffer_data_with_u8_array(
-                WebGl2RenderingContext::ARRAY_BUFFER, bytes, WebGl2RenderingContext::DYNAMIC_DRAW,
+                WebGl2RenderingContext::ARRAY_BUFFER,
+                bytes,
+                WebGl2RenderingContext::DYNAMIC_DRAW,
             );
             Ok(())
         }
@@ -1068,13 +1294,16 @@ mod wasm {
 
     impl Drop for WgpuRenderer {
         fn drop(&mut self) {
-            // Free GPU resources. Best-effort — context loss can make these
-            // no-ops.
             self.gl.delete_program(Some(&self.program));
             self.gl.delete_shader(Some(&self.vs));
             self.gl.delete_shader(Some(&self.fs));
+            self.gl.delete_program(Some(&self.rect_program));
+            self.gl.delete_shader(Some(&self.rect_vs));
+            self.gl.delete_shader(Some(&self.rect_fs));
             self.gl.delete_buffer(Some(&self.vbo));
+            self.gl.delete_buffer(Some(&self.rect_vbo));
             self.gl.delete_vertex_array(Some(&self.vao));
+            self.gl.delete_vertex_array(Some(&self.rect_vao));
             self.gl.delete_texture(Some(&self.glyph_texture));
         }
     }
@@ -1147,11 +1376,9 @@ mod native {
             _width: u32,
             _height: u32,
         ) -> Result<Self, String> {
-            Err(
-                "alkalive-backend-wgpu: WebGL2 backend only runs on wasm32 \
+            Err("alkalive-backend-wgpu: WebGL2 backend only runs on wasm32 \
                  (this is a native build — the GPU backend is not available)"
-                    .to_string(),
-            )
+                .to_string())
         }
 
         /// No-op on native — the renderer was never actually constructed.
@@ -1279,7 +1506,7 @@ mod tests {
         assert_eq!(verts[0], Vertex::new(80.0, 20.0, 0.0, 0.0)); // TL
         assert_eq!(verts[1], Vertex::new(120.0, 20.0, 0.1, 0.0)); // TR
         assert_eq!(verts[2], Vertex::new(80.0, 80.0, 0.0, 0.2)); // BL
-        // Triangle 2: TR-BR-BL = (120,20)-(120,80)-(80,80)
+                                                                 // Triangle 2: TR-BR-BL = (120,20)-(120,80)-(80,80)
         assert_eq!(verts[3], Vertex::new(120.0, 20.0, 0.1, 0.0)); // TR
         assert_eq!(verts[4], Vertex::new(120.0, 80.0, 0.1, 0.2)); // BR
         assert_eq!(verts[5], Vertex::new(80.0, 80.0, 0.0, 0.2)); // BL
@@ -1456,7 +1683,11 @@ mod tests {
             .expect("title pass");
         assert!(title.rotation);
         // All other passes have rotation=false.
-        for p in sched.passes.iter().filter(|p| p.kind != alkalive_compiler::PassKind::TitleText) {
+        for p in sched
+            .passes
+            .iter()
+            .filter(|p| p.kind != alkalive_compiler::PassKind::TitleText)
+        {
             assert!(!p.rotation, "pass {:?} should not have rotation", p.kind);
         }
     }
@@ -1467,13 +1698,12 @@ mod tests {
     #[test]
     fn end_to_end_text_to_vertex_buffer() {
         use alkalive_text::{
-            FontRequest, FontRegistry, GlyphAtlas, GlyphKey, HarfRustFontRegistry,
+            FontRegistry, FontRequest, GlyphAtlas, GlyphKey, HarfRustFontRegistry,
             HarfRustGlyphAtlas, HarfRustTextShaper, ShapeContext, TextShaper,
         };
         use std::sync::Arc;
 
-        let font_bytes: &[u8] =
-            include_bytes!("../../alkalive-app/assets/Roboto-Regular.ttf");
+        let font_bytes: &[u8] = include_bytes!("../../alkalive-app/assets/Roboto-Regular.ttf");
         let mut registry = HarfRustFontRegistry::new();
         let loaded_id = registry.load_bundle(font_bytes).expect("font load");
         let req = FontRequest {

@@ -151,6 +151,29 @@ thread_local! {
     /// The window `resize` event closure. Kept alive for the page lifetime.
     static RESIZE_CLOSURE: RefCell<Option<Closure<dyn FnMut()>>> =
         RefCell::new(None);
+
+    /// The `performance.now()` timestamp (ms) at which the runtime started.
+    /// Used to compute frame-rate-independent elapsed time for animation.
+    static START_TIME_MS: RefCell<f64> = RefCell::new(0.0);
+}
+
+/// Returns elapsed time in seconds since the runtime started, using
+/// `performance.now()`. This is frame-rate-independent: on a 30 Hz display
+/// the animation runs at the same speed as on a 144 Hz display.
+fn elapsed_seconds() -> f32 {
+    START_TIME_MS.with(|start| {
+        let start_val = *start.borrow();
+        let now = web_sys::window()
+            .and_then(|w| w.performance())
+            .map(|p| p.now())
+            .unwrap_or(0.0);
+        if start_val == 0.0 {
+            *start.borrow_mut() = now;
+            0.0
+        } else {
+            ((now - start_val) / 1000.0) as f32
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -177,7 +200,10 @@ thread_local! {
 /// await wasm.start(canvas, ime);
 /// ```
 #[wasm_bindgen]
-pub fn start(canvas: web_sys::HtmlCanvasElement, ime_input: web_sys::HtmlInputElement) -> Result<(), JsValue> {
+pub fn start(
+    canvas: web_sys::HtmlCanvasElement,
+    ime_input: web_sys::HtmlInputElement,
+) -> Result<(), JsValue> {
     // 1. Install a panic hook so panics surface as readable console errors.
     std::panic::set_hook(Box::new(|info| {
         web_sys::console::error_1(&format!("AlkALive panic: {}", info).into());
@@ -187,9 +213,8 @@ pub fn start(canvas: web_sys::HtmlCanvasElement, ime_input: web_sys::HtmlInputEl
     //    produces both the AlgorithmIR and the default ScheduleIR) PLUS a
     //    DependencyGraph (ADR-025: one node per schedule pass, annotated
     //    with the signal IDs each pass reads).
-    let (scheduled, dep_graph) = alkalive_compiler::compile_with_deps(HELLO_ALK_SRC).map_err(|e| {
-        JsValue::from_str(&format!("AlkALive compile error: {:?}", e))
-    })?;
+    let (scheduled, dep_graph) = alkalive_compiler::compile_with_deps(HELLO_ALK_SRC)
+        .map_err(|e| JsValue::from_str(&format!("AlkALive compile error: {:?}", e)))?;
 
     // 3. Lower the ScheduledScene's algorithm to the renderer's TextSceneData,
     //    and keep the schedule for data-driven dispatch in render_frame.
@@ -213,7 +238,14 @@ pub fn start(canvas: web_sys::HtmlCanvasElement, ime_input: web_sys::HtmlInputEl
     //    compiled, and the glyph atlas texture is created.
     spawn_local(async move {
         if let Err(e) = init_runtime(
-            canvas, ime_input, width, height, scene, schedule, dep_graph, is_small_scene,
+            canvas,
+            ime_input,
+            width,
+            height,
+            scene,
+            schedule,
+            dep_graph,
+            is_small_scene,
         )
         .await
         {
@@ -239,9 +271,10 @@ async fn init_runtime(
     is_small_scene: bool,
 ) -> Result<(), JsValue> {
     // 1. Initialize the WebGL2 renderer (async — acquires the GPU context).
-    let renderer = alkalive_backend_wgpu::WgpuRenderer::init_from_canvas(canvas.clone(), width, height)
-        .await
-        .map_err(|e| JsValue::from_str(&format!("AlkALive renderer init failed: {}", e)))?;
+    let renderer =
+        alkalive_backend_wgpu::WgpuRenderer::init_from_canvas(canvas.clone(), width, height)
+            .await
+            .map_err(|e| JsValue::from_str(&format!("AlkALive renderer init failed: {}", e)))?;
 
     // 2. Build the SignalStore with the well-known signals' initial values.
     //    These mirror the values baked into `scene` at startup — the
@@ -365,12 +398,7 @@ fn build_scene_from_algorithm(
             scene.font_size = *font_size;
             scene.rotation_speed = *rotation_speed;
             scene.background = algorithm.background;
-            scene.text_color = (
-                r as f32 / 255.0,
-                g as f32 / 255.0,
-                b as f32 / 255.0,
-                1.0,
-            );
+            scene.text_color = (r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0);
         }
     }
 
@@ -407,49 +435,50 @@ fn setup_input_forwarding(ime_input: &web_sys::HtmlInputElement) -> Result<(), J
     // `INPUT_TEXT` signal to `runtime.signals` so the next frame's
     // `check_changes` detects the change and marks the dependent passes
     // (TitleText, InputText) dirty.
-    let on_keydown = Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(move |e: web_sys::KeyboardEvent| {
-        let key = e.key();
-        let mut handled = false;
-        RUNTIME.with(|rt| {
-            let mut borrow = rt.borrow_mut();
-            if let Some(runtime) = borrow.as_mut() {
-                if e.ctrl_key() || e.alt_key() || e.meta_key() {
-                    // Let the browser handle shortcuts (Ctrl+C, etc.).
-                    return;
+    let on_keydown =
+        Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(move |e: web_sys::KeyboardEvent| {
+            let key = e.key();
+            let mut handled = false;
+            RUNTIME.with(|rt| {
+                let mut borrow = rt.borrow_mut();
+                if let Some(runtime) = borrow.as_mut() {
+                    if e.ctrl_key() || e.alt_key() || e.meta_key() {
+                        // Let the browser handle shortcuts (Ctrl+C, etc.).
+                        return;
+                    }
+                    if key == "Backspace" {
+                        runtime.input_text.pop();
+                        handled = true;
+                    } else if key == "Enter" {
+                        runtime.input_text.push('\n');
+                        handled = true;
+                    } else if key == "Escape" {
+                        runtime.input_text.clear();
+                        handled = true;
+                    } else if key.len() == 1 {
+                        // Single-char key — printable (or space, etc.)
+                        let c = key.chars().next().unwrap();
+                        runtime.input_text.push(c);
+                        handled = true;
+                    }
+                    if handled {
+                        // Update the input field text on the scene (not the title).
+                        runtime.scene.input_text = runtime.input_text.clone();
+                        // ADR-025: bump the INPUT_TEXT signal so the dependency
+                        // graph marks the TitleText and InputText passes dirty.
+                        runtime.signals.set(
+                            alkalive_compiler::SignalId(0), // INPUT_TEXT
+                            signal_store::SignalValue::Text(runtime.input_text.clone()),
+                        );
+                    }
                 }
-                if key == "Backspace" {
-                    runtime.input_text.pop();
-                    handled = true;
-                } else if key == "Enter" {
-                    runtime.input_text.push('\n');
-                    handled = true;
-                } else if key == "Escape" {
-                    runtime.input_text.clear();
-                    handled = true;
-                } else if key.len() == 1 {
-                    // Single-char key — printable (or space, etc.)
-                    let c = key.chars().next().unwrap();
-                    runtime.input_text.push(c);
-                    handled = true;
-                }
-                if handled {
-                    // Update the input field text on the scene (not the title).
-                    runtime.scene.input_text = runtime.input_text.clone();
-                    // ADR-025: bump the INPUT_TEXT signal so the dependency
-                    // graph marks the TitleText and InputText passes dirty.
-                    runtime.signals.set(
-                        alkalive_compiler::SignalId(0), // INPUT_TEXT
-                        signal_store::SignalValue::Text(runtime.input_text.clone()),
-                    );
-                }
+            });
+            if handled {
+                // Prevent default browser handling for keys we consumed (so the
+                // hidden input's value doesn't diverge from our buffer).
+                e.prevent_default();
             }
         });
-        if handled {
-            // Prevent default browser handling for keys we consumed (so the
-            // hidden input's value doesn't diverge from our buffer).
-            e.prevent_default();
-        }
-    });
     ime_input.add_event_listener_with_callback("keydown", on_keydown.as_ref().unchecked_ref())?;
     // Keep the closure alive for the page lifetime.
     on_keydown.forget();
@@ -538,7 +567,10 @@ fn setup_resize_listener() -> Result<(), JsValue> {
 /// Set up a click listener on the canvas. When the user clicks inside the
 /// input field rectangle, focus the hidden IME input so keyboard events
 /// are forwarded to the WASM text buffer.
-fn setup_click_handler(canvas: &web_sys::HtmlCanvasElement, ime_input: &web_sys::HtmlInputElement) -> Result<(), JsValue> {
+fn setup_click_handler(
+    canvas: &web_sys::HtmlCanvasElement,
+    ime_input: &web_sys::HtmlInputElement,
+) -> Result<(), JsValue> {
     let ime_clone = ime_input.clone();
     let on_click = Closure::<dyn FnMut(web_sys::MouseEvent)>::new(move |e: web_sys::MouseEvent| {
         let x = e.client_x() as f32;
@@ -575,6 +607,10 @@ fn start_frame_loop() {
         // Advance time + render one frame.
         RUNTIME.with(|rt| {
             if let Some(runtime) = rt.borrow_mut().as_mut() {
+                // Use real elapsed time from performance.now() so animation
+                // speed is independent of display refresh rate (30/60/120/144 Hz).
+                runtime.time = elapsed_seconds();
+
                 // ADR-025: bump the TIME signal every frame (drives the
                 // rotation animation in the TitleText pass). Even for
                 // small scenes (which bypass the dependency graph), this
@@ -584,12 +620,6 @@ fn start_frame_loop() {
                     alkalive_compiler::SignalId(1), // TIME
                     signal_store::SignalValue::Float(runtime.time),
                 );
-
-                // Advance time by a nominal 1/60s per frame. (We don't use
-                // the renderer's performance timer here, to keep the runtime
-                // crate compatible with the native stub of WgpuRenderer
-                // which doesn't expose `elapsed_seconds`.)
-                runtime.time += 1.0 / 60.0;
 
                 // ADR-025: small-scene fallback (R1 mitigation). For small
                 // scenes (algorithm node count below SMALL_SCENE_THRESHOLD),
@@ -601,11 +631,9 @@ fn start_frame_loop() {
                     // Legacy path: render every frame unconditionally.
                     // ADR-024: pass the schedule to the renderer so it can
                     // do data-driven dispatch over the schedule's passes.
-                    runtime.renderer.render_frame(
-                        &runtime.scene,
-                        &runtime.schedule,
-                        runtime.time,
-                    );
+                    runtime
+                        .renderer
+                        .render_frame(&runtime.scene, &runtime.schedule, runtime.time);
                 } else {
                     // ADR-025 incremental path: check which signals changed
                     // since the last frame, propagate dirtiness through the
@@ -624,10 +652,10 @@ fn start_frame_loop() {
                         // TIME is bumped every frame (above), so the
                         // `changed` list always includes TIME.
                     } else {
-                        let dirty_nodes =
-                            runtime.signals.propagate(&changed, &runtime.dep_graph);
-                        let dirty_passes =
-                            runtime.signals.dirty_passes(&dirty_nodes, &runtime.dep_graph);
+                        let dirty_nodes = runtime.signals.propagate(&changed, &runtime.dep_graph);
+                        let dirty_passes = runtime
+                            .signals
+                            .dirty_passes(&dirty_nodes, &runtime.dep_graph);
                         // Pass dirty_passes to the renderer so it can skip
                         // unchanged passes. The renderer's
                         // `render_frame_with_dirty` is a hint-aware variant
