@@ -169,6 +169,8 @@ This section documents the **existing** codebase as it stands today, with file a
 
 ### 3.1 Compiler Pipeline (`crates/alkalive-compiler`)
 
+> **Note (Wave 4 audit — ADR reconciliation):** The AlkALive compiler is a **scene-description DSL frontend**, not a general-purpose programming-language compiler. It lowers `.alk` source to a JSON-serializable `SceneIR`; it does **not** generate WASM bytecode, has no type system, and has no OO features (no classes, methods, or inheritance) in the production `.alk` grammar. The "WASM" in the system is the **pre-built runtime cdylib** (`crates/alkalive-runtime-wasm`), compiled from Rust by `cargo build --target wasm32-unknown-unknown`; the `.alk` source is embedded into that cdylib at build time via `include_str!` and compiled to a `SceneIR` at startup inside the WASM runtime. The user's `.alk` source is **data**, not a WASM-compilation unit. See [ADR 008](adr/ADR.md#adr-008-statically-typed-moduleoo-language-compiling-to-wasm) and [ADR 009](adr/ADR.md#adr-009-two-level-type-verification) "Implementation Status (Wave 4 Audit)" subsections, and the [Wave 0 audit](alkalive-wave-00-audit.md) §4 / §10.2 for the primary evidence.
+
 The compiler is a three-stage pipeline: lex → parse → lower. The pipeline is documented in `crates/alkalive-compiler/src/lib.rs` lines 8–16:
 
 ```text

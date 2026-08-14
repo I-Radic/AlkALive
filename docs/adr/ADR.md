@@ -270,6 +270,37 @@ for seminaïve evaluation (ADR-025) — never as a soundness backstop.
 - [ADR 009](#adr-009-two-level-type-verification) — amended in parallel to add monotonicity as a third verification dimension.
 - [ADR 025](ADR_025_incremental_computation.md) — Phase 2 IR metadata enables seminaïve evaluation.
 
+### Implementation Status (Wave 4 Audit)
+
+*Added by [Wave 4 — ADR Reconciliation](../alkalive-wave-04-adr-reconciliation.md), based on the [Wave 0 audit](../alkalive-wave-00-audit.md) §4.3 and §10.2. This subsection supersedes any conflicting "implemented" claim elsewhere in this ADR with respect to the production `.alk` pipeline.*
+
+**The current implementation is a scene-description DSL frontend, not a general-purpose programming language.** As of the Wave 0 audit, the ADR's stated target — a statically-typed, module- and object-oriented language compiling to WASM — is **not** what ships.
+
+The actual production pipeline is:
+
+1. `.alk` source is a small declarative grammar (`module`, `scene`, `text`, `input-field`, plus a handful of styling properties). See audit §4.2 for the EBNF.
+2. `alkalive_compiler::compile(src) -> Result<SceneIR, CompileError>` lowers that source to a **JSON-serializable `SceneIR`** (`crates/alkalive-compiler/src/ir.rs`). The compiler emits JSON-shaped data, not bytecode.
+3. The **WASM** in the system is the pre-built runtime cdylib (`crates/alkalive-runtime-wasm`), compiled from Rust by `cargo build --target wasm32-unknown-unknown`. The `.alk` source is **embedded into the WASM binary at build time** via `include_str!("../../../examples/hello.alk")` (`crates/alkalive-runtime-wasm/src/lib.rs:52`) and **compiled to a `SceneIR` at startup** inside the WASM runtime. The user's `.alk` source is data, not a WASM-compilation unit.
+
+Concretely, relative to this ADR's stated decision:
+
+| ADR-008 claim | Wave 0 audit finding |
+|---------------|----------------------|
+| "statically-typed" | **0% implemented.** No type system is exercised by the production `.alk` pipeline (see [ADR 009](#adr-009-two-level-type-verification)'s Implementation Status). |
+| "object oriented" | **0% implemented.** No classes, methods, or inheritance exist in the `.alk` grammar. |
+| "first-class UI modules" | **~5% implemented.** `module` is a single named wrapper around one `scene`; there is no module system beyond that. |
+| "compiling to WASM" | **0% implemented by the compiler.** The compiler emits a JSON `SceneIR`. The only WASM in the system is the runtime cdylib built from Rust by `cargo`. |
+| Functions, variables, control flow, expressions | **0% implemented.** No `fn`, `let`, `if`, `while`, `return`, or operator grammar in the `.alk` language. |
+
+**This ADR describes the aspirational target, not the current implementation.** The Wave 0 audit deliberately records the gap rather than redefining the ADR, because the ADR's rationale (P4.1, P4.2, P4.4) remains the long-term motivation. Future waves may close the gap; until then, no claim of "statically-typed", "object-oriented", or "compiling to WASM" should be made about the running system.
+
+**The scene-description DSL is a legitimate interim architecture**, not a defect. It is comparable to how SwiftUI's declarative views are compiled into Swift, or how JSX is compiled into JavaScript at build time: a small declarative surface lowered to a runtime-consumable IR. The Wave 0 audit (§3.1, §10.2) classified the demo as **fully genuine** under this architecture — every pixel is drawn by the real WebGL2 backend from a `SceneIR` produced by the real AlkALive compiler.
+
+**Cross-references.**
+- [Wave 0 audit](../alkalive-wave-00-audit.md) §4 (Compiler Analysis) and §10.2 (Why the compiler doesn't generate WASM) — primary evidence.
+- [Wave 4 reconciliation](../alkalive-wave-04-adr-reconciliation.md) — this amendment.
+- [ADR 009](#adr-009-two-level-type-verification) — amended in parallel; "two-level type verification" is likewise 0% implemented.
+
 ---
 
 ## ADR 009: Two-Level Type Verification
@@ -330,6 +361,33 @@ compiler entry point `compile_typecheck(src)` in
 - [ADR 027](ADR_027_monotonicity_types_phased.md) — full phased design; Phase 2 implemented.
 - [ADR 008](#adr-008-statically-typed-moduleoo-language-compiling-to-wasm) — amended in parallel to formally include `monotone`/`antitone` as type qualifiers in the language design.
 - [ADR 025](ADR_025_incremental_computation.md) — runtime consumes IR `Monotonicity` metadata for seminaïve evaluation (optimisation, not verification).
+
+### Implementation Status (Wave 4 Audit)
+
+*Added by [Wave 4 — ADR Reconciliation](../alkalive-wave-04-adr-reconciliation.md), based on the [Wave 0 audit](../alkalive-wave-00-audit.md) §4.3 and §8. This subsection supersedes any conflicting "implemented" claim elsewhere in this ADR with respect to the production `.alk` pipeline.*
+
+This ADR specifies a **two-level** guarantee: (a) the compiler proves source-level soundness, and (b) WASM verifies compiled well-formedness. **Neither level is implemented in the production `.alk` pipeline.**
+
+| Level | ADR-009 claim | Wave 0 audit finding |
+|-------|---------------|----------------------|
+| (a) Source-level soundness | "the compiler proves source-level soundness" | **0% implemented.** No type checker is exercised by the production `.alk` pipeline. The `.alk` grammar (audit §4.2) has no `fn`, `let`, `if`, `while`, `return`, or operator constructs, so there is nothing to type-check at the source level. |
+| (b) WASM well-formedness | "WASM verifies compiled well-formedness" | **N/A.** The AlkALive compiler does not generate WASM. The compiler emits a JSON `SceneIR`. The only WASM in the system is the pre-built runtime cdylib, compiled from Rust by `cargo` (see [ADR 008](#adr-008-statically-typed-moduleoo-language-compiling-to-wasm)'s Implementation Status). WASM validation applies to that runtime, not to user `.alk` source. |
+| (Monotonicity enforcement, per ADR-027 Phase 2) | "implemented" | See the ADR-027 amendment above. The Wave 0 audit evaluated the production pipeline and did not identify any type system in the `.alk` flow. |
+
+**What the compiler actually performs is value-level validation**, not type verification. The `lower(&ModuleDecl) -> Result<SceneIR, CodegenError>` pass in `crates/alkalive-compiler/src/codegen.rs` checks:
+
+- `font-size` is positive (> 0);
+- `rotation` values are finite floats;
+- a `position: below text` reference requires a preceding `Text` node in the same scene.
+
+These are runtime-value sanity checks on the AST, not type-system proofs. They are emitted as `CodegenError` variants, not as `CompileError::Type(TypeErrorSet)`. There is no source-level soundness guarantee of the kind ADR-009 promises.
+
+**This ADR describes the aspirational target, not the current implementation.** Future waves may introduce a real type system (e.g., via the ADR-027 Phase 2 type-checker pass being wired into the production pipeline); until then, no claim of "two-level type verification" or "source-level soundness" should be made about the running system.
+
+**Cross-references.**
+- [Wave 0 audit](../alkalive-wave-00-audit.md) §4.3 (What the compiler does NOT have) and §8 (Gap Analysis) — primary evidence.
+- [Wave 4 reconciliation](../alkalive-wave-04-adr-reconciliation.md) — this amendment.
+- [ADR 008](#adr-008-statically-typed-moduleoo-language-compiling-to-wasm) — amended in parallel; the statically-typed language it presupposes is likewise 0% implemented.
 
 ---
 
