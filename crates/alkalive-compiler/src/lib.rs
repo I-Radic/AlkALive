@@ -101,6 +101,7 @@ pub mod parser;
 pub mod schedule;
 pub mod seminative;
 pub mod typechecker;
+pub mod wasm_codegen;
 
 // Re-export the primary public surface at the crate root for convenience.
 pub use ast::{
@@ -133,6 +134,10 @@ pub use seminative::{
 pub use typechecker::{
     check_module, effective_qualifier, param_qualifier, qualifier_is_subtype, type_is_subtype,
     TypeEnv, TypeError, TypeErrorSet,
+};
+pub use wasm_codegen::{
+    alk_full_type_to_wasm, alk_type_to_wasm, compile_src_to_wasm, compile_to_wasm,
+    WasmCodegenError, WasmModule,
 };
 
 /// Re-export of [`alkalive_core::ModuleId`] so downstream consumers can
