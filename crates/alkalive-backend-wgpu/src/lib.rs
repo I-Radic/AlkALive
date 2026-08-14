@@ -981,10 +981,10 @@ mod wasm {
                     }
                     PassKind::TitleText => {
                         // Draw title text WITH rotation (golden color).
-                        // `pass.rotation` is the schedule's authority on
-                        // whether rotation applies — but the rotation amount
-                        // is still derived from `text_scene.rotation_speed`
-                        // and `time`.
+                        // Re-bind the text shader program (the rect passes
+                        // above may have left the rect shader bound).
+                        self.gl.use_program(Some(&self.program));
+                        self.gl.bind_vertex_array(Some(&self.vao));
                         if self.title_vertex_count > 0 {
                             let rotation = if pass.rotation {
                                 text_scene.rotation_speed * time
@@ -1008,6 +1008,9 @@ mod wasm {
                     }
                     PassKind::InputText => {
                         // Draw input field text WITHOUT rotation.
+                        // Re-bind the text shader program (defensive).
+                        self.gl.use_program(Some(&self.program));
+                        self.gl.bind_vertex_array(Some(&self.vao));
                         if self.input_vertex_count > 0 {
                             self.gl.uniform1f(Some(&self.u_rotation), 0.0);
                             if text_scene.input_text.is_empty() {
