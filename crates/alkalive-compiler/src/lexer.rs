@@ -90,6 +90,12 @@ pub enum TokenKind {
     False,
     /// `return` — return statement.
     Return,
+    /// `if` — conditional statement.
+    If,
+    /// `else` — conditional else clause.
+    Else,
+    /// `while` — loop statement.
+    While,
 
     // ---- Literals ----
     /// An identifier that is not a reserved keyword. The text lives in
@@ -205,6 +211,9 @@ impl fmt::Display for TokenKind {
             TokenKind::True => write!(f, "keyword `true`"),
             TokenKind::False => write!(f, "keyword `false`"),
             TokenKind::Return => write!(f, "keyword `return`"),
+            TokenKind::If => write!(f, "keyword `if`"),
+            TokenKind::Else => write!(f, "keyword `else`"),
+            TokenKind::While => write!(f, "keyword `while`"),
             TokenKind::Ident => write!(f, "identifier"),
             TokenKind::String => write!(f, "string literal"),
             TokenKind::Number => write!(f, "number"),
@@ -364,6 +373,9 @@ fn classify_keyword(text: &str) -> Option<TokenKind> {
         "true" => TokenKind::True,
         "false" => TokenKind::False,
         "return" => TokenKind::Return,
+        "if" => TokenKind::If,
+        "else" => TokenKind::Else,
+        "while" => TokenKind::While,
         _ => return None,
     })
 }

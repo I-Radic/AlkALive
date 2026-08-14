@@ -210,6 +210,30 @@ pub enum Stmt {
     Expr(Expr),
     /// `return expr;` or `return;`.
     Return(Option<Expr>, u32, u32),
+    /// `if (cond) { block } else { block }` — the else block is optional.
+    If {
+        /// The condition expression.
+        cond: Expr,
+        /// The then-block.
+        then_block: Block,
+        /// The optional else-block.
+        else_block: Option<Block>,
+        /// 1-based line of the `if` keyword.
+        line: u32,
+        /// 1-based column of the `if` keyword.
+        col: u32,
+    },
+    /// `while (cond) { block }`
+    While {
+        /// The condition expression.
+        cond: Expr,
+        /// The loop body.
+        body: Block,
+        /// 1-based line of the `while` keyword.
+        line: u32,
+        /// 1-based column of the `while` keyword.
+        col: u32,
+    },
 }
 
 /// A binary operator.

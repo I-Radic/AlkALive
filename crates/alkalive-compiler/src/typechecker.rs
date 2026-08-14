@@ -311,6 +311,32 @@ fn check_block(
                     }
                 }
             }
+            Stmt::If {
+                cond,
+                then_block,
+                else_block,
+                line: _,
+                col: _,
+            } => {
+                // Check the condition — should be bool.
+                check_expr(cond, env, errors);
+                // Check both blocks.
+                check_block(then_block, env, return_type, errors);
+                if let Some(else_b) = else_block {
+                    check_block(else_b, env, return_type, errors);
+                }
+            }
+            Stmt::While {
+                cond,
+                body,
+                line: _,
+                col: _,
+            } => {
+                // Check the condition — should be bool.
+                check_expr(cond, env, errors);
+                // Check the loop body.
+                check_block(body, env, return_type, errors);
+            }
         }
     }
 }

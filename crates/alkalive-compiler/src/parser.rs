@@ -418,6 +418,50 @@ impl Parser {
                 self.expect(TokenKind::Semi)?;
                 Ok(Stmt::Return(Some(e), kw.line, kw.col))
             }
+            TokenKind::If => {
+                let kw = self.advance().clone();
+                self.skip_newlines();
+                self.expect(TokenKind::LParen)?;
+                self.skip_newlines();
+                let cond = self.parse_expr()?;
+                self.skip_newlines();
+                self.expect(TokenKind::RParen)?;
+                self.skip_newlines();
+                let then_block = self.parse_block()?;
+                self.skip_newlines();
+                // Optional else clause.
+                let else_block = if matches!(self.peek().kind, TokenKind::Else) {
+                    self.advance();
+                    self.skip_newlines();
+                    Some(self.parse_block()?)
+                } else {
+                    None
+                };
+                Ok(Stmt::If {
+                    cond,
+                    then_block,
+                    else_block,
+                    line: kw.line,
+                    col: kw.col,
+                })
+            }
+            TokenKind::While => {
+                let kw = self.advance().clone();
+                self.skip_newlines();
+                self.expect(TokenKind::LParen)?;
+                self.skip_newlines();
+                let cond = self.parse_expr()?;
+                self.skip_newlines();
+                self.expect(TokenKind::RParen)?;
+                self.skip_newlines();
+                let body = self.parse_block()?;
+                Ok(Stmt::While {
+                    cond,
+                    body,
+                    line: kw.line,
+                    col: kw.col,
+                })
+            }
             _ => {
                 let e = self.parse_expr()?;
                 self.expect(TokenKind::Semi)?;
