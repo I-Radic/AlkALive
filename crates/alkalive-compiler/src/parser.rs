@@ -13,7 +13,7 @@
 use core::fmt;
 
 use crate::ast::{
-    Attribute, BaseType, Block, Color, Expr, FnDecl, InputFieldNode, ItemDecl, LetDecl, Lit,
+    Attribute, BaseType, BinOp, Block, Color, Expr, FnDecl, InputFieldNode, ItemDecl, LetDecl, Lit,
     ModuleDecl, NodeDecl, Param, PositionDecl, Qualifier, RotationDecl, SceneDecl, Stmt, TextNode,
     Type,
 };
@@ -427,7 +427,61 @@ impl Parser {
     }
 
     /// Parse an expression: literal, variable, method call, or path call.
+    /// Parse an expression with binary operator precedence (Pratt parsing).
     fn parse_expr(&mut self) -> Result<Expr, ParseError> {
+        self.parse_binary_expr(1) // min precedence 1 = all operators
+    }
+
+    /// Parse a binary expression with minimum precedence `min_prec`.
+    /// Uses Pratt parsing: parse a primary, then while the next token is a
+    /// binary operator with precedence >= min_prec, parse the RHS at the
+    /// operator's precedence level.
+    fn parse_binary_expr(&mut self, min_prec: u8) -> Result<Expr, ParseError> {
+        let mut lhs = self.parse_primary()?;
+
+        loop {
+            // Check if the next token is a binary operator.
+            let op = match self.peek().kind {
+                TokenKind::Plus => BinOp::Add,
+                TokenKind::Minus => BinOp::Sub,
+                TokenKind::Star => BinOp::Mul,
+                TokenKind::Slash => BinOp::Div,
+                TokenKind::Percent => BinOp::Mod,
+                TokenKind::EqEq => BinOp::Eq,
+                TokenKind::BangEq => BinOp::Ne,
+                TokenKind::Lt => BinOp::Lt,
+                TokenKind::LtEq => BinOp::Le,
+                TokenKind::Gt => BinOp::Gt,
+                TokenKind::GtEq => BinOp::Ge,
+                TokenKind::AndAnd => BinOp::And,
+                TokenKind::OrOr => BinOp::Or,
+                _ => break, // Not a binary operator
+            };
+
+            let prec = op.precedence();
+            if prec < min_prec {
+                break;
+            }
+
+            let op_tok = self.advance().clone();
+            // Right-associative operators would use `prec - 1`; all our
+            // operators are left-associative, so we use `prec + 1`.
+            let rhs = self.parse_binary_expr(prec + 1)?;
+            lhs = Expr::Binary {
+                lhs: Box::new(lhs),
+                op,
+                rhs: Box::new(rhs),
+                line: op_tok.line,
+                col: op_tok.col,
+            };
+        }
+
+        Ok(lhs)
+    }
+
+    /// Parse a primary expression (literal, variable, call, path call) followed
+    /// by postfix `.method(args)` chains.
+    fn parse_primary(&mut self) -> Result<Expr, ParseError> {
         let tok = self.peek().clone();
         let mut expr = match tok.kind {
             TokenKind::Number => {
@@ -453,8 +507,18 @@ impl Parser {
                 self.advance();
                 Expr::Lit(Lit::Bool(false), tok.line, tok.col)
             }
+            TokenKind::LParen => {
+                // Parenthesized expression: `( expr )`
+                self.advance();
+                self.skip_newlines();
+                let inner = self.parse_expr()?;
+                self.skip_newlines();
+                self.expect(TokenKind::RParen)?;
+                inner
+            }
             TokenKind::Ident | TokenKind::Vec => {
-                // Could be `Vec::member(...)` (path call) or a plain variable.
+                // Could be `Vec::member(...)` (path call), `foo(args)` (call),
+                // or a plain variable.
                 if matches!(self.peek_at(1).kind, TokenKind::ColonColon) {
                     let module = tok.value.clone();
                     self.advance(); // ident/Vec
@@ -465,6 +529,19 @@ impl Parser {
                     self.skip_newlines();
                     let args = self.parse_arg_list()?;
                     Expr::PathCall(module, member, args, tok.line, tok.col)
+                } else if matches!(self.peek_at(1).kind, TokenKind::LParen) {
+                    // Function call: `ident(args)`
+                    let name = tok.value.clone();
+                    self.advance(); // ident
+                    self.expect(TokenKind::LParen)?;
+                    self.skip_newlines();
+                    let args = self.parse_arg_list()?;
+                    Expr::Call {
+                        callee: name,
+                        args,
+                        line: tok.line,
+                        col: tok.col,
+                    }
                 } else {
                     self.advance();
                     Expr::Var(tok.value.clone(), tok.line, tok.col)

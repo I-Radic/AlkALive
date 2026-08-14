@@ -41,7 +41,7 @@
 use core::fmt;
 
 use crate::ast::{
-    BaseType, Block, Expr, FnDecl, ItemDecl, Lit, ModuleDecl, Param, Stmt, Type,
+    BaseType, BinOp, Block, Expr, FnDecl, ItemDecl, Lit, ModuleDecl, Param, Stmt, Type,
 };
 use crate::typechecker;
 
@@ -165,7 +165,7 @@ impl TypeSectionBuilder {
 /// A compiled instruction sequence — we use our own enum to avoid
 /// `Instruction` not implementing `PartialEq` (needed for the `ends_with`
 /// check in the codegen).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 enum AlkInstr {
     I32Const(i32),
     F32Const(f32),
@@ -173,6 +173,10 @@ enum AlkInstr {
     LocalSet(u32),
     Drop,
     Return,
+    /// A binary operation on the stack.
+    BinaryOp(BinOp),
+    /// A function call by name (resolved to a function index during emission).
+    Call(String),
     // End is not currently emitted by the compiler (wasm-encoder adds it
     // automatically), but is part of the instruction model for completeness.
     #[allow(dead_code)]
@@ -307,8 +311,33 @@ impl FnCompiler {
                 if method == "len" || method == "is_empty" || method == "get" {
                     instrs.push(AlkInstr::I32Const(0));
                 }
-                // Mutators: the receiver + args are left on the stack;
-                // the caller will drop them if needed.
+            }
+            Expr::Binary {
+                lhs,
+                op,
+                rhs,
+                line: _,
+                col: _,
+            } => {
+                // Compile LHS and RHS (leaves both on the stack).
+                self.compile_expr(lhs, instrs);
+                self.compile_expr(rhs, instrs);
+                // Emit the binary operator instruction.
+                instrs.push(AlkInstr::BinaryOp(*op));
+            }
+            Expr::Call {
+                callee,
+                args,
+                line: _,
+                col: _,
+            } => {
+                // Compile arguments (left to right).
+                for a in args {
+                    self.compile_expr(a, instrs);
+                }
+                // Emit a call instruction. The function index will be
+                // resolved by the codegen pass that knows the function table.
+                instrs.push(AlkInstr::Call(callee.clone()));
             }
         }
     }
@@ -319,7 +348,9 @@ fn expr_produces_value(expr: &Expr) -> bool {
     match expr {
         Expr::Lit(_, _, _) => true,
         Expr::Var(_, _, _) => true,
+        Expr::Binary { .. } => true,
         Expr::PathCall(_, _, _, _, _) => true,
+        Expr::Call { .. } => true,
         Expr::MethodCall { method, .. } => {
             method == "len" || method == "is_empty" || method == "get"
         }
@@ -480,6 +511,32 @@ pub fn compile_to_wasm(module: &ModuleDecl) -> Result<WasmModule, WasmCodegenErr
                 AlkInstr::Drop => Instruction::Drop,
                 AlkInstr::Return => Instruction::Return,
                 AlkInstr::End => Instruction::End,
+                AlkInstr::BinaryOp(op) => {
+                    // Emit the WASM instruction for this binary operator.
+                    // All operands are on the stack (LHS then RHS).
+                    match op {
+                        BinOp::Add => Instruction::I32Add,
+                        BinOp::Sub => Instruction::I32Sub,
+                        BinOp::Mul => Instruction::I32Mul,
+                        BinOp::Div => Instruction::I32DivS,
+                        BinOp::Mod => Instruction::I32RemS,
+                        BinOp::Eq => Instruction::I32Eq,
+                        BinOp::Ne => Instruction::I32Ne,
+                        BinOp::Lt => Instruction::I32LtS,
+                        BinOp::Le => Instruction::I32LeS,
+                        BinOp::Gt => Instruction::I32GtS,
+                        BinOp::Ge => Instruction::I32GeS,
+                        BinOp::And => Instruction::I32And,
+                        BinOp::Or => Instruction::I32Or,
+                    }
+                }
+                AlkInstr::Call(name) => {
+                    // Resolve the function name to its index in the export
+                    // table. Functions are exported in declaration order.
+                    let func_idx =
+                        fn_metas.iter().position(|m| m.name == *name).unwrap_or(0) as u32;
+                    Instruction::Call(func_idx)
+                }
             };
             func.instruction(&wasm_instr);
         }
@@ -748,5 +805,188 @@ mod tests {
         }
         assert!(found_func, "binary must have a function section");
         assert!(found_memory, "binary must have a memory section");
+    }
+}
+
+#[cfg(test)]
+mod binary_op_tests {
+    use super::*;
+    use crate::ast::Qualifier;
+
+    const SCENE: &str = "scene { background: #000000 }";
+
+    fn parse_module(src: &str) -> ModuleDecl {
+        crate::parse(src).expect("parse should succeed")
+    }
+
+    #[test]
+    fn wasm_compile_addition() {
+        let src = format!(
+            "module M {{ {} fn add() -> i32 {{ return 1 + 2; }} }}",
+            SCENE
+        );
+        let m = parse_module(&src);
+        let wasm = compile_to_wasm(&m).expect("wasm compile");
+        assert!(wasm.is_valid_wasm());
+    }
+
+    #[test]
+    fn wasm_compile_subtraction() {
+        let src = format!(
+            "module M {{ {} fn sub() -> i32 {{ return 10 - 3; }} }}",
+            SCENE
+        );
+        let m = parse_module(&src);
+        let wasm = compile_to_wasm(&m).expect("wasm compile");
+        assert!(wasm.is_valid_wasm());
+    }
+
+    #[test]
+    fn wasm_compile_multiplication() {
+        let src = format!(
+            "module M {{ {} fn mul() -> i32 {{ return 4 * 5; }} }}",
+            SCENE
+        );
+        let m = parse_module(&src);
+        let wasm = compile_to_wasm(&m).expect("wasm compile");
+        assert!(wasm.is_valid_wasm());
+    }
+
+    #[test]
+    fn wasm_compile_division() {
+        let src = format!(
+            "module M {{ {} fn div() -> i32 {{ return 20 / 4; }} }}",
+            SCENE
+        );
+        let m = parse_module(&src);
+        let wasm = compile_to_wasm(&m).expect("wasm compile");
+        assert!(wasm.is_valid_wasm());
+    }
+
+    #[test]
+    fn wasm_compile_chained_arithmetic() {
+        // 1 + 2 * 3 (with precedence: 1 + (2*3) = 7)
+        let src = format!(
+            "module M {{ {} fn calc() -> i32 {{ return 1 + 2 * 3; }} }}",
+            SCENE
+        );
+        let m = parse_module(&src);
+        let wasm = compile_to_wasm(&m).expect("wasm compile");
+        assert!(wasm.is_valid_wasm());
+    }
+
+    #[test]
+    fn wasm_compile_parenthesized_expression() {
+        // (1 + 2) * 3 = 9
+        let src = format!(
+            "module M {{ {} fn calc() -> i32 {{ return (1 + 2) * 3; }} }}",
+            SCENE
+        );
+        let m = parse_module(&src);
+        let wasm = compile_to_wasm(&m).expect("wasm compile");
+        assert!(wasm.is_valid_wasm());
+    }
+
+    #[test]
+    fn wasm_compile_comparison() {
+        let src = format!(
+            "module M {{ {} fn cmp() -> bool {{ return 1 < 2; }} }}",
+            SCENE
+        );
+        let m = parse_module(&src);
+        let wasm = compile_to_wasm(&m).expect("wasm compile");
+        assert!(wasm.is_valid_wasm());
+    }
+
+    #[test]
+    fn wasm_compile_logical_and() {
+        let src = format!(
+            "module M {{ {} fn land() -> bool {{ return true && false; }} }}",
+            SCENE
+        );
+        let m = parse_module(&src);
+        let wasm = compile_to_wasm(&m).expect("wasm compile");
+        assert!(wasm.is_valid_wasm());
+    }
+
+    #[test]
+    fn wasm_compile_logical_or() {
+        let src = format!(
+            "module M {{ {} fn lor() -> bool {{ return true || false; }} }}",
+            SCENE
+        );
+        let m = parse_module(&src);
+        let wasm = compile_to_wasm(&m).expect("wasm compile");
+        assert!(wasm.is_valid_wasm());
+    }
+
+    #[test]
+    fn wasm_compile_variable_arithmetic() {
+        let src = format!(
+            "module M {{ {} fn f() -> i32 {{ let x: i32 = 5; let y: i32 = 3; return x + y; }} }}",
+            SCENE
+        );
+        let m = parse_module(&src);
+        let wasm = compile_to_wasm(&m).expect("wasm compile");
+        assert!(wasm.is_valid_wasm());
+    }
+
+    #[test]
+    fn wasm_compile_function_call() {
+        let src = format!(
+            "module M {{ {} fn helper() -> i32 {{ return 42; }} fn caller() -> i32 {{ return helper(); }} }}",
+            SCENE
+        );
+        let m = parse_module(&src);
+        let wasm = compile_to_wasm(&m).expect("wasm compile");
+        assert!(wasm.is_valid_wasm());
+        assert_eq!(wasm.exported_functions.len(), 2);
+    }
+
+    #[test]
+    fn wasm_compile_function_call_with_args() {
+        let src = format!(
+            "module M {{ {} fn double(x: i32) -> i32 {{ return x; }} fn main() -> i32 {{ return double(21); }} }}",
+            SCENE
+        );
+        let m = parse_module(&src);
+        let wasm = compile_to_wasm(&m).expect("wasm compile");
+        assert!(wasm.is_valid_wasm());
+    }
+
+    #[test]
+    fn wasm_binary_with_wasmparser_validation() {
+        // The generated binary with binary operators must be valid WASM.
+        let src = format!(
+            "module M {{ {} fn f() -> i32 {{ return 1 + 2 * 3 - 4 / 2; }} }}",
+            SCENE
+        );
+        let m = parse_module(&src);
+        let wasm = compile_to_wasm(&m).expect("wasm compile");
+        assert!(wasm.is_valid_wasm());
+
+        // Validate with wasmparser.
+        use wasmparser::Parser;
+        let parser = Parser::new(0);
+        for payload in parser.parse_all(&wasm.bytes) {
+            payload.expect("wasmparser should parse the binary");
+        }
+    }
+
+    #[test]
+    fn wasm_function_call_with_wasmparser_validation() {
+        let src = format!(
+            "module M {{ {} fn a() -> i32 {{ return 1; }} fn b() -> i32 {{ return a(); }} }}",
+            SCENE
+        );
+        let m = parse_module(&src);
+        let wasm = compile_to_wasm(&m).expect("wasm compile");
+        assert!(wasm.is_valid_wasm());
+
+        use wasmparser::Parser;
+        let parser = Parser::new(0);
+        for payload in parser.parse_all(&wasm.bytes) {
+            payload.expect("wasmparser should parse the binary");
+        }
     }
 }

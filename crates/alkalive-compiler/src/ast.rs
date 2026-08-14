@@ -212,6 +212,88 @@ pub enum Stmt {
     Return(Option<Expr>, u32, u32),
 }
 
+/// A binary operator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BinOp {
+    /// `+`
+    Add,
+    /// `-`
+    Sub,
+    /// `*`
+    Mul,
+    /// `/`
+    Div,
+    /// `%`
+    Mod,
+    /// `==`
+    Eq,
+    /// `!=`
+    Ne,
+    /// `<`
+    Lt,
+    /// `<=`
+    Le,
+    /// `>`
+    Gt,
+    /// `>=`
+    Ge,
+    /// `&&`
+    And,
+    /// `||`
+    Or,
+}
+
+impl fmt::Display for BinOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BinOp::Add => write!(f, "+"),
+            BinOp::Sub => write!(f, "-"),
+            BinOp::Mul => write!(f, "*"),
+            BinOp::Div => write!(f, "/"),
+            BinOp::Mod => write!(f, "%"),
+            BinOp::Eq => write!(f, "=="),
+            BinOp::Ne => write!(f, "!="),
+            BinOp::Lt => write!(f, "<"),
+            BinOp::Le => write!(f, "<="),
+            BinOp::Gt => write!(f, ">"),
+            BinOp::Ge => write!(f, ">="),
+            BinOp::And => write!(f, "&&"),
+            BinOp::Or => write!(f, "||"),
+        }
+    }
+}
+
+impl BinOp {
+    /// Returns the precedence level (higher = binds tighter).
+    /// 1: `||`
+    /// 2: `&&`
+    /// 3: `==` `!=` `<` `<=` `>` `>=`
+    /// 4: `+` `-`
+    /// 5: `*` `/` `%`
+    pub fn precedence(&self) -> u8 {
+        match self {
+            BinOp::Or => 1,
+            BinOp::And => 2,
+            BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => 3,
+            BinOp::Add | BinOp::Sub => 4,
+            BinOp::Mul | BinOp::Div | BinOp::Mod => 5,
+        }
+    }
+
+    /// Returns `true` if this is a comparison operator (==, !=, <, <=, >, >=).
+    pub fn is_comparison(&self) -> bool {
+        matches!(
+            self,
+            BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
+        )
+    }
+
+    /// Returns `true` if this is a logical operator (&&, ||).
+    pub fn is_logical(&self) -> bool {
+        matches!(self, BinOp::And | BinOp::Or)
+    }
+}
+
 /// An expression.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
@@ -219,6 +301,19 @@ pub enum Expr {
     Lit(Lit, u32, u32),
     /// A variable reference.
     Var(String, u32, u32),
+    /// A binary operation: `lhs op rhs`.
+    Binary {
+        /// Left-hand side.
+        lhs: Box<Expr>,
+        /// The operator.
+        op: BinOp,
+        /// Right-hand side.
+        rhs: Box<Expr>,
+        /// 1-based line of the operator.
+        line: u32,
+        /// 1-based column of the operator.
+        col: u32,
+    },
     /// A path-qualified call like `Vec::new()`.
     ///
     /// Stored as `(module, member, args, line, col)`.
@@ -234,6 +329,17 @@ pub enum Expr {
         /// 1-based line of the method name.
         line: u32,
         /// 1-based column of the method name.
+        col: u32,
+    },
+    /// A function call `name(args)`.
+    Call {
+        /// The function name.
+        callee: String,
+        /// Argument expressions.
+        args: Vec<Expr>,
+        /// 1-based line of the callee.
+        line: u32,
+        /// 1-based column of the callee.
         col: u32,
     },
 }

@@ -105,7 +105,7 @@ pub mod wasm_codegen;
 
 // Re-export the primary public surface at the crate root for convenience.
 pub use ast::{
-    Attribute, BaseType, Block, Color, Expr, FnDecl, InputFieldNode, ItemDecl, LetDecl, Lit,
+    Attribute, BaseType, BinOp, Block, Color, Expr, FnDecl, InputFieldNode, ItemDecl, LetDecl, Lit,
     ModuleDecl, NodeDecl, Param, PositionDecl, Qualifier, RotationDecl, SceneDecl, Stmt, TextNode,
     Type,
 };

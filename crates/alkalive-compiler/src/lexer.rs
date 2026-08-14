@@ -147,6 +147,29 @@ pub enum TokenKind {
     ColonColon,
     /// `!` — used inside shebang attribute payloads.
     Bang,
+    /// `+` (binary addition operator).
+    Plus,
+    /// `-` (binary subtraction operator; note: `-` as negative-sign is
+    /// already handled by the number lexer).
+    Minus,
+    /// `*` (binary multiplication operator).
+    Star,
+    /// `/` (binary division operator; note: `//` is a line comment).
+    Slash,
+    /// `%` (binary modulo operator).
+    Percent,
+    /// `==` (equality comparison).
+    EqEq,
+    /// `!=` (inequality comparison).
+    BangEq,
+    /// `<=` (less-than-or-equal).
+    LtEq,
+    /// `>=` (greater-than-or-equal).
+    GtEq,
+    /// `&&` (logical AND).
+    AndAnd,
+    /// `||` (logical OR).
+    OrOr,
 
     // ---- Structural ----
     /// A newline (`\n`). Emitted so the parser may use it as a soft
@@ -204,6 +227,17 @@ impl fmt::Display for TokenKind {
             TokenKind::Arrow => write!(f, "`->`"),
             TokenKind::ColonColon => write!(f, "`::`"),
             TokenKind::Bang => write!(f, "`!`"),
+            TokenKind::Plus => write!(f, "`+`"),
+            TokenKind::Minus => write!(f, "`-`"),
+            TokenKind::Star => write!(f, "`*`"),
+            TokenKind::Slash => write!(f, "`/`"),
+            TokenKind::Percent => write!(f, "`%`"),
+            TokenKind::EqEq => write!(f, "`==`"),
+            TokenKind::BangEq => write!(f, "`!=`"),
+            TokenKind::LtEq => write!(f, "`<=`"),
+            TokenKind::GtEq => write!(f, "`>=`"),
+            TokenKind::AndAnd => write!(f, "`&&`"),
+            TokenKind::OrOr => write!(f, "`||`"),
             TokenKind::Newline => write!(f, "newline"),
             TokenKind::Eof => write!(f, "end of input"),
         }
@@ -263,6 +297,17 @@ impl Token {
                 | TokenKind::Arrow
                 | TokenKind::ColonColon
                 | TokenKind::Bang
+                | TokenKind::Plus
+                | TokenKind::Minus
+                | TokenKind::Star
+                | TokenKind::Slash
+                | TokenKind::Percent
+                | TokenKind::EqEq
+                | TokenKind::BangEq
+                | TokenKind::LtEq
+                | TokenKind::GtEq
+                | TokenKind::AndAnd
+                | TokenKind::OrOr
                 | TokenKind::Newline
                 | TokenKind::Eof
         )
@@ -441,28 +486,95 @@ impl<'src> Lexer<'src> {
             }
             b'=' => {
                 self.advance_byte();
-                Ok(Token::new(TokenKind::Eq, "=", line, col))
+                if self.pos < self.bytes.len() && self.bytes[self.pos] == b'=' {
+                    self.advance_byte();
+                    Ok(Token::new(TokenKind::EqEq, "==", line, col))
+                } else {
+                    Ok(Token::new(TokenKind::Eq, "=", line, col))
+                }
             }
             b'<' => {
                 self.advance_byte();
-                Ok(Token::new(TokenKind::Lt, "<", line, col))
+                if self.pos < self.bytes.len() && self.bytes[self.pos] == b'=' {
+                    self.advance_byte();
+                    Ok(Token::new(TokenKind::LtEq, "<=", line, col))
+                } else {
+                    Ok(Token::new(TokenKind::Lt, "<", line, col))
+                }
             }
             b'>' => {
                 self.advance_byte();
-                Ok(Token::new(TokenKind::Gt, ">", line, col))
+                if self.pos < self.bytes.len() && self.bytes[self.pos] == b'=' {
+                    self.advance_byte();
+                    Ok(Token::new(TokenKind::GtEq, ">=", line, col))
+                } else {
+                    Ok(Token::new(TokenKind::Gt, ">", line, col))
+                }
             }
             b'!' => {
                 self.advance_byte();
-                Ok(Token::new(TokenKind::Bang, "!", line, col))
+                if self.pos < self.bytes.len() && self.bytes[self.pos] == b'=' {
+                    self.advance_byte();
+                    Ok(Token::new(TokenKind::BangEq, "!=", line, col))
+                } else {
+                    Ok(Token::new(TokenKind::Bang, "!", line, col))
+                }
+            }
+            b'+' => {
+                self.advance_byte();
+                Ok(Token::new(TokenKind::Plus, "+", line, col))
+            }
+            b'*' => {
+                self.advance_byte();
+                Ok(Token::new(TokenKind::Star, "*", line, col))
+            }
+            b'%' => {
+                self.advance_byte();
+                Ok(Token::new(TokenKind::Percent, "%", line, col))
+            }
+            b'&' => {
+                if self.bytes.get(self.pos + 1) == Some(&b'&') {
+                    self.advance_byte();
+                    self.advance_byte();
+                    Ok(Token::new(TokenKind::AndAnd, "&&", line, col))
+                } else {
+                    Err(LexError {
+                        message: "unexpected `&` (did you mean `&&`?)".into(),
+                        line,
+                        col,
+                    })
+                }
+            }
+            b'|' => {
+                if self.bytes.get(self.pos + 1) == Some(&b'|') {
+                    self.advance_byte();
+                    self.advance_byte();
+                    Ok(Token::new(TokenKind::OrOr, "||", line, col))
+                } else {
+                    Err(LexError {
+                        message: "unexpected `|` (did you mean `||`?)".into(),
+                        line,
+                        col,
+                    })
+                }
             }
             b'-' => {
-                // `->` vs numeric `-N`
-                if self.bytes.get(self.pos + 1) == Some(&b'>') {
-                    self.advance_byte();
-                    self.advance_byte();
-                    Ok(Token::new(TokenKind::Arrow, "->", line, col))
-                } else {
-                    self.lex_number(line, col)
+                // `->` (arrow) vs `-N` (negative number) vs `-` (binary minus)
+                match self.bytes.get(self.pos + 1) {
+                    Some(&b'>') => {
+                        self.advance_byte();
+                        self.advance_byte();
+                        Ok(Token::new(TokenKind::Arrow, "->", line, col))
+                    }
+                    Some(c) if c.is_ascii_digit() => {
+                        // Negative number: `-N` or `-N.N`
+                        self.lex_number(line, col)
+                    }
+                    _ => {
+                        // Binary minus operator
+                        self.advance_byte();
+                        Ok(Token::new(TokenKind::Minus, "-", line, col))
+                    }
                 }
             }
             b'@' => {
@@ -497,7 +609,13 @@ impl<'src> Lexer<'src> {
                 }
             }
             b'"' => self.lex_string(line, col),
-            b'0'..=b'9' | b'+' => self.lex_number(line, col),
+            b'/' => {
+                // Single `/` is division. (`//` comments are handled by the
+                // whitespace skipper before we reach here.)
+                self.advance_byte();
+                Ok(Token::new(TokenKind::Slash, "/", line, col))
+            }
+            b'0'..=b'9' => self.lex_number(line, col),
             b'a'..=b'z' | b'A'..=b'Z' | b'_' => self.lex_ident(line, col),
             other => Err(LexError {
                 message: format!("unexpected byte {:#?}", other as char),
@@ -781,11 +899,12 @@ mod tests {
 
     #[test]
     fn lex_trailing_hyphen_not_part_of_ident() {
-        // `gold-` should lex as `gold` then `-` is unexpected punctuation.
-        let result = tokenize("gold-");
-        assert!(result.is_err(), "expected lex error for trailing hyphen");
-        let err = result.unwrap_err();
-        assert!(err.message.contains("'-"), "got: {}", err.message);
+        // `gold-` should lex as `gold` then `Minus` (binary minus operator).
+        // (Previously `-` was an error, but Wave 7 added binary operators.)
+        let toks = tokenize("gold-").unwrap();
+        assert_eq!(toks[0].kind, TokenKind::Ident);
+        assert_eq!(toks[0].value, "gold");
+        assert_eq!(toks[1].kind, TokenKind::Minus);
     }
 
     #[test]

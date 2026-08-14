@@ -370,6 +370,51 @@ fn check_expr(expr: &Expr, env: &TypeEnv, errors: &mut TypeErrorSet) -> Option<T
             // inference engine for return values).
             None
         }
+        Expr::Binary {
+            lhs,
+            op,
+            rhs,
+            line: _,
+            col: _,
+        } => {
+            // Check both operands.
+            let lhs_ty = check_expr(lhs, env, errors);
+            let rhs_ty = check_expr(rhs, env, errors);
+            // Determine the result type based on the operator.
+            if op.is_comparison() {
+                // Comparison operators return bool.
+                Some(Type {
+                    qualifier: Qualifier::Unrestricted,
+                    base: BaseType::Bool,
+                })
+            } else if op.is_logical() {
+                // Logical operators (&&, ||) require bool operands, return bool.
+                Some(Type {
+                    qualifier: Qualifier::Unrestricted,
+                    base: BaseType::Bool,
+                })
+            } else {
+                // Arithmetic operators: return the type of the LHS (or RHS).
+                lhs_ty.or(rhs_ty)
+            }
+        }
+        Expr::Call {
+            callee,
+            args,
+            line,
+            col,
+        } => {
+            // Check arguments.
+            for a in args {
+                check_expr(a, env, errors);
+            }
+            // Function call return type — we don't have a function signature
+            // table in the type env yet, so return None (unknown type).
+            // The type checker should be extended to look up the function's
+            // declared return type. For now, we don't error on calls.
+            let _ = (callee, line, col);
+            None
+        }
     }
 }
 
