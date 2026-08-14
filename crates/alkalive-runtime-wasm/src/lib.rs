@@ -227,11 +227,19 @@ pub fn start(
     //    legacy full-rebuild path and the dependency graph is dormant.
     let is_small_scene = scheduled.algorithm.nodes.len() < SMALL_SCENE_THRESHOLD;
 
-    // 5. Read the canvas's display dimensions. The HTML shell sizes the
-    //    canvas via CSS (`width: 100vw; height: 100vh;`), so client_width
-    //    / client_height give us the desired drawing-buffer size.
-    let width = canvas.client_width().max(1) as u32;
-    let height = canvas.client_height().max(1) as u32;
+    // 5. Read the canvas's display dimensions and scale by devicePixelRatio
+    //    for crisp rendering on high-DPI displays (Retina, mobile). The HTML
+    //    shell sizes the canvas via CSS (`width: 100vw; height: 100vh;`), so
+    //    client_width/client_height give us the CSS pixel size; multiplying
+    //    by devicePixelRatio gives the physical pixel size for the drawing
+    //    buffer.
+    let dpr = web_sys::window()
+        .and_then(|w| Some(w.device_pixel_ratio()))
+        .unwrap_or(1.0) as f32;
+    let css_width = canvas.client_width().max(1) as f32;
+    let css_height = canvas.client_height().max(1) as f32;
+    let width = (css_width * dpr).max(1.0) as u32;
+    let height = (css_height * dpr).max(1.0) as u32;
 
     // 6. Kick off async GPU backend init. The WgpuRenderer::init_from_canvas
     //    future resolves once the WebGL2 context is acquired, shaders are
@@ -521,16 +529,20 @@ fn setup_resize_listener() -> Result<(), JsValue> {
         RUNTIME.with(|rt| {
             if let Some(runtime) = rt.borrow_mut().as_mut() {
                 if let Some(win) = web_sys::window() {
-                    let w = win
+                    // Scale by devicePixelRatio for crisp rendering on high-DPI.
+                    let dpr = win.device_pixel_ratio() as f32;
+                    let css_w = win
                         .inner_width()
                         .ok()
                         .and_then(|v| v.as_f64())
-                        .unwrap_or(800.0) as u32;
-                    let h = win
+                        .unwrap_or(800.0) as f32;
+                    let css_h = win
                         .inner_height()
                         .ok()
                         .and_then(|v| v.as_f64())
-                        .unwrap_or(600.0) as u32;
+                        .unwrap_or(600.0) as f32;
+                    let w = (css_w * dpr).max(1.0) as u32;
+                    let h = (css_h * dpr).max(1.0) as u32;
                     runtime.renderer.resize(w.max(1), h.max(1));
                     // ADR-025: bump the CANVAS_WIDTH / CANVAS_HEIGHT signals
                     // so the dependency graph marks *all* passes dirty (every
