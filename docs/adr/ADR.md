@@ -300,6 +300,47 @@ Concretely, relative to this ADR's stated decision:
 - [Wave 0 audit](../alkalive-wave-00-audit.md) §4 (Compiler Analysis) and §10.2 (Why the compiler doesn't generate WASM) — primary evidence.
 - [Wave 4 reconciliation](../alkalive-wave-04-adr-reconciliation.md) — this amendment.
 - [ADR 009](#adr-009-two-level-type-verification) — amended in parallel; "two-level type verification" is likewise 0% implemented.
+- [Wave 6 WASM codegen](../alkalive-wave-06-wasm-codegen.md) — **partially closes the "compiling to WASM" gap**: the compiler now emits real WASM binaries via `wasm-encoder`, validated by `wasmparser`.
+- [Wave 7 operators](../alkalive-wave-07-operators.md) — adds binary operators + function calls to the WASM backend.
+- [Wave 8 control flow](../alkalive-wave-08-control-flow.md) — adds `if`/`else`/`while` to the WASM backend.
+
+### Implementation Status (Wave 9 Update)
+
+*Added by Wave 9, superseding the Wave 4 audit's 0% findings for the
+"compiling to WASM" and "functions/variables/control flow/expressions" rows.*
+
+Waves 6-8 implemented a **real WASM code generation backend**
+(`crates/alkalive-compiler/src/wasm_codegen.rs`). The compiler now:
+
+1. **Compiles `.alk` source to WebAssembly binary** — `compile_to_wasm()`
+   produces a valid `.wasm` module (verified by `wasmparser`) with function
+   types, function bodies, exports, and linear memory.
+2. **Supports functions** — `fn name(params) -> Type { body }` compiles to
+   exported WASM functions with correct type signatures.
+3. **Supports variables** — `let name: Type = expr;` compiles to WASM locals
+   with `local.get`/`local.set`.
+4. **Supports expressions and operators** — `+`, `-`, `*`, `/`, `%`, `==`,
+   `!=`, `<`, `<=`, `>`, `>=`, `&&`, `||` compile to WASM arithmetic/comparison
+   instructions. Pratt parsing with correct precedence.
+5. **Supports control flow** — `if`/`else` compiles to WASM `if`/`else`/`end`;
+   `while` compiles to WASM `block`/`loop`/`br`.
+6. **Supports function calls** — `foo(args)` compiles to WASM `call funcidx`.
+7. **Runs the type checker before WASM generation** — ADR-009 source-level
+   soundness is enforced (monotonicity qualifiers, type checking).
+
+**Updated gap status:**
+
+| ADR-008 claim | Wave 9 status |
+|---------------|---------------|
+| "statically-typed" | **Partially implemented.** Type checker checks monotonicity qualifiers, variable resolution, and method-call validation. Full type inference for function return types is pending. |
+| "object oriented" | **Not yet implemented.** No classes, methods, or inheritance. This is the next major gap. |
+| "first-class UI modules" | **~5% implemented.** `module` is a named wrapper; no import/export system yet. |
+| "compiling to WASM" | **Implemented.** `wasm_codegen.rs` emits valid `.wasm` binaries via `wasm-encoder`, validated by `wasmparser`. |
+| Functions, variables, control flow, expressions | **Implemented.** `fn`, `let`, `if`/`else`, `while`, `return`, and all binary operators compile to WASM. |
+
+**Remaining gaps:** OO model (classes/methods), module system (imports/exports),
+full type inference for function calls, string data sections, and collection
+method dispatch as imported functions.
 
 ---
 
