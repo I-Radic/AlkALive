@@ -102,6 +102,8 @@ pub struct ModuleDecl {
     /// (ADR-027 Phase 2 — the language is extended with functions and typed
     /// collections so that monotonicity qualifiers have something to annotate.)
     pub items: Vec<ItemDecl>,
+    /// Module import declarations (Gap 2 — Module System).
+    pub imports: Vec<crate::ast::ImportDecl>,
     /// 1-based line where the `module` keyword appears.
     pub line: u32,
     /// 1-based column where the `module` keyword appears.
@@ -623,6 +625,24 @@ impl fmt::Display for Type {
     }
 }
 
+
+/// A module import declaration (Gap 2 — Module System).
+///
+/// ```text
+/// import { Name, Name as Alias } from "module/path";
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImportDecl {
+    /// The module path string (e.g. "std/canvas").
+    pub module_path: String,
+    /// The imported names. Each entry is (name, optional_alias).
+    pub names: Vec<(String, Option<String>)>,
+    /// 1-based line of the `import` keyword.
+    pub line: u32,
+    /// 1-based column of the `import` keyword.
+    pub col: u32,
+}
+
 /// A `scene { ... }` block.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SceneDecl {
@@ -802,6 +822,7 @@ mod tests {
             }),
             attributes: vec![Attribute::new("deny(monotonicity)", 1, 1)],
             items: Vec::new(),
+            imports: Vec::new(),
             line: 1,
             col: 1,
         };

@@ -409,6 +409,8 @@ pub fn quads_from_text(
 // WgpuRenderer — wasm32 implementation (real WebGL2 GPU backend)
 // ---------------------------------------------------------------------------
 
+pub mod wgsl_shaders;
+
 #[cfg(target_arch = "wasm32")]
 mod wasm {
     //! Real GPU backend — WebGL2 via `web-sys::WebGl2RenderingContext`.

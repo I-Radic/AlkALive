@@ -154,6 +154,7 @@ impl Parser {
 
         let mut scene: Option<SceneDecl> = None;
         let mut items: Vec<ItemDecl> = Vec::new();
+        let mut imports: Vec<crate::ast::ImportDecl> = Vec::new();
         // Parse module body: an optional `scene` block (possibly with
         // leading `@attributes`) followed by zero or more `fn` / `let` /
         // `class` top-level items (ADR-027 Phase 2 + Gap 1). Items may also
@@ -204,11 +205,16 @@ impl Parser {
                     items.push(ItemDecl::Class(c));
                     self.skip_newlines();
                 }
+                TokenKind::Import => {
+                    let imp = self.parse_import()?;
+                    imports.push(imp);
+                    self.skip_newlines();
+                }
                 TokenKind::Eof => {
                     return Err(self.unexpected("closing `}`"));
                 }
                 _ => {
-                    return Err(self.unexpected("`scene`, `fn`, `let`, `class`, or closing `}`"));
+                    return Err(self.unexpected("`scene`, `fn`, `let`, `class`, `import`, or closing `}`"));
                 }
             }
         }
@@ -218,6 +224,61 @@ impl Parser {
             scene,
             attributes,
             items,
+            imports,
+            line,
+            col,
+        })
+    }
+
+    /// Parse an import declaration: `import { Name, Name as Alias } from "path";`
+    fn parse_import(&mut self) -> Result<crate::ast::ImportDecl, ParseError> {
+        let kw = self.expect(TokenKind::Import)?;
+        let line = kw.line;
+        let col = kw.col;
+        self.expect(TokenKind::LBrace)?;
+        self.skip_newlines();
+        let mut names: Vec<(String, Option<String>)> = Vec::new();
+        loop {
+            if matches!(self.peek().kind, TokenKind::RBrace) {
+                self.advance();
+                break;
+            }
+            let name_tok = self.expect_any_ident()?;
+            let name = name_tok.value.clone();
+            self.skip_newlines();
+            // Check for 'as Alias'
+            let alias = if matches!(self.peek().kind, TokenKind::Ident) && self.peek().value == "as" {
+                self.advance();
+                self.skip_newlines();
+                let alias_tok = self.expect_any_ident()?;
+                self.skip_newlines();
+                Some(alias_tok.value.clone())
+            } else {
+                None
+            };
+            names.push((name, alias));
+            if matches!(self.peek().kind, TokenKind::Comma) {
+                self.advance();
+                self.skip_newlines();
+            } else {
+                self.expect(TokenKind::RBrace)?;
+                break;
+            }
+        }
+        self.skip_newlines();
+        // Expect 'from' keyword (parsed as identifier)
+        let from_tok = self.expect_any_ident()?;
+        if from_tok.value != "from" {
+            return Err(self.unexpected_msg("expected `from` in import statement"));
+        }
+        self.skip_newlines();
+        // Expect string literal for module path
+        let path_tok = self.expect(TokenKind::String)?;
+        let module_path = path_tok.value.clone();
+        self.expect(TokenKind::Semi)?;
+        Ok(crate::ast::ImportDecl {
+            module_path,
+            names,
             line,
             col,
         })

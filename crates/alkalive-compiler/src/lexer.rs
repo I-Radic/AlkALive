@@ -109,6 +109,8 @@ pub enum TokenKind {
     /// `self` (lowercase) — the implicit receiver of an instance method
     /// (Gap 1 — OO model). Used in expression position.
     Self_,
+    /// `import` — module import statement.
+    Import,
     /// `Self` (capitalised) — type alias for the enclosing class
     /// (Gap 1 — OO model). Used in type position.
     SelfType,
@@ -235,6 +237,7 @@ impl fmt::Display for TokenKind {
             TokenKind::Priv => write!(f, "keyword `priv`"),
             TokenKind::Field => write!(f, "keyword `field`"),
             TokenKind::Self_ => write!(f, "keyword `self`"),
+            TokenKind::Import => write!(f, "keyword `import`"),
             TokenKind::SelfType => write!(f, "keyword `Self`"),
             TokenKind::Ident => write!(f, "identifier"),
             TokenKind::String => write!(f, "string literal"),
@@ -404,6 +407,7 @@ fn classify_keyword(text: &str) -> Option<TokenKind> {
         "priv" => TokenKind::Priv,
         "field" => TokenKind::Field,
         "self" => TokenKind::Self_,
+        "import" => TokenKind::Import,
         "Self" => TokenKind::SelfType,
         _ => return None,
     })

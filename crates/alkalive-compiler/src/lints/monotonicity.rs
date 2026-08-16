@@ -157,6 +157,7 @@ mod tests {
             }),
             attributes: Vec::new(),
             items: Vec::new(),
+            imports: Vec::new(),
             line: 1,
             col: 1,
         }
@@ -169,6 +170,7 @@ mod tests {
             scene: None,
             attributes: Vec::new(),
             items: Vec::new(),
+            imports: Vec::new(),
             line: 1,
             col: 1,
         };
@@ -219,6 +221,7 @@ mod tests {
             }),
             attributes: Vec::new(),
             items: Vec::new(),
+            imports: Vec::new(),
             line: 1,
             col: 1,
         };
@@ -272,6 +275,7 @@ mod tests {
             }),
             attributes: vec![Attribute::new("deny(monotonicity)", 1, 1)],
             items: Vec::new(),
+            imports: Vec::new(),
             line: 1,
             col: 1,
         };
