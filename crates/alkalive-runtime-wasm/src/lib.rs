@@ -209,6 +209,26 @@ pub fn start(
         web_sys::console::error_1(&format!("AlkALive panic: {}", info).into());
     }));
 
+    // 1.5. Check cross-origin isolation status (ADR-003 / Gap 8).
+    //      When crossOriginIsolated is true, SharedArrayBuffer is available
+    //      and a Web Worker render thread could be used. When false, the
+    //      runtime falls back to single-threaded main-thread rendering.
+    let cross_origin_isolated = js_sys::eval("crossOriginIsolated")
+        .ok()
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if cross_origin_isolated {
+        web_sys::console::log_1(
+            &"AlkALive: cross-origin isolated — SharedArrayBuffer available (ADR-003)."
+                .into(),
+        );
+    } else {
+        web_sys::console::log_1(
+            &"AlkALive: not cross-origin isolated — using single-threaded fallback (set COOP/COEP headers for SAB support)."
+                .into(),
+        );
+    }
+
     // 2. Compile the embedded `.alk` source to a ScheduledScene (ADR-024:
     //    produces both the AlgorithmIR and the default ScheduleIR) PLUS a
     //    DependencyGraph (ADR-025: one node per schedule pass, annotated

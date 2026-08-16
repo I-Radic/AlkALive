@@ -841,6 +841,27 @@ pub fn check_module(module: &ModuleDecl) -> TypeErrorSet {
     let mut sigs = FnSigTable::new();
     collect_signatures(module, &mut sigs);
 
+    // Pass 1.1: resolve imports — add imported names to the FnSigTable
+    // as external entries. This allows calls to imported functions to
+    // resolve without "unknown function" errors. Return types are unknown
+    // (None) because we don't have the imported module's signatures.
+    for imp in &module.imports {
+        for (name, alias) in &imp.names {
+            let local_name = alias.as_ref().unwrap_or(name);
+            sigs.insert(
+                local_name.clone(),
+                FnSig {
+                    name: local_name.clone(),
+                    params: Vec::new(),       // unknown — will skip arity check
+                    return_type: None,        // unknown — callers use declared type
+                    param_names: Vec::new(),
+                    receiver_class: None,
+                    imported_from: Some(imp.module_path.clone()),
+                },
+            );
+        }
+    }
+
     // Pass 1.5: collect all class signatures into ClassTable.
     let mut classes = ClassTable::new();
     collect_classes(module, &mut classes, &mut errors);
@@ -1219,8 +1240,8 @@ fn check_expr(
             // Look up the callee in the signature table.
             match sigs.lookup(callee) {
                 Some(sig) => {
-                    // Arity check.
-                    if args.len() != sig.params.len() {
+                    // Arity check — skip for imported functions (unknown params).
+                    if sig.imported_from.is_none() && args.len() != sig.params.len() {
                         errors.push(TypeError {
                             message: format!(
                                 "call to function `{}` expects {} argument(s) but was called with {}",
@@ -2490,5 +2511,81 @@ mod oo_tests {
         );
         let errors = check(&src);
         assert!(errors.is_empty(), "{}", errors);
+    }
+}
+
+#[cfg(test)]
+mod module_system_tests {
+    use super::*;
+    use crate::parser::parse;
+
+    const SCENE: &str = "scene { background: #000000 }";
+
+    fn check(src: &str) -> TypeErrorSet {
+        let m = parse(src).expect("parse");
+        check_module(&m)
+    }
+
+    #[test]
+    fn import_statement_parses_and_resolves() {
+        let src = format!(
+            r#"module M {{
+  {}
+  import {{ helper }} from "other";
+  fn main() -> i32 {{ return helper(); }}
+}}"#,
+            SCENE
+        );
+        let errors = check(&src);
+        // The imported function should resolve (no "unknown function" error).
+        // It may have a return type mismatch (None vs i32) but that's acceptable
+        // because we don't know the imported function's return type.
+        let has_unknown = errors.errors.iter().any(|e| e.message.contains("call to unknown function"));
+        assert!(!has_unknown, "imported function should resolve, got: {}", errors);
+    }
+
+    #[test]
+    fn import_with_alias_resolves() {
+        let src = format!(
+            r#"module M {{
+  {}
+  import {{ helper as h }} from "other";
+  fn main() -> i32 {{ return h(); }}
+}}"#,
+            SCENE
+        );
+        let errors = check(&src);
+        let has_unknown = errors.errors.iter().any(|e| e.message.contains("call to unknown function"));
+        assert!(!has_unknown, "aliased import should resolve, got: {}", errors);
+    }
+
+    #[test]
+    fn import_multiple_names() {
+        let src = format!(
+            r#"module M {{
+  {}
+  import {{ foo, bar }} from "other";
+  fn main() {{ foo(); bar(); }}
+}}"#,
+            SCENE
+        );
+        let errors = check(&src);
+        let has_unknown = errors.errors.iter().any(|e| e.message.contains("call to unknown function"));
+        assert!(!has_unknown, "both imported names should resolve, got: {}", errors);
+    }
+
+    #[test]
+    fn import_does_not_break_local_functions() {
+        let src = format!(
+            r#"module M {{
+  {}
+  import {{ ext }} from "other";
+  fn local() -> i32 {{ return 42; }}
+  fn main() -> i32 {{ return local(); }}
+}}"#,
+            SCENE
+        );
+        let errors = check(&src);
+        assert!(errors.is_empty(), "local functions should still work, got: {}", errors);
     }
 }
