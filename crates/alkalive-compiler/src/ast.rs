@@ -130,6 +130,8 @@ pub enum ItemDecl {
     Fn(FnDecl),
     /// `let name: Type = init;`
     Let(LetDecl),
+    /// `pub? class Name : Base { fields... methods... }` (Gap 1 — OO model).
+    Class(ClassDecl),
 }
 
 /// A function declaration.
@@ -149,6 +151,9 @@ pub struct FnDecl {
     pub body: Block,
     /// Attributes attached to this declaration (e.g. `@monotone`).
     pub attrs: Vec<Attribute>,
+    /// Visibility of this top-level item (Gap 1 — OO model). Defaults to
+    /// [`Visibility::Priv`]. `Pub` items are exported from the module.
+    pub visibility: Visibility,
     /// 1-based line of the `fn` keyword.
     pub line: u32,
     /// 1-based column of the `fn` keyword.
@@ -168,6 +173,95 @@ pub struct Param {
     pub col: u32,
 }
 
+// ======================================================================
+// Gap 1 — OO model: Visibility, ClassDecl, FieldDecl, MethodDecl
+// ======================================================================
+
+/// Visibility of a class member or top-level item (Gap 1 — OO model).
+///
+/// The default is [`Visibility::Priv`] (module-private). `pub` items are
+/// accessible from outside the module (and are exported from the WASM
+/// binary once the module system lands in Gap 2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Visibility {
+    /// Module-private (the default).
+    #[default]
+    Priv,
+    /// Publicly accessible from other modules.
+    Pub,
+}
+
+impl fmt::Display for Visibility {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Visibility::Priv => write!(f, "priv"),
+            Visibility::Pub => write!(f, "pub"),
+        }
+    }
+}
+
+/// `pub? class Name : Base { fields... methods... }` (Gap 1 — OO model).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClassDecl {
+    /// Class name as written.
+    pub name: String,
+    /// Optional single base class (`None` = no parent / root).
+    pub base: Option<String>,
+    /// Visibility of the class itself (top-level `pub`).
+    pub visibility: Visibility,
+    /// Fields in declaration order (base-class fields are NOT included
+    /// here; they are looked up via the `base` chain at typecheck time).
+    pub fields: Vec<FieldDecl>,
+    /// Methods in declaration order (base-class methods are NOT included).
+    pub methods: Vec<MethodDecl>,
+    /// Attributes attached to the class (forward compatibility — currently
+    /// class-level attributes are a parse error per CR-15).
+    pub attrs: Vec<Attribute>,
+    /// 1-based line of the `class` keyword.
+    pub line: u32,
+    /// 1-based column of the `class` keyword.
+    pub col: u32,
+}
+
+/// `pub? name: Type;` inside a class body (Gap 1 — OO model).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FieldDecl {
+    /// Field name.
+    pub name: String,
+    /// Field type (may carry a monotonicity qualifier — CR-10).
+    pub ty: Type,
+    /// Visibility (`pub` or `priv`).
+    pub visibility: Visibility,
+    /// 1-based line of the field name.
+    pub line: u32,
+    /// 1-based column of the field name.
+    pub col: u32,
+}
+
+/// `pub? fn name(self, params) -> Type { body }` inside a class body
+/// (Gap 1 — OO model).
+#[derive(Debug, Clone, PartialEq)]
+pub struct MethodDecl {
+    /// Method name.
+    pub name: String,
+    /// `true` if the first parameter is `self` (instance method).
+    pub is_instance: bool,
+    /// Parameters excluding `self`; `self` is implicit.
+    pub params: Vec<Param>,
+    /// Optional return type. `None` means the method returns unit `()`.
+    pub return_type: Option<Type>,
+    /// The method body block.
+    pub body: Block,
+    /// Visibility (`pub` or `priv`).
+    pub visibility: Visibility,
+    /// Attributes attached to this method.
+    pub attrs: Vec<Attribute>,
+    /// 1-based line of the `fn` keyword.
+    pub line: u32,
+    /// 1-based column of the `fn` keyword.
+    pub col: u32,
+}
+
 /// A typed `let` binding (collection declaration).
 ///
 /// ```text
@@ -184,6 +278,9 @@ pub struct LetDecl {
     pub init: Expr,
     /// Attributes attached to this declaration (e.g. `@monotone`).
     pub attrs: Vec<Attribute>,
+    /// Visibility of this top-level item (Gap 1 — OO model). Defaults to
+    /// [`Visibility::Priv`].
+    pub visibility: Visibility,
     /// 1-based line of the `let` keyword.
     pub line: u32,
     /// 1-based column of the `let` keyword.
@@ -232,6 +329,21 @@ pub enum Stmt {
         /// 1-based line of the `while` keyword.
         line: u32,
         /// 1-based column of the `while` keyword.
+        col: u32,
+    },
+    /// `obj.field = value;` — field assignment (Gap 1 — OO model).
+    ///
+    /// The `target` must be an [`Expr::Field`]; the type checker enforces
+    /// this. Qualified (`monotone`/`antitone`) fields cannot be assigned
+    /// (CR-10).
+    Assign {
+        /// The assignment target (must be `Expr::Field`).
+        target: Expr,
+        /// The value expression.
+        value: Expr,
+        /// 1-based line of the `=` token.
+        line: u32,
+        /// 1-based column of the `=` token.
         col: u32,
     },
 }
@@ -364,6 +476,49 @@ pub enum Expr {
         /// 1-based line of the callee.
         line: u32,
         /// 1-based column of the callee.
+        col: u32,
+    },
+    /// `self` — the implicit receiver of an instance method (Gap 1 — OO model).
+    Self_(u32, u32),
+    /// `receiver.field` — field access (read or, in lvalue context, write)
+    /// (Gap 1 — OO model).
+    Field {
+        /// The receiver expression (often `Expr::Self_` or `Expr::Var`).
+        receiver: Box<Expr>,
+        /// The field name.
+        field: String,
+        /// 1-based line of the `.` token.
+        line: u32,
+        /// 1-based column of the `.` token.
+        col: u32,
+    },
+    /// `Self { f1: e1, f2: e2 }` or `ClassName { ... }` — object construction
+    /// (Gap 1 — OO model). When `class == "Self"`, the type checker resolves
+    /// it to the enclosing class.
+    Object {
+        /// The class name as written (may be `"Self"`).
+        class: String,
+        /// `(field_name, value_expr, line, col)` tuples in source order.
+        fields: Vec<(String, Expr, u32, u32)>,
+        /// 1-based line of the class name token.
+        line: u32,
+        /// 1-based column of the class name token.
+        col: u32,
+    },
+    /// `Self::method(args)` — static method call where the head is `Self`
+    /// (Gap 1 — OO model). Resolves to the enclosing class at typecheck time.
+    /// Other qualified calls (`Vec::new`, `Foo::bar`) remain as
+    /// [`Expr::PathCall`] for backward compatibility.
+    StaticCall {
+        /// The class name as written (typically `"Self"`).
+        class: String,
+        /// The method name.
+        method: String,
+        /// Argument expressions.
+        args: Vec<Expr>,
+        /// 1-based line of the `::` token.
+        line: u32,
+        /// 1-based column of the `::` token.
         col: u32,
     },
 }

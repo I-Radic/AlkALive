@@ -96,6 +96,22 @@ pub enum TokenKind {
     Else,
     /// `while` — loop statement.
     While,
+    /// `class` — class declaration (Gap 1 — OO model).
+    Class,
+    /// `pub` — public visibility (Gap 1 — OO model).
+    Pub,
+    /// `priv` — private visibility (Gap 1 — OO model).
+    Priv,
+    /// `field` — optional field-introducer keyword inside a class body
+    /// (Gap 1 — OO model). The grammar permits fields without this
+    /// keyword; it is reserved for forward compatibility.
+    Field,
+    /// `self` (lowercase) — the implicit receiver of an instance method
+    /// (Gap 1 — OO model). Used in expression position.
+    Self_,
+    /// `Self` (capitalised) — type alias for the enclosing class
+    /// (Gap 1 — OO model). Used in type position.
+    SelfType,
 
     // ---- Literals ----
     /// An identifier that is not a reserved keyword. The text lives in
@@ -214,6 +230,12 @@ impl fmt::Display for TokenKind {
             TokenKind::If => write!(f, "keyword `if`"),
             TokenKind::Else => write!(f, "keyword `else`"),
             TokenKind::While => write!(f, "keyword `while`"),
+            TokenKind::Class => write!(f, "keyword `class`"),
+            TokenKind::Pub => write!(f, "keyword `pub`"),
+            TokenKind::Priv => write!(f, "keyword `priv`"),
+            TokenKind::Field => write!(f, "keyword `field`"),
+            TokenKind::Self_ => write!(f, "keyword `self`"),
+            TokenKind::SelfType => write!(f, "keyword `Self`"),
             TokenKind::Ident => write!(f, "identifier"),
             TokenKind::String => write!(f, "string literal"),
             TokenKind::Number => write!(f, "number"),
@@ -376,6 +398,13 @@ fn classify_keyword(text: &str) -> Option<TokenKind> {
         "if" => TokenKind::If,
         "else" => TokenKind::Else,
         "while" => TokenKind::While,
+        // Gap 1 — OO model keywords.
+        "class" => TokenKind::Class,
+        "pub" => TokenKind::Pub,
+        "priv" => TokenKind::Priv,
+        "field" => TokenKind::Field,
+        "self" => TokenKind::Self_,
+        "Self" => TokenKind::SelfType,
         _ => return None,
     })
 }

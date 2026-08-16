@@ -13,9 +13,9 @@
 use core::fmt;
 
 use crate::ast::{
-    Attribute, BaseType, BinOp, Block, Color, Expr, FnDecl, InputFieldNode, ItemDecl, LetDecl, Lit,
-    ModuleDecl, NodeDecl, Param, PositionDecl, Qualifier, RotationDecl, SceneDecl, Stmt, TextNode,
-    Type,
+    Attribute, BaseType, BinOp, Block, ClassDecl, Color, Expr, FieldDecl, FnDecl, InputFieldNode,
+    ItemDecl, LetDecl, Lit, MethodDecl, ModuleDecl, NodeDecl, Param, PositionDecl, Qualifier,
+    RotationDecl, SceneDecl, Stmt, TextNode, Type, Visibility,
 };
 use crate::lexer::{Token, TokenKind};
 
@@ -155,26 +155,29 @@ impl Parser {
         let mut scene: Option<SceneDecl> = None;
         let mut items: Vec<ItemDecl> = Vec::new();
         // Parse module body: an optional `scene` block (possibly with
-        // leading `@attributes`) followed by zero or more `fn` / `let`
-        // top-level items (ADR-027 Phase 2). Items may also carry leading
-        // `@attributes`.
+        // leading `@attributes`) followed by zero or more `fn` / `let` /
+        // `class` top-level items (ADR-027 Phase 2 + Gap 1). Items may also
+        // carry leading `@attributes` and an optional `pub`/`priv` visibility
+        // prefix (Gap 1).
         loop {
             // Collect any leading attributes.
             let attrs = self.parse_leading_attributes()?;
+            // Optional `pub` / `priv` visibility prefix (Gap 1).
+            let visibility = self.parse_visibility()?;
             self.skip_newlines();
             match self.peek().kind {
                 TokenKind::RBrace => {
-                    if !attrs.is_empty() {
+                    if !attrs.is_empty() || visibility != Visibility::Priv {
                         return Err(self
-                            .unexpected_msg("trailing attributes with no following declaration"));
+                            .unexpected_msg("trailing attributes / visibility with no following declaration"));
                     }
                     self.advance();
                     break;
                 }
                 TokenKind::Scene => {
-                    if !attrs.is_empty() {
+                    if !attrs.is_empty() || visibility != Visibility::Priv {
                         return Err(self.unexpected_msg(
-                            "attributes are not allowed on `scene` blocks in this position; \
+                            "attributes / visibility are not allowed on `scene` blocks in this position; \
                              place `@`-attributes immediately before `scene`",
                         ));
                     }
@@ -187,20 +190,25 @@ impl Parser {
                     self.skip_newlines();
                 }
                 TokenKind::Fn => {
-                    let f = self.parse_fn(attrs)?;
+                    let f = self.parse_fn(attrs, visibility)?;
                     items.push(ItemDecl::Fn(f));
                     self.skip_newlines();
                 }
                 TokenKind::Let => {
-                    let l = self.parse_let(attrs)?;
+                    let l = self.parse_let(attrs, visibility)?;
                     items.push(ItemDecl::Let(l));
+                    self.skip_newlines();
+                }
+                TokenKind::Class => {
+                    let c = self.parse_class(attrs, visibility)?;
+                    items.push(ItemDecl::Class(c));
                     self.skip_newlines();
                 }
                 TokenKind::Eof => {
                     return Err(self.unexpected("closing `}`"));
                 }
                 _ => {
-                    return Err(self.unexpected("`scene`, `fn`, `let`, or closing `}`"));
+                    return Err(self.unexpected("`scene`, `fn`, `let`, `class`, or closing `}`"));
                 }
             }
         }
@@ -213,6 +221,22 @@ impl Parser {
             line,
             col,
         })
+    }
+
+    /// Parse an optional `pub` or `priv` visibility prefix (Gap 1 — OO model).
+    /// Returns `Visibility::Priv` (the default) if neither keyword is present.
+    fn parse_visibility(&mut self) -> Result<Visibility, ParseError> {
+        match self.peek().kind {
+            TokenKind::Pub => {
+                self.advance();
+                Ok(Visibility::Pub)
+            }
+            TokenKind::Priv => {
+                self.advance();
+                Ok(Visibility::Priv)
+            }
+            _ => Ok(Visibility::Priv),
+        }
     }
 
     // ------------------------------------------------------------------
@@ -253,7 +277,8 @@ impl Parser {
         Ok(Type { qualifier, base })
     }
 
-    /// Parse a base type: `i32 | f32 | string | bool | Vec<T> | Ident`.
+    /// Parse a base type: `i32 | f32 | string | bool | Vec<T> | Ident | Self`.
+    /// `Self` is a type alias for the enclosing class (Gap 1).
     fn parse_base_type(&mut self) -> Result<BaseType, ParseError> {
         let tok = self.peek().clone();
         let base = match tok.kind {
@@ -280,6 +305,12 @@ impl Parser {
                 self.expect(TokenKind::Gt)?;
                 BaseType::Vec(Box::new(elem))
             }
+            TokenKind::SelfType => {
+                // `Self` is a type alias for the enclosing class (Gap 1).
+                // Stored as `Named("Self")`; the type checker resolves it.
+                self.advance();
+                BaseType::Named("Self".to_string())
+            }
             TokenKind::Ident => {
                 self.advance();
                 BaseType::Named(tok.value.clone())
@@ -290,8 +321,13 @@ impl Parser {
     }
 
     /// Parse `fn name(params) -> Type { body }`. `attrs` are the leading
-    /// attributes already collected.
-    fn parse_fn(&mut self, attrs: Vec<Attribute>) -> Result<FnDecl, ParseError> {
+    /// attributes already collected; `visibility` is the (optional) `pub`/
+    /// `priv` prefix (Gap 1).
+    fn parse_fn(
+        &mut self,
+        attrs: Vec<Attribute>,
+        visibility: Visibility,
+    ) -> Result<FnDecl, ParseError> {
         let kw = self.expect(TokenKind::Fn)?;
         let line = kw.line;
         let col = kw.col;
@@ -341,14 +377,19 @@ impl Parser {
             return_type,
             body,
             attrs,
+            visibility,
             line,
             col,
         })
     }
 
     /// Parse `let name: Type = init;`. `attrs` are the leading attributes
-    /// already collected.
-    fn parse_let(&mut self, attrs: Vec<Attribute>) -> Result<LetDecl, ParseError> {
+    /// already collected; `visibility` is the (optional) `pub`/`priv` prefix.
+    fn parse_let(
+        &mut self,
+        attrs: Vec<Attribute>,
+        visibility: Visibility,
+    ) -> Result<LetDecl, ParseError> {
         let kw = self.expect(TokenKind::Let)?;
         let line = kw.line;
         let col = kw.col;
@@ -364,6 +405,216 @@ impl Parser {
             name,
             ty,
             init,
+            attrs,
+            visibility,
+            line,
+            col,
+        })
+    }
+
+    // ------------------------------------------------------------------
+    // Gap 1 — OO model: classes, fields, methods
+    // ------------------------------------------------------------------
+
+    /// Parse `pub? class Name : Base { ClassMember* }`.
+    /// `attrs` are the leading attributes already collected; `visibility`
+    /// is the (optional) `pub`/`priv` prefix.
+    fn parse_class(
+        &mut self,
+        attrs: Vec<Attribute>,
+        visibility: Visibility,
+    ) -> Result<ClassDecl, ParseError> {
+        let kw = self.expect(TokenKind::Class)?;
+        let line = kw.line;
+        let col = kw.col;
+        let name_tok = self.expect(TokenKind::Ident)?;
+        let name = name_tok.value.clone();
+        // Optional `: Base` (single base only — multiple inheritance is a
+        // parse error per LANG-110-E2).
+        let base = if matches!(self.peek().kind, TokenKind::Colon) {
+            self.advance();
+            let b = self.expect(TokenKind::Ident)?;
+            Some(b.value.clone())
+        } else {
+            None
+        };
+        // Reject `,` after base (multiple inheritance attempt).
+        if matches!(self.peek().kind, TokenKind::Comma) {
+            return Err(self.unexpected_msg(
+                "parse error: multiple inheritance is not supported (expected single base class)",
+            ));
+        }
+        self.skip_newlines();
+        self.expect(TokenKind::LBrace)?;
+        self.skip_newlines();
+        let mut fields = Vec::new();
+        let mut methods = Vec::new();
+        loop {
+            if matches!(self.peek().kind, TokenKind::RBrace) {
+                self.advance();
+                break;
+            }
+            // Each member may carry leading attributes + visibility.
+            let member_attrs = self.parse_leading_attributes()?;
+            let member_vis = self.parse_visibility()?;
+            self.skip_newlines();
+            match self.peek().kind {
+                TokenKind::Fn => {
+                    let m = self.parse_method(member_attrs, member_vis)?;
+                    methods.push(m);
+                }
+                TokenKind::Field => {
+                    // Optional `field` keyword.
+                    self.advance();
+                    let f = self.parse_field(member_vis)?;
+                    fields.push(f);
+                }
+                TokenKind::Ident | TokenKind::Monotone | TokenKind::Antitone => {
+                    // Bare field without `field` keyword. May have a leading
+                    // `monotone`/`antitone` qualifier (handled in parse_field).
+                    let f = self.parse_field(member_vis)?;
+                    fields.push(f);
+                }
+                TokenKind::RBrace => {
+                    if !member_attrs.is_empty() {
+                        return Err(self
+                            .unexpected_msg("trailing attributes with no following class member"));
+                    }
+                    self.advance();
+                    break;
+                }
+                TokenKind::Eof => {
+                    return Err(self.unexpected("closing `}` of class body"));
+                }
+                _ => {
+                    return Err(self.unexpected("`fn`, `field`, identifier, or closing `}`"));
+                }
+            }
+            self.skip_newlines();
+        }
+        Ok(ClassDecl {
+            name,
+            base,
+            visibility,
+            fields,
+            methods,
+            attrs,
+            line,
+            col,
+        })
+    }
+
+    /// Parse `Ident ':' Type ';'` as a field declaration (Gap 1).
+    /// Also accepts an optional leading `monotone`/`antitone` qualifier
+    /// before the field name (a syntactic shorthand per the spec's
+    /// LANG-1T-11 test — equivalent to putting the qualifier on the Type
+    /// after the colon).
+    fn parse_field(&mut self, visibility: Visibility) -> Result<FieldDecl, ParseError> {
+        // Optional leading qualifier (shorthand for `name: qualifier Type`).
+        let leading_qualifier = match self.peek().kind {
+            TokenKind::Monotone => {
+                self.advance();
+                Qualifier::Monotone
+            }
+            TokenKind::Antitone => {
+                self.advance();
+                Qualifier::Antitone
+            }
+            _ => Qualifier::Unrestricted,
+        };
+        let ntok = self.expect(TokenKind::Ident)?;
+        let name = ntok.value.clone();
+        let line = ntok.line;
+        let col = ntok.col;
+        self.expect(TokenKind::Colon)?;
+        let mut ty = self.parse_type()?;
+        // If a leading qualifier was present AND the parsed type is
+        // unrestricted, apply the leading qualifier. (If both are present,
+        // the explicit type qualifier wins — this matches the
+        // attribute-vs-qualifier precedence in `effective_qualifier`.)
+        if leading_qualifier != Qualifier::Unrestricted && ty.qualifier == Qualifier::Unrestricted
+        {
+            ty.qualifier = leading_qualifier;
+        }
+        self.expect(TokenKind::Semi)?;
+        Ok(FieldDecl {
+            name,
+            ty,
+            visibility,
+            line,
+            col,
+        })
+    }
+
+    /// Parse `fn name(self, params) -> Type { body }` as a method (Gap 1).
+    fn parse_method(
+        &mut self,
+        attrs: Vec<Attribute>,
+        visibility: Visibility,
+    ) -> Result<MethodDecl, ParseError> {
+        let kw = self.expect(TokenKind::Fn)?;
+        let line = kw.line;
+        let col = kw.col;
+        let ntok = self.expect_any_ident()?;
+        let name = ntok.value.clone();
+        self.expect(TokenKind::LParen)?;
+        self.skip_newlines();
+        let mut is_instance = false;
+        let mut params = Vec::new();
+        // Check for `self` as the first parameter.
+        if matches!(self.peek().kind, TokenKind::Self_) {
+            self.advance();
+            is_instance = true;
+            // Optional comma if more parameters follow.
+            self.skip_newlines();
+            if matches!(self.peek().kind, TokenKind::Comma) {
+                self.advance();
+                self.skip_newlines();
+            }
+        }
+        // Parse remaining parameters.
+        loop {
+            if matches!(self.peek().kind, TokenKind::RParen) {
+                self.advance();
+                break;
+            }
+            let ptok = self.expect(TokenKind::Ident)?;
+            let pname = ptok.value.clone();
+            let pline = ptok.line;
+            let pcol = ptok.col;
+            self.expect(TokenKind::Colon)?;
+            let ty = self.parse_type()?;
+            params.push(Param {
+                name: pname,
+                ty,
+                line: pline,
+                col: pcol,
+            });
+            self.skip_newlines();
+            if matches!(self.peek().kind, TokenKind::Comma) {
+                self.advance();
+                self.skip_newlines();
+            } else {
+                self.expect(TokenKind::RParen)?;
+                break;
+            }
+        }
+        self.skip_newlines();
+        let return_type = if matches!(self.peek().kind, TokenKind::Arrow) {
+            self.advance();
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
+        self.skip_newlines();
+        let body = self.parse_block()?;
+        Ok(MethodDecl {
+            name,
+            is_instance,
+            params,
+            return_type,
+            body,
+            visibility,
             attrs,
             line,
             col,
@@ -389,7 +640,7 @@ impl Parser {
                         self.unexpected_msg("attributes inside a body must be followed by `let`")
                     );
                 }
-                let l = self.parse_let(stmt_attrs)?;
+                let l = self.parse_let(stmt_attrs, Visibility::Priv)?;
                 stmts.push(Stmt::Let(l));
             } else {
                 let s = self.parse_stmt()?;
@@ -404,7 +655,7 @@ impl Parser {
     fn parse_stmt(&mut self) -> Result<Stmt, ParseError> {
         match self.peek().kind {
             TokenKind::Let => {
-                let l = self.parse_let(Vec::new())?;
+                let l = self.parse_let(Vec::new(), Visibility::Priv)?;
                 Ok(Stmt::Let(l))
             }
             TokenKind::Return => {
@@ -463,9 +714,33 @@ impl Parser {
                 })
             }
             _ => {
+                // Either an expression statement OR a field assignment
+                // (`obj.field = value;` — Gap 1 — OO model) OR a trailing
+                // expression (Rust-style block return value, no `;`).
                 let e = self.parse_expr()?;
-                self.expect(TokenKind::Semi)?;
-                Ok(Stmt::Expr(e))
+                if matches!(self.peek().kind, TokenKind::Eq) {
+                    let eq = self.advance().clone();
+                    self.skip_newlines();
+                    let value = self.parse_expr()?;
+                    self.expect(TokenKind::Semi)?;
+                    Ok(Stmt::Assign {
+                        target: e,
+                        value,
+                        line: eq.line,
+                        col: eq.col,
+                    })
+                } else if matches!(self.peek().kind, TokenKind::Semi) {
+                    self.advance();
+                    Ok(Stmt::Expr(e))
+                } else if matches!(self.peek().kind, TokenKind::RBrace) {
+                    // Trailing expression without `;` — Rust-style block
+                    // return value (Gap 1 — needed for `Self { ... }`
+                    // constructor bodies).
+                    Ok(Stmt::Expr(e))
+                } else {
+                    self.expect(TokenKind::Semi)?;
+                    Ok(Stmt::Expr(e))
+                }
             }
         }
     }
@@ -524,7 +799,7 @@ impl Parser {
     }
 
     /// Parse a primary expression (literal, variable, call, path call) followed
-    /// by postfix `.method(args)` chains.
+    /// by postfix `.method(args)` / `.field` chains.
     fn parse_primary(&mut self) -> Result<Expr, ParseError> {
         let tok = self.peek().clone();
         let mut expr = match tok.kind {
@@ -551,6 +826,11 @@ impl Parser {
                 self.advance();
                 Expr::Lit(Lit::Bool(false), tok.line, tok.col)
             }
+            TokenKind::Self_ => {
+                // `self` — the implicit receiver of an instance method (Gap 1).
+                self.advance();
+                Expr::Self_(tok.line, tok.col)
+            }
             TokenKind::LParen => {
                 // Parenthesized expression: `( expr )`
                 self.advance();
@@ -560,9 +840,44 @@ impl Parser {
                 self.expect(TokenKind::RParen)?;
                 inner
             }
+            TokenKind::SelfType => {
+                // `Self` — either a static call `Self::method(args)` or an
+                // object literal `Self { f1: e1, ... }` (Gap 1).
+                if matches!(self.peek_at(1).kind, TokenKind::ColonColon) {
+                    self.advance(); // Self
+                    self.advance(); // ::
+                    let member_tok = self.expect_any_ident()?;
+                    let method = member_tok.value.clone();
+                    self.expect(TokenKind::LParen)?;
+                    self.skip_newlines();
+                    let args = self.parse_arg_list()?;
+                    Expr::StaticCall {
+                        class: "Self".to_string(),
+                        method,
+                        args,
+                        line: tok.line,
+                        col: tok.col,
+                    }
+                } else if matches!(self.peek_at(1).kind, TokenKind::LBrace) {
+                    self.advance(); // Self
+                    let fields = self.parse_object_literal_body()?;
+                    Expr::Object {
+                        class: "Self".to_string(),
+                        fields,
+                        line: tok.line,
+                        col: tok.col,
+                    }
+                } else {
+                    return Err(self.unexpected(
+                        "`::` (static call) or `{` (object literal) after `Self`",
+                    ));
+                }
+            }
             TokenKind::Ident | TokenKind::Vec => {
-                // Could be `Vec::member(...)` (path call), `foo(args)` (call),
-                // or a plain variable.
+                // Could be `Vec::member(...)` (path call), `Foo::method(...)`
+                // (path call for non-Self heads — the type checker dispatches
+                // to static-call semantics if `Foo` is a class), `foo(args)`
+                // (call), `Foo { ... }` (object literal), or a plain variable.
                 if matches!(self.peek_at(1).kind, TokenKind::ColonColon) {
                     let module = tok.value.clone();
                     self.advance(); // ident/Vec
@@ -586,6 +901,22 @@ impl Parser {
                         line: tok.line,
                         col: tok.col,
                     }
+                } else if matches!(self.peek_at(1).kind, TokenKind::LBrace)
+                    && matches!(tok.kind, TokenKind::Ident)
+                {
+                    // Object literal: `ClassName { f1: e1, ... }` (Gap 1).
+                    // (Note: `Vec { ... }` is rejected — `Vec` is a builtin
+                    // type, not a class name. The type checker will catch
+                    // this if it ever appears.)
+                    let class = tok.value.clone();
+                    self.advance(); // ident
+                    let fields = self.parse_object_literal_body()?;
+                    Expr::Object {
+                        class,
+                        fields,
+                        line: tok.line,
+                        col: tok.col,
+                    }
                 } else {
                     self.advance();
                     Expr::Var(tok.value.clone(), tok.line, tok.col)
@@ -594,27 +925,72 @@ impl Parser {
             _ => return Err(self.unexpected("expression")),
         };
 
-        // Postfix: `.method(args)` chains.
+        // Postfix: `.method(args)` (method call) or `.field` (field access).
         loop {
             if matches!(self.peek().kind, TokenKind::Dot) {
                 let dot = self.advance().clone();
                 let m_tok = self.expect_any_ident()?;
-                let method = m_tok.value.clone();
-                self.expect(TokenKind::LParen)?;
-                self.skip_newlines();
-                let args = self.parse_arg_list()?;
-                expr = Expr::MethodCall {
-                    receiver: Box::new(expr),
-                    method,
-                    args,
-                    line: dot.line,
-                    col: dot.col,
-                };
+                let name = m_tok.value.clone();
+                if matches!(self.peek().kind, TokenKind::LParen) {
+                    // Method call.
+                    self.advance(); // (
+                    self.skip_newlines();
+                    let args = self.parse_arg_list()?;
+                    expr = Expr::MethodCall {
+                        receiver: Box::new(expr),
+                        method: name,
+                        args,
+                        line: dot.line,
+                        col: dot.col,
+                    };
+                } else {
+                    // Field access (Gap 1).
+                    expr = Expr::Field {
+                        receiver: Box::new(expr),
+                        field: name,
+                        line: dot.line,
+                        col: dot.col,
+                    };
+                }
             } else {
                 break;
             }
         }
         Ok(expr)
+    }
+
+    /// Parse `{ f1: e1, f2: e2, ... }` (the body of an object literal).
+    /// The leading `{` must be the current token. Returns the field-init
+    /// tuples in source order.
+    fn parse_object_literal_body(
+        &mut self,
+    ) -> Result<Vec<(String, Expr, u32, u32)>, ParseError> {
+        self.expect(TokenKind::LBrace)?;
+        self.skip_newlines();
+        let mut fields = Vec::new();
+        loop {
+            if matches!(self.peek().kind, TokenKind::RBrace) {
+                self.advance();
+                break;
+            }
+            let ntok = self.expect(TokenKind::Ident)?;
+            let fname = ntok.value.clone();
+            let fline = ntok.line;
+            let fcol = ntok.col;
+            self.expect(TokenKind::Colon)?;
+            self.skip_newlines();
+            let vexpr = self.parse_expr()?;
+            fields.push((fname, vexpr, fline, fcol));
+            self.skip_newlines();
+            if matches!(self.peek().kind, TokenKind::Comma) {
+                self.advance();
+                self.skip_newlines();
+            } else {
+                self.expect(TokenKind::RBrace)?;
+                break;
+            }
+        }
+        Ok(fields)
     }
 
     /// Parse `(arg, arg, ...)` including the closing `)`. The `(` must be
