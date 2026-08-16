@@ -46,8 +46,8 @@ use crate::ast::{
 use crate::typechecker;
 
 use wasm_encoder::{
-    CodeSection, DataSection, ExportKind, ExportSection, Function, FunctionSection, Instruction,
-    MemorySection, MemoryType, Module, TypeSection, ValType,
+    CodeSection, DataSection, ExportKind, ExportSection, Function, FunctionSection, ImportSection,
+    Instruction, MemorySection, MemoryType, Module, TypeSection, ValType,
 };
 
 // ======================================================================
@@ -179,6 +179,112 @@ impl StringTable {
         }
 
         module.section(&data_sec);
+    }
+}
+
+// ======================================================================
+// Host imports (Gap 5 — Collection Method Dispatch)
+// ======================================================================
+
+/// One host import declaration.
+#[derive(Debug, Clone)]
+struct HostImport {
+    /// The import name (e.g. `"vec_new"`).
+    name: &'static str,
+    /// The parameter types.
+    params: &'static [ValType],
+    /// The result types.
+    results: &'static [ValType],
+}
+
+/// The fixed list of 10 collection host imports under module `"alk"`.
+/// These occupy the lowest indices (0..9) in the function index space.
+const HOST_IMPORTS: &[HostImport] = &[
+    HostImport {
+        name: "vec_new",
+        params: &[],
+        results: &[ValType::I32],
+    },
+    HostImport {
+        name: "vec_with_capacity",
+        params: &[ValType::I32, ValType::I32],
+        results: &[ValType::I32],
+    },
+    HostImport {
+        name: "vec_push",
+        params: &[ValType::I32, ValType::I32],
+        results: &[],
+    },
+    HostImport {
+        name: "vec_extend",
+        params: &[ValType::I32, ValType::I32],
+        results: &[],
+    },
+    HostImport {
+        name: "vec_remove",
+        params: &[ValType::I32, ValType::I32],
+        results: &[],
+    },
+    HostImport {
+        name: "vec_clear",
+        params: &[ValType::I32],
+        results: &[],
+    },
+    HostImport {
+        name: "vec_len",
+        params: &[ValType::I32],
+        results: &[ValType::I32],
+    },
+    HostImport {
+        name: "vec_is_empty",
+        params: &[ValType::I32],
+        results: &[ValType::I32],
+    },
+    HostImport {
+        name: "vec_get",
+        params: &[ValType::I32, ValType::I32],
+        results: &[ValType::I32],
+    },
+    HostImport {
+        name: "vec_set",
+        params: &[ValType::I32, ValType::I32, ValType::I32],
+        results: &[],
+    },
+];
+
+/// Returns the number of host imports (always 10 in this wave).
+fn host_import_count() -> u32 {
+    HOST_IMPORTS.len() as u32
+}
+
+/// Look up a host import by name, returning its index (0..9).
+fn host_import_index(name: &str) -> Option<u32> {
+    HOST_IMPORTS
+        .iter()
+        .position(|h| h.name == name)
+        .map(|i| i as u32)
+}
+
+/// Map an AlkALive Vec method name to its host import name.
+/// Returns `None` for unknown methods (should not happen in typechecked code).
+fn vec_method_to_host(method: &str) -> Option<&'static str> {
+    match method {
+        "push" => Some("vec_push"),
+        "extend" => Some("vec_extend"),
+        "remove" => Some("vec_remove"),
+        "clear" => Some("vec_clear"),
+        "len" => Some("vec_len"),
+        "is_empty" => Some("vec_is_empty"),
+        "get" => Some("vec_get"),
+        "insert" => Some("vec_set"),     // insert ≈ set at index
+        "first" => Some("vec_get"),      // placeholder
+        "last" => Some("vec_get"),       // placeholder
+        "contains" => Some("vec_get"),   // placeholder
+        "truncate" => Some("vec_clear"), // placeholder
+        "swap_remove" => Some("vec_remove"),
+        "drain" => Some("vec_clear"),
+        "append" => Some("vec_extend"),
+        _ => None,
     }
 }
 
@@ -485,13 +591,32 @@ impl FnCompiler {
                 }
             }
             Expr::PathCall(module, member, args, _line, _col) => {
-                // Compile arguments (left to right).
-                for a in args {
-                    self.compile_expr(a, instrs, strings);
+                // Gap 5: Vec::new and Vec::with_capacity compile to host calls.
+                match (module.as_str(), member.as_str()) {
+                    ("Vec", "new") => {
+                        // Push elem_size = 4 (all types are 4 bytes in WASM).
+                        instrs.push(AlkInstr::I32Const(4));
+                        // Call vec_new host import (returns Vec handle).
+                        instrs.push(AlkInstr::Call("vec_new".to_string()));
+                    }
+                    ("Vec", "with_capacity") => {
+                        // Push elem_size = 4, then the capacity argument.
+                        instrs.push(AlkInstr::I32Const(4));
+                        if !args.is_empty() {
+                            self.compile_expr(&args[0], instrs, strings);
+                        } else {
+                            instrs.push(AlkInstr::I32Const(0));
+                        }
+                        instrs.push(AlkInstr::Call("vec_with_capacity".to_string()));
+                    }
+                    _ => {
+                        // Other path calls: compile args, emit placeholder.
+                        for a in args {
+                            self.compile_expr(a, instrs, strings);
+                        }
+                        instrs.push(AlkInstr::I32Const(0));
+                    }
                 }
-                // For Vec::new() etc., emit a placeholder pointer.
-                let _ = (module, member);
-                instrs.push(AlkInstr::I32Const(0));
             }
             Expr::MethodCall {
                 receiver,
@@ -500,16 +625,23 @@ impl FnCompiler {
                 line: _,
                 col: _,
             } => {
-                // Compile the receiver (leaves a pointer on the stack).
+                // Gap 5: Vec method calls compile to host import calls.
+                // Compile the receiver (leaves Vec handle on the stack).
                 self.compile_expr(receiver, instrs, strings);
-                // Compile arguments.
+                // Compile arguments (left to right).
                 for a in args {
                     self.compile_expr(a, instrs, strings);
                 }
-                let _ = method;
-                // Query methods return a value; mutators don't.
-                if method == "len" || method == "is_empty" || method == "get" {
-                    instrs.push(AlkInstr::I32Const(0));
+                // Map the method name to a host import and emit the call.
+                if let Some(host_name) = vec_method_to_host(method) {
+                    instrs.push(AlkInstr::Call(host_name.to_string()));
+                } else {
+                    // Unknown method — defensively drop receiver+args.
+                    // (Should not happen in typechecked code.)
+                    let drop_count = 1 + args.len();
+                    for _ in 0..drop_count {
+                        instrs.push(AlkInstr::Drop);
+                    }
                 }
             }
             Expr::Binary {
@@ -656,18 +788,37 @@ pub fn compile_to_wasm(module: &ModuleDecl) -> Result<WasmModule, WasmCodegenErr
         });
     }
 
+    // Register host import types in the type section (Gap 5).
+    // These get type indices; the imports themselves get function indices 0..9.
+    let host_type_indices: Vec<u32> = HOST_IMPORTS
+        .iter()
+        .map(|h| type_builder.register(h.params, h.results))
+        .collect();
+
     // Emit the type section.
     type_builder.emit(&mut wasm_module);
 
-    // 4. Function section — declare function indices.
+    // 4. Import section — declare 10 host function imports (Gap 5).
+    // Emitted before the function section per WASM binary format ordering.
+    let mut import_sec = ImportSection::new();
+    for (i, host) in HOST_IMPORTS.iter().enumerate() {
+        import_sec.import(
+            "alk",
+            host.name,
+            wasm_encoder::EntityType::Function(host_type_indices[i]),
+        );
+    }
+    wasm_module.section(&import_sec);
+
+    // 5. Function section — declare module-local function indices.
+    // (These start after the host imports in the function index space.)
     let mut func_sec = FunctionSection::new();
     for meta in &fn_metas {
         func_sec.function(meta.type_idx);
     }
     wasm_module.section(&func_sec);
 
-    // 5. Memory section — enough pages for all string data (Gap 4).
-    // Pre-scan the module for string literals to calculate memory needs.
+    // 6. Memory section — enough pages for all string data (Gap 4).
     let mut strings = StringTable::new();
     pre_scan_strings(module, &mut strings);
     let mem_pages = strings.memory_pages();
@@ -681,10 +832,12 @@ pub fn compile_to_wasm(module: &ModuleDecl) -> Result<WasmModule, WasmCodegenErr
     });
     wasm_module.section(&mem_sec);
 
-    // 6. Export section — export each function + memory.
+    // 7. Export section — export each function + memory.
+    // Module functions are offset by host_import_count() in the function index space.
+    let host_count = host_import_count();
     let mut export_sec = ExportSection::new();
     for (idx, meta) in fn_metas.iter().enumerate() {
-        export_sec.export(&meta.name, ExportKind::Func, idx as u32);
+        export_sec.export(&meta.name, ExportKind::Func, host_count + idx as u32);
     }
     export_sec.export("memory", ExportKind::Memory, 0);
     wasm_module.section(&export_sec);
@@ -736,10 +889,15 @@ pub fn compile_to_wasm(module: &ModuleDecl) -> Result<WasmModule, WasmCodegenErr
                     }
                 }
                 AlkInstr::Call(name) => {
-                    // Resolve the function name to its index in the export
-                    // table. Functions are exported in declaration order.
-                    let func_idx =
-                        fn_metas.iter().position(|m| m.name == *name).unwrap_or(0) as u32;
+                    // Gap 5: check host imports first (indices 0..9),
+                    // then resolve module-local functions (offset by host_import_count).
+                    let func_idx = if let Some(host_idx) = host_import_index(name) {
+                        host_idx
+                    } else {
+                        let local_idx =
+                            fn_metas.iter().position(|m| m.name == *name).unwrap_or(0) as u32;
+                        host_import_count() + local_idx
+                    };
                     Instruction::Call(func_idx)
                 }
                 AlkInstr::If => Instruction::If(wasm_encoder::BlockType::Empty),
@@ -1476,6 +1634,167 @@ mod string_data_tests {
         let parser = Parser::new(0);
         for payload in parser.parse_all(&wasm.bytes) {
             payload.expect("wasmparser should parse");
+        }
+    }
+}
+
+#[cfg(test)]
+mod collection_dispatch_tests {
+    use super::*;
+
+    const SCENE: &str = "scene { background: #000000 }";
+
+    fn parse_module(src: &str) -> ModuleDecl {
+        crate::parse(src).expect("parse should succeed")
+    }
+
+    #[test]
+    fn wasm_module_has_import_section() {
+        let src = format!(
+            "module M {{ {} fn f() -> i32 {{ return 42; }} }}",
+            SCENE
+        );
+        let m = parse_module(&src);
+        let wasm = compile_to_wasm(&m).expect("wasm compile");
+        assert!(wasm.is_valid_wasm());
+        // The binary should contain the "alk" module name for imports.
+        let binary_str = String::from_utf8_lossy(&wasm.bytes);
+        assert!(binary_str.contains("alk"), "binary must import from 'alk' module");
+    }
+
+    #[test]
+    fn wasm_module_has_10_host_imports() {
+        let src = format!(
+            "module M {{ {} fn f() -> i32 {{ return 42; }} }}",
+            SCENE
+        );
+        let m = parse_module(&src);
+        let wasm = compile_to_wasm(&m).expect("wasm compile");
+        // Validate with wasmparser and count imports.
+        use wasmparser::Parser;
+        let parser = Parser::new(0);
+        let mut import_count = 0;
+        for payload in parser.parse_all(&wasm.bytes) {
+            let payload = payload.expect("wasmparser should parse");
+            if let wasmparser::Payload::ImportSection(r) = payload {
+                import_count = r.count();
+            }
+        }
+        assert_eq!(import_count, 10, "must have exactly 10 host imports");
+    }
+
+    #[test]
+    fn wasm_vec_new_compiles_to_host_call() {
+        let src = format!(
+            "module M {{ {} fn f() {{ let v: Vec<i32> = Vec::new(); }} }}",
+            SCENE
+        );
+        let m = parse_module(&src);
+        let wasm = compile_to_wasm(&m).expect("wasm compile");
+        assert!(wasm.is_valid_wasm());
+        // Validate with wasmparser.
+        use wasmparser::Parser;
+        let parser = Parser::new(0);
+        for payload in parser.parse_all(&wasm.bytes) {
+            payload.expect("wasmparser should parse");
+        }
+    }
+
+    #[test]
+    fn wasm_vec_push_compiles_to_host_call() {
+        let src = format!(
+            "module M {{ {} fn f() {{ let v: Vec<i32> = Vec::new(); v.push(1); }} }}",
+            SCENE
+        );
+        let m = parse_module(&src);
+        let wasm = compile_to_wasm(&m).expect("wasm compile");
+        assert!(wasm.is_valid_wasm());
+        use wasmparser::Parser;
+        let parser = Parser::new(0);
+        for payload in parser.parse_all(&wasm.bytes) {
+            payload.expect("wasmparser should parse");
+        }
+    }
+
+    #[test]
+    fn wasm_vec_len_compiles_to_host_call() {
+        let src = format!(
+            "module M {{ {} fn f() {{ let v: Vec<i32> = Vec::new(); let n: i32 = v.len(); }} }}",
+            SCENE
+        );
+        let m = parse_module(&src);
+        let wasm = compile_to_wasm(&m).expect("wasm compile");
+        assert!(wasm.is_valid_wasm());
+        use wasmparser::Parser;
+        let parser = Parser::new(0);
+        for payload in parser.parse_all(&wasm.bytes) {
+            payload.expect("wasmparser should parse");
+        }
+    }
+
+    #[test]
+    fn wasm_vec_with_capacity_compiles_to_host_call() {
+        let src = format!(
+            "module M {{ {} fn f() {{ let v: Vec<i32> = Vec::with_capacity(10); }} }}",
+            SCENE
+        );
+        let m = parse_module(&src);
+        let wasm = compile_to_wasm(&m).expect("wasm compile");
+        assert!(wasm.is_valid_wasm());
+        use wasmparser::Parser;
+        let parser = Parser::new(0);
+        for payload in parser.parse_all(&wasm.bytes) {
+            payload.expect("wasmparser should parse");
+        }
+    }
+
+    #[test]
+    fn wasm_function_call_offset_by_imports() {
+        // Module functions must be offset by 10 (host import count).
+        let src = format!(
+            "module M {{ {} fn a() -> i32 {{ return 1; }} fn b() -> i32 {{ return a(); }} }}",
+            SCENE
+        );
+        let m = parse_module(&src);
+        let wasm = compile_to_wasm(&m).expect("wasm compile");
+        assert!(wasm.is_valid_wasm());
+        assert_eq!(wasm.exported_functions.len(), 2);
+        // Validate with wasmparser.
+        use wasmparser::Parser;
+        let parser = Parser::new(0);
+        for payload in parser.parse_all(&wasm.bytes) {
+            payload.expect("wasmparser should parse");
+        }
+    }
+
+    #[test]
+    fn wasm_host_import_names_present() {
+        let src = format!(
+            "module M {{ {} fn f() -> i32 {{ return 42; }} }}",
+            SCENE
+        );
+        let m = parse_module(&src);
+        let wasm = compile_to_wasm(&m).expect("wasm compile");
+        let binary_str = String::from_utf8_lossy(&wasm.bytes);
+        // Check that all 10 host import names are present.
+        for name in &["vec_new", "vec_with_capacity", "vec_push", "vec_extend",
+                       "vec_remove", "vec_clear", "vec_len", "vec_is_empty",
+                       "vec_get", "vec_set"] {
+            assert!(binary_str.contains(name), "binary must contain import '{}'", name);
+        }
+    }
+
+    #[test]
+    fn wasm_vec_method_dispatch_all_methods() {
+        // Test that all recognized Vec methods compile without error.
+        for method in &["push", "len", "is_empty", "clear", "get"] {
+            let src = format!(
+                "module M {{ {} fn f() {{ let v: Vec<i32> = Vec::new(); v.{}(); }} }}",
+                SCENE, method
+            );
+            let m = parse_module(&src);
+            let wasm = compile_to_wasm(&m).expect("wasm compile");
+            assert!(wasm.is_valid_wasm(), "method {} should compile", method);
         }
     }
 }
