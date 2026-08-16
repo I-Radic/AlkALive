@@ -58,6 +58,79 @@ use crate::ast::{
 };
 
 // ======================================================================
+// Function signature table (Gap 3 — full type inference)
+// ======================================================================
+
+/// A function's signature — the type-checker's view of a callable.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FnSig {
+    /// The lookup name. For free functions this is the bare name (`"add"`).
+    /// For class methods this is the qualified name (`"Button::new"`).
+    pub name: String,
+    /// The parameter types (excluding the implicit `self`).
+    pub params: Vec<Type>,
+    /// The declared return type. `None` means the function returns unit.
+    pub return_type: Option<Type>,
+    /// Parameter names (carried for diagnostics).
+    pub param_names: Vec<String>,
+    /// `Some(class_name)` for instance/static methods; `None` for free functions.
+    pub receiver_class: Option<String>,
+    /// `Some(module_path)` for names imported from another module.
+    pub imported_from: Option<String>,
+}
+
+/// Module-wide function signature table. Built in pass 1 of `check_module`;
+/// consulted in pass 3 (body checking). Pass 2 collects module-level `let`s.
+#[derive(Debug, Clone, Default)]
+pub struct FnSigTable {
+    sigs: std::collections::HashMap<String, FnSig>,
+}
+
+impl FnSigTable {
+    /// Construct an empty table.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Insert (or replace) a signature.
+    pub fn insert(&mut self, name: impl Into<String>, sig: FnSig) {
+        self.sigs.insert(name.into(), sig);
+    }
+
+    /// Look up by name.
+    pub fn lookup(&self, name: &str) -> Option<&FnSig> {
+        self.sigs.get(name)
+    }
+
+    /// Look up a class method by `Class::method` qualified name.
+    pub fn lookup_method(&self, class: &str, method: &str) -> Option<&FnSig> {
+        let q = format!("{}::{}", class, method);
+        self.sigs.get(&q)
+    }
+}
+
+/// Collect all function signatures from the module into the table.
+/// This runs in pass 1, before any function body is checked, so mutual
+/// recursion and self-recursion are supported.
+fn collect_signatures(module: &ModuleDecl, table: &mut FnSigTable) {
+    for item in &module.items {
+        if let ItemDecl::Fn(f) = item {
+            table.insert(
+                f.name.clone(),
+                FnSig {
+                    name: f.name.clone(),
+                    params: f.params.iter().map(|p| p.ty.clone()).collect(),
+                    return_type: f.return_type.clone(),
+                    param_names: f.params.iter().map(|p| p.name.clone()).collect(),
+                    receiver_class: None,
+                    imported_from: None,
+                },
+            );
+        }
+    }
+}
+
+// ======================================================================
 // Error type
 // ======================================================================
 
@@ -230,18 +303,22 @@ impl TypeEnv {
 /// found (empty if the module is well-typed).
 ///
 /// This is the main entry point, called between parsing and IR lowering.
+/// Uses a three-pass algorithm (Gap 3 — full type inference):
+///   Pass 1: collect all function signatures into FnSigTable
+///   Pass 2: collect module-level `let` bindings
+///   Pass 3: check each function body with access to the FnSigTable
 pub fn check_module(module: &ModuleDecl) -> TypeErrorSet {
     let mut errors = TypeErrorSet::new();
 
-    // Build the module-level environment: all top-level `let` bindings.
+    // Pass 1: collect all function signatures.
+    let mut sigs = FnSigTable::new();
+    collect_signatures(module, &mut sigs);
+
+    // Pass 2: collect module-level `let` bindings.
     let mut module_env = TypeEnv::new();
     for item in &module.items {
         if let ItemDecl::Let(l) = item {
-            // Check the initialiser expression in the empty env first
-            // (module-level lets can only see other module-level lets).
-            check_expr(&l.init, &module_env, &mut errors);
-            // Add the binding with the EFFECTIVE qualifier (attribute form
-            // takes precedence over type-qualifier form).
+            check_expr(&l.init, &module_env, &mut errors, &sigs);
             let effective_ty = Type {
                 qualifier: effective_qualifier(l),
                 base: l.ty.base.clone(),
@@ -250,10 +327,10 @@ pub fn check_module(module: &ModuleDecl) -> TypeErrorSet {
         }
     }
 
-    // Type-check each function.
+    // Pass 3: check each function body, threading `&sigs` through.
     for item in &module.items {
         if let ItemDecl::Fn(f) = item {
-            check_fn(f, &module_env, &mut errors);
+            check_fn(f, &module_env, &sigs, &mut errors);
         }
     }
 
@@ -261,13 +338,12 @@ pub fn check_module(module: &ModuleDecl) -> TypeErrorSet {
 }
 
 /// Type-check a single function declaration.
-fn check_fn(f: &FnDecl, module_env: &TypeEnv, errors: &mut TypeErrorSet) {
-    // Build the function's local environment: module-level + parameters.
+fn check_fn(f: &FnDecl, module_env: &TypeEnv, sigs: &FnSigTable, errors: &mut TypeErrorSet) {
     let mut env = module_env.clone();
     for p in &f.params {
         env.insert(p.name.clone(), p.ty.clone());
     }
-    check_block(&f.body, &mut env, f.return_type.as_ref(), errors);
+    check_block(&f.body, &mut env, f.return_type.as_ref(), sigs, errors);
 }
 
 /// Type-check a block of statements. The environment is extended with local
@@ -276,14 +352,13 @@ fn check_block(
     block: &Block,
     env: &mut TypeEnv,
     return_type: Option<&Type>,
+    sigs: &FnSigTable,
     errors: &mut TypeErrorSet,
 ) {
     for stmt in &block.stmts {
         match stmt {
             Stmt::Let(l) => {
-                check_expr(&l.init, env, errors);
-                // Use the EFFECTIVE qualifier (attribute form takes
-                // precedence over type-qualifier form).
+                check_expr(&l.init, env, errors, sigs);
                 let effective_ty = Type {
                     qualifier: effective_qualifier(l),
                     base: l.ty.base.clone(),
@@ -291,11 +366,11 @@ fn check_block(
                 env.insert(l.name.clone(), effective_ty);
             }
             Stmt::Expr(e) => {
-                check_expr(e, env, errors);
+                check_expr(e, env, errors, sigs);
             }
             Stmt::Return(opt, line, col) => {
                 if let Some(e) = opt {
-                    let ty = check_expr(e, env, errors);
+                    let ty = check_expr(e, env, errors, sigs);
                     if let (Some(rt), Some(et)) = (return_type, ty) {
                         if !type_is_subtype(&et, rt) {
                             errors.push(TypeError {
@@ -318,12 +393,10 @@ fn check_block(
                 line: _,
                 col: _,
             } => {
-                // Check the condition — should be bool.
-                check_expr(cond, env, errors);
-                // Check both blocks.
-                check_block(then_block, env, return_type, errors);
+                check_expr(cond, env, errors, sigs);
+                check_block(then_block, env, return_type, sigs, errors);
                 if let Some(else_b) = else_block {
-                    check_block(else_b, env, return_type, errors);
+                    check_block(else_b, env, return_type, sigs, errors);
                 }
             }
             Stmt::While {
@@ -332,10 +405,8 @@ fn check_block(
                 line: _,
                 col: _,
             } => {
-                // Check the condition — should be bool.
-                check_expr(cond, env, errors);
-                // Check the loop body.
-                check_block(body, env, return_type, errors);
+                check_expr(cond, env, errors, sigs);
+                check_block(body, env, return_type, sigs, errors);
             }
         }
     }
@@ -344,7 +415,15 @@ fn check_block(
 /// Type-check an expression. Returns `Some(Type)` if the expression's type
 /// could be determined, or `None` if it could not (e.g. an error was already
 /// reported, or the expression is a path call whose return type is unknown).
-fn check_expr(expr: &Expr, env: &TypeEnv, errors: &mut TypeErrorSet) -> Option<Type> {
+///
+/// Gap 3: uses the `FnSigTable` to infer function-call return types and
+/// verify argument types/arity.
+fn check_expr(
+    expr: &Expr,
+    env: &TypeEnv,
+    errors: &mut TypeErrorSet,
+    sigs: &FnSigTable,
+) -> Option<Type> {
     match expr {
         Expr::Lit(lit, _, _) => Some(literal_type(lit)),
         Expr::Var(name, line, col) => match env.lookup(name) {
@@ -361,17 +440,32 @@ fn check_expr(expr: &Expr, env: &TypeEnv, errors: &mut TypeErrorSet) -> Option<T
         Expr::PathCall(module, member, args, line, col) => {
             // Check arguments.
             for a in args {
-                check_expr(a, env, errors);
+                check_expr(a, env, errors, sigs);
             }
-            // `Vec::new()` returns an unrestricted Vec<...>. We can't infer
-            // the element type without more context, so return None.
-            // `Vec::with_capacity(n)` similarly.
-            if module == "Vec" && (member == "new" || member == "with_capacity") {
-                return None;
+            match (module.as_str(), member.as_str()) {
+                ("Vec", "new") | ("Vec", "with_capacity") => {
+                    // Element type cannot be inferred from the call site alone;
+                    // the `let`-binding's declared type drives downstream uses.
+                    None
+                }
+                (mod_name, member_name) => {
+                    let qualified = format!("{}::{}", mod_name, member_name);
+                    match sigs.lookup(&qualified) {
+                        Some(sig) => sig.return_type.clone(),
+                        None => {
+                            errors.push(TypeError {
+                                message: format!(
+                                    "call to unknown path `{}::{}`",
+                                    mod_name, member_name
+                                ),
+                                line: *line,
+                                col: *col,
+                            });
+                            None
+                        }
+                    }
+                }
             }
-            // Unknown path call — don't error (the runtime may provide it).
-            let _ = (line, col);
-            None
         }
         Expr::MethodCall {
             receiver,
@@ -380,21 +474,48 @@ fn check_expr(expr: &Expr, env: &TypeEnv, errors: &mut TypeErrorSet) -> Option<T
             line,
             col,
         } => {
+            // Check the receiver first.
+            let receiver_ty = check_expr(receiver, env, errors, sigs);
             // Check arguments.
             for a in args {
-                check_expr(a, env, errors);
+                check_expr(a, env, errors, sigs);
             }
-            // Check the receiver.
-            let receiver_ty = check_expr(receiver, env, errors);
-            // If the receiver is a collection with a qualifier, check the op.
-            if let Some(ty) = &receiver_ty {
-                if ty.is_vec() {
+            match &receiver_ty {
+                Some(ty) if ty.is_vec() => {
+                    // Collection method dispatch — check monotonicity + return type.
                     check_method_op(method, ty.qualifier, *line, *col, errors);
+                    collection_method_return_type(method, *line, *col, errors)
                 }
+                Some(Type {
+                    base: BaseType::Named(class_name),
+                    ..
+                }) => {
+                    // Class method dispatch (requires Gap 1's ClassTable).
+                    // Until Gap 1 lands, this branch emits an error.
+                    let _ = class_name;
+                    errors.push(TypeError {
+                        message: format!(
+                            "method `.{}()` is not defined on type `{}`",
+                            method, class_name
+                        ),
+                        line: *line,
+                        col: *col,
+                    });
+                    None
+                }
+                Some(other) => {
+                    errors.push(TypeError {
+                        message: format!(
+                            "method `.{}()` is not defined on type `{}`",
+                            method, other
+                        ),
+                        line: *line,
+                        col: *col,
+                    });
+                    None
+                }
+                None => None, // receiver already errored; do not double-report.
             }
-            // Method calls return unknown types (we don't have a full type
-            // inference engine for return values).
-            None
         }
         Expr::Binary {
             lhs,
@@ -403,24 +524,14 @@ fn check_expr(expr: &Expr, env: &TypeEnv, errors: &mut TypeErrorSet) -> Option<T
             line: _,
             col: _,
         } => {
-            // Check both operands.
-            let lhs_ty = check_expr(lhs, env, errors);
-            let rhs_ty = check_expr(rhs, env, errors);
-            // Determine the result type based on the operator.
-            if op.is_comparison() {
-                // Comparison operators return bool.
-                Some(Type {
-                    qualifier: Qualifier::Unrestricted,
-                    base: BaseType::Bool,
-                })
-            } else if op.is_logical() {
-                // Logical operators (&&, ||) require bool operands, return bool.
+            let lhs_ty = check_expr(lhs, env, errors, sigs);
+            let rhs_ty = check_expr(rhs, env, errors, sigs);
+            if op.is_comparison() || op.is_logical() {
                 Some(Type {
                     qualifier: Qualifier::Unrestricted,
                     base: BaseType::Bool,
                 })
             } else {
-                // Arithmetic operators: return the type of the LHS (or RHS).
                 lhs_ty.or(rhs_ty)
             }
         }
@@ -430,15 +541,89 @@ fn check_expr(expr: &Expr, env: &TypeEnv, errors: &mut TypeErrorSet) -> Option<T
             line,
             col,
         } => {
-            // Check arguments.
+            // Check every argument expression.
+            let mut arg_types = Vec::with_capacity(args.len());
             for a in args {
-                check_expr(a, env, errors);
+                arg_types.push(check_expr(a, env, errors, sigs));
             }
-            // Function call return type — we don't have a function signature
-            // table in the type env yet, so return None (unknown type).
-            // The type checker should be extended to look up the function's
-            // declared return type. For now, we don't error on calls.
-            let _ = (callee, line, col);
+            // Look up the callee in the signature table.
+            match sigs.lookup(callee) {
+                Some(sig) => {
+                    // Arity check.
+                    if args.len() != sig.params.len() {
+                        errors.push(TypeError {
+                            message: format!(
+                                "call to function `{}` expects {} argument(s) but was called with {}",
+                                callee, sig.params.len(), args.len()
+                            ),
+                            line: *line,
+                            col: *col,
+                        });
+                    }
+                    // Per-argument type check (with subtype flow).
+                    for (i, (arg_ty, param_ty)) in
+                        arg_types.iter().zip(sig.params.iter()).enumerate()
+                    {
+                        if let Some(at) = arg_ty {
+                            if !type_is_subtype(at, param_ty) {
+                                errors.push(TypeError {
+                                    message: format!(
+                                        "argument {} to `{}` has type `{}` but parameter has type `{}`",
+                                        i + 1, callee, at, param_ty
+                                    ),
+                                    line: *line,
+                                    col: *col,
+                                });
+                            }
+                        }
+                    }
+                    // Return the declared return type.
+                    sig.return_type.clone()
+                }
+                None => {
+                    errors.push(TypeError {
+                        message: format!("call to unknown function `{}`", callee),
+                        line: *line,
+                        col: *col,
+                    });
+                    None
+                }
+            }
+        }
+    }
+}
+
+/// Returns the return type of a collection method on a `Vec<T>` receiver.
+/// Grow/shrink ops return `None` (unit). `len` returns `i32`, `is_empty`
+/// returns `bool`, `get`/`first`/`last` return `i32` (placeholder for
+/// future `Option<T>`).
+fn collection_method_return_type(
+    method: &str,
+    line: u32,
+    col: u32,
+    errors: &mut TypeErrorSet,
+) -> Option<Type> {
+    match method {
+        "push" | "extend" | "insert" | "append" | "remove" | "truncate" | "clear"
+        | "swap_remove" | "drain" => None,
+        "len" => Some(Type {
+            qualifier: Qualifier::Unrestricted,
+            base: BaseType::I32,
+        }),
+        "is_empty" => Some(Type {
+            qualifier: Qualifier::Unrestricted,
+            base: BaseType::Bool,
+        }),
+        "get" | "first" | "last" | "contains" => Some(Type {
+            qualifier: Qualifier::Unrestricted,
+            base: BaseType::I32,
+        }),
+        _ => {
+            errors.push(TypeError {
+                message: format!("method `.{}()` is not defined on type `Vec<T>`", method),
+                line,
+                col,
+            });
             None
         }
     }
@@ -910,5 +1095,154 @@ mod tests {
         assert!(out.contains("2 type error(s)"));
         assert!(out.contains("err1"));
         assert!(out.contains("err2"));
+    }
+}
+
+#[cfg(test)]
+mod type_inference_tests {
+    use super::*;
+    use crate::parser::parse;
+
+    const SCENE: &str = "scene { background: #000000 }";
+
+    fn check(src: &str) -> TypeErrorSet {
+        let m = parse(src).expect("parse");
+        check_module(&m)
+    }
+
+    // LANG-3T-01: function call infers return type
+    #[test]
+    fn lang_3t_01_call_infers_return_type() {
+        let src = format!(
+            "module M {{ {} fn id(x: i32) -> i32 {{ return x; }} fn main() -> i32 {{ return id(42); }} }}",
+            SCENE
+        );
+        let errors = check(&src);
+        assert!(errors.is_empty(), "got: {}", errors);
+    }
+
+    // LANG-3T-02: arity mismatch detected
+    #[test]
+    fn lang_3t_02_arity_mismatch() {
+        let src = format!(
+            "module M {{ {} fn id(x: i32) -> i32 {{ return x; }} fn main() -> i32 {{ return id(1, 2); }} }}",
+            SCENE
+        );
+        let errors = check(&src);
+        assert_eq!(errors.len(), 1);
+        assert!(errors.errors[0]
+            .message
+            .contains("expects 1 argument(s) but was called with 2"));
+    }
+
+    // LANG-3T-03: argument type mismatch detected
+    #[test]
+    fn lang_3t_03_arg_type_mismatch() {
+        let src = format!(
+            "module M {{ {} fn id(x: i32) -> i32 {{ return x; }} fn main() -> i32 {{ return id(true); }} }}",
+            SCENE
+        );
+        let errors = check(&src);
+        assert!(errors.len() >= 1);
+        assert!(errors.errors[0]
+            .message
+            .contains("argument 1 to `id` has type `bool` but parameter has type `i32`"));
+    }
+
+    // LANG-3T-04: unknown function call detected
+    #[test]
+    fn lang_3t_04_unknown_function() {
+        let src = format!(
+            "module M {{ {} fn main() -> i32 {{ return unknown(42); }} }}",
+            SCENE
+        );
+        let errors = check(&src);
+        assert_eq!(errors.len(), 1);
+        assert!(errors.errors[0]
+            .message
+            .contains("call to unknown function `unknown`"));
+    }
+
+    // LANG-3T-05: mutual recursion supported
+    #[test]
+    fn lang_3t_05_mutual_recursion() {
+        let src = format!(
+            "module M {{ {} fn is_even(n: i32) -> bool {{ if (n == 0) {{ return true; }} return is_odd(n - 1); }} fn is_odd(n: i32) -> bool {{ if (n == 0) {{ return false; }} return is_even(n - 1); }} }}",
+            SCENE
+        );
+        let errors = check(&src);
+        assert!(errors.is_empty(), "got: {}", errors);
+    }
+
+    // LANG-3T-06: self recursion supported
+    #[test]
+    fn lang_3t_06_self_recursion() {
+        let src = format!(
+            "module M {{ {} fn fact(n: i32) -> i32 {{ if (n <= 1) {{ return 1; }} return n * fact(n - 1); }} }}",
+            SCENE
+        );
+        let errors = check(&src);
+        assert!(errors.is_empty(), "got: {}", errors);
+    }
+
+    // LANG-3T-07: vec.len() infers i32
+    #[test]
+    fn lang_3t_07_vec_len_infers_i32() {
+        let src = format!(
+            "module M {{ {} fn main() {{ let v: Vec<i32> = Vec::new(); let n: i32 = v.len(); }} }}",
+            SCENE
+        );
+        let errors = check(&src);
+        assert!(errors.is_empty(), "got: {}", errors);
+    }
+
+    // LANG-3T-08: vec.is_empty() infers bool
+    #[test]
+    fn lang_3t_08_vec_is_empty_infers_bool() {
+        let src = format!(
+            "module M {{ {} fn main() {{ let v: Vec<i32> = Vec::new(); let b: bool = v.is_empty(); }} }}",
+            SCENE
+        );
+        let errors = check(&src);
+        assert!(errors.is_empty(), "got: {}", errors);
+    }
+
+    // LANG-3T-10: method on non-Vec/non-class type errors
+    #[test]
+    fn lang_3t_10_method_on_scalar_errors() {
+        let src = format!(
+            "module M {{ {} fn main() {{ let x: i32 = 5; x.foo(); }} }}",
+            SCENE
+        );
+        let errors = check(&src);
+        assert_eq!(errors.len(), 1);
+        assert!(errors.errors[0]
+            .message
+            .contains("method `.foo()` is not defined on type `i32`"));
+    }
+
+    // LANG-3T-11: unknown collection method errors
+    #[test]
+    fn lang_3t_11_unknown_collection_method() {
+        let src = format!(
+            "module M {{ {} fn main() {{ let v: Vec<i32> = Vec::new(); v.bogus(); }} }}",
+            SCENE
+        );
+        let errors = check(&src);
+        assert_eq!(errors.len(), 1);
+        assert!(errors.errors[0]
+            .message
+            .contains("method `.bogus()` is not defined on type `Vec<T>`"));
+    }
+
+    // LANG-3T-12: unknown path call errors
+    #[test]
+    fn lang_3t_12_unknown_path_call() {
+        let src = format!("module M {{ {} fn main() {{ Foo::bar(); }} }}", SCENE);
+        let errors = check(&src);
+        assert_eq!(errors.len(), 1);
+        assert!(errors.errors[0]
+            .message
+            .contains("call to unknown path `Foo::bar`"));
     }
 }

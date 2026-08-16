@@ -133,7 +133,7 @@ pub use seminative::{
 };
 pub use typechecker::{
     check_module, effective_qualifier, param_qualifier, qualifier_is_subtype, type_is_subtype,
-    TypeEnv, TypeError, TypeErrorSet,
+    FnSig, FnSigTable, TypeEnv, TypeError, TypeErrorSet,
 };
 pub use wasm_codegen::{
     alk_full_type_to_wasm, alk_type_to_wasm, compile_src_to_wasm, compile_to_wasm,
