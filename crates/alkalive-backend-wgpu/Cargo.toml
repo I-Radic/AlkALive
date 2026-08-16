@@ -10,9 +10,12 @@ description = "AlkALive GPU rendering backend — WebGL2/WebGPU canvas renderer 
 path = "src/lib.rs"
 
 [dependencies]
-# Internal workspace crates — text shaping + glyph atlas, and scene IR.
+# Internal workspace crates — text shaping + glyph atlas, scene IR, the
+# render-graph IR, and the per-frame TextSceneData.
 alkalive-text = { workspace = true }
 alkalive-compiler = { workspace = true }
+alkalive-render = { workspace = true }
+alkalive-scene-data = { workspace = true }
 
 # bytemuck for typed byte reinterpretation of vertex/uniform buffers.
 bytemuck = { version = "1", features = ["derive"] }

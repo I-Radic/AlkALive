@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/alkalive-core",
+    "crates/alkalive-scene-data",
     "crates/alkalive-runtime",
     "crates/alkalive-render",
     "crates/alkalive-layout",
@@ -33,6 +34,7 @@ description = "AlkALive — a custom WASM+GPU UI language and runtime"
 [workspace.dependencies]
 # Internal crates
 alkalive-core   = { path = "crates/alkalive-core" }
+alkalive-scene-data = { path = "crates/alkalive-scene-data" }
 alkalive-render = { path = "crates/alkalive-render" }
 alkalive-layout = { path = "crates/alkalive-layout" }
 alkalive-text   = { path = "crates/alkalive-text" }

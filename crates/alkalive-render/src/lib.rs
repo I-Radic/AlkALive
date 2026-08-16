@@ -16,6 +16,21 @@
 //! is preserved; only safe Rust is used.
 //!
 //! See `docs/SPECIFICATION.md` §4.1–§4.7 for the authoritative signatures.
+//!
+//! # Wave 11 — practical Render-Graph IR (Gap 6)
+//!
+//! Wave 11 (Task ID 11 — Gap 6) adds the practical [`graph`] module: a
+//! real, data-driven render-graph IR consumed by the GPU backend at frame
+//! time. The [`graph::RenderGraph`] / [`graph::RenderPass`] /
+//! [`graph::Attachment`] / [`graph::DrawCall`] / [`graph::DrawCallKind`]
+//! types and the [`graph::build_render_graph`] function together replace
+//! the previously hardcoded dispatch sequence in
+//! `WgpuRenderer::render_frame_internal` with a data-driven loop over the
+//! graph's passes. The Wave 5 compiler IR at the crate root
+//! ([`RenderGraph`], [`RenderPass`], [`Attachment`], [`DrawCall`]) and
+//! the [`compile`] function remain in place for the compiler tests; the
+//! two IRs coexist, and the long-term plan (per the rendering spec §1.2)
+//! is for them to converge.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -26,6 +41,14 @@ use core::ops::Range;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Practical render-graph IR consumed by the GPU backend (Wave 11, Gap 6).
+///
+/// This module defines the data-driven [`graph::RenderGraph`] type and the
+/// [`graph::build_render_graph`] constructor that the renderer iterates at
+/// frame time. See the module-level docs for design rationale and the
+/// relationship to the Wave 5 compiler IR at the crate root.
+pub mod graph;
 
 // ---------------------------------------------------------------------------
 // Opaque identifiers and helper types referenced by the IR (§4.2)
@@ -1448,13 +1471,23 @@ mod tests {
                 PipelineHandle { value: 0 },
                 "placeholder draw call {i} must use the zero-handle pipeline",
             );
-            assert!(dc.indices.is_none(), "placeholder draw call {i} has no indices");
+            assert!(
+                dc.indices.is_none(),
+                "placeholder draw call {i} has no indices"
+            );
             assert!(
                 dc.bindings.is_empty(),
                 "placeholder draw call {i} has no bind groups",
             );
-            assert_eq!(dc.instances, 0..1, "placeholder draw call {i} spans one instance");
-            assert!(dc.scissor.is_none(), "placeholder draw call {i} has no scissor");
+            assert_eq!(
+                dc.instances,
+                0..1,
+                "placeholder draw call {i} spans one instance"
+            );
+            assert!(
+                dc.scissor.is_none(),
+                "placeholder draw call {i} has no scissor"
+            );
         }
     }
 

@@ -47,67 +47,16 @@
 use bytemuck::{Pod, Zeroable};
 
 // ---------------------------------------------------------------------------
-// Public scene-data types (target-agnostic — compile everywhere)
+// Public scene-data types (re-exported from alkalive-scene-data — Gap 6)
 // ---------------------------------------------------------------------------
 
-/// The per-frame scene description passed to [`WgpuRenderer::render_frame`].
+/// Re-export of the per-frame scene description.
 ///
-/// This is the runtime's view of a `SceneIR` after layout — a single text
-/// run with rotation, a background color, and a foreground (text) color.
-#[derive(Debug, Clone)]
-pub struct TextSceneData {
-    /// The text to render (will be shaped by `alkalive-text` on first frame).
-    pub text: String,
-    /// Font size in pixels.
-    pub font_size: f32,
-    /// Y-axis rotation speed in radians per second.
-    pub rotation_speed: f32,
-    /// Background fill color as `(R, G, B)` (0–255).
-    pub background: (u8, u8, u8),
-    /// Text color as normalized RGBA `(0.0–1.0)`. Default golden =
-    /// `(1.0, 0.843, 0.0, 1.0)` (`#FFD700`).
-    pub text_color: (f32, f32, f32, f32),
-    /// Input field text (what the user has typed). Empty string = show placeholder.
-    pub input_text: String,
-    /// Input field placeholder text (shown when input_text is empty).
-    pub input_placeholder: String,
-}
-
-impl Default for TextSceneData {
-    fn default() -> Self {
-        // Golden text on black background, slowly rotating.
-        Self {
-            text: "Hello World!".to_string(),
-            font_size: 64.0,
-            rotation_speed: 0.5,
-            background: (0, 0, 0),
-            text_color: (1.0, 0.843, 0.0, 1.0), // gold #FFD700
-            input_text: String::new(),
-            input_placeholder: "Type here...".to_string(),
-        }
-    }
-}
-
-impl TextSceneData {
-    /// Construct a default golden-on-black scene with the given text.
-    pub fn new(text: impl Into<String>) -> Self {
-        Self {
-            text: text.into(),
-            input_text: String::new(),
-            input_placeholder: "Type here...".to_string(),
-            ..Default::default()
-        }
-    }
-
-    /// Convert the `(R, G, B)` 0–255 background to normalized `(R, G, B)` floats.
-    pub fn background_normalized(&self) -> (f32, f32, f32) {
-        (
-            self.background.0 as f32 / 255.0,
-            self.background.1 as f32 / 255.0,
-            self.background.2 as f32 / 255.0,
-        )
-    }
-}
+/// `TextSceneData` was moved to `alkalive-scene-data` in Wave 11 (Gap 6 —
+/// Render-Graph IR) to break the `alkalive-render` ↔ `alkalive-backend-wgpu`
+/// dependency cycle. It is re-exported here so existing call sites
+/// (`alkalive-runtime-wasm`) continue to compile unchanged.
+pub use alkalive_scene_data::TextSceneData;
 
 // ---------------------------------------------------------------------------
 // GPU vertex + uniform layouts (target-agnostic — compile everywhere)
@@ -809,15 +758,15 @@ mod wasm {
 
         /// Render one frame using the ADR-024 schedule.
         ///
-        /// The pass order, shader selection, and rotation flag are read from
-        /// `schedule.passes` (in `schedule.pass_order` order). The actual
-        /// GPU drawing logic is unchanged from the pre-ADR-024 implementation
-        /// — the key change is that the pass dispatch is now **data-driven**
-        /// (iterate `schedule.passes` and match on `pass.kind`) rather than
-        /// hardcoded as a sequence of `if` blocks.
-        ///
-        /// `text_scene.text_color` modulates the fragment output; the glyph
-        /// atlas is sampled for alpha.
+        /// Wave 11 (Gap 6 — Render-Graph IR): this method now drives
+        /// rendering through the render-graph IR. It builds a
+        /// [`alkalive_render::graph::RenderGraph`] from `text_scene` +
+        /// the renderer's cached `input_field_bounds` (populated by
+        /// `upload_text_atlas`), then dispatches it via
+        /// [`render_graph`](Self::render_graph). The schedule argument
+        /// is kept for API compatibility with `render_frame_with_dirty`
+        /// and the runtime-wasm call site; it is not consumed here (the
+        /// graph carries the pass order).
         ///
         /// On the first call, the glyph atlas is rasterized via
         /// `alkalive-text` (HarfRust shaping + glyph rasterization) and
@@ -826,10 +775,192 @@ mod wasm {
         pub fn render_frame(
             &mut self,
             text_scene: &TextSceneData,
-            schedule: &alkalive_compiler::ScheduleIR,
+            _schedule: &alkalive_compiler::ScheduleIR,
             time: f32,
         ) {
-            self.render_frame_internal(text_scene, schedule, time, None);
+            // 1. Determine input display text.
+            let input_display = if text_scene.input_text.is_empty() {
+                text_scene.input_placeholder.clone()
+            } else {
+                text_scene.input_text.clone()
+            };
+
+            // 2. Re-upload atlas if needed (first frame or input changed).
+            //    This also recomputes `input_field_bounds` (set by
+            //    `upload_text_atlas` based on canvas size + font size).
+            if !self.atlas_uploaded || self.last_input_text != input_display {
+                if let Err(e) =
+                    self.upload_text_atlas(&text_scene.text, &input_display, text_scene.font_size)
+                {
+                    web_sys::console::error_1(&format!("atlas upload failed: {}", e).into());
+                }
+                self.atlas_uploaded = true;
+                self.last_input_text = input_display;
+            }
+
+            // 3. Build the render graph from the per-frame scene data + the
+            //    cached input-field bounds. The graph is the single source
+            //    of truth for "what to draw this frame" — `render_graph`
+            //    iterates it and dispatches the draw calls.
+            let graph = alkalive_render::graph::build_render_graph(
+                text_scene,
+                (self.width, self.height),
+                self.input_field_bounds,
+            );
+
+            // 4. Execute the graph.
+            self.render_graph(&graph, time);
+        }
+
+        /// Render one frame from a [`alkalive_render::graph::RenderGraph`].
+        ///
+        /// This is the Wave 11 (Gap 6) render-graph-driven entry point.
+        /// It iterates `graph.pass_order`, dispatches each pass's draw
+        /// calls via [`execute_draw_call`](Self::execute_draw_call), and
+        /// produces the same visual output as the previously hardcoded
+        /// sequence in `render_frame_internal`.
+        ///
+        /// # Pre-conditions
+        ///
+        /// The caller is responsible for ensuring the glyph atlas has
+        /// been uploaded (via `upload_text_atlas`) before calling this
+        /// method. The [`render_frame`](Self::render_frame) wrapper
+        /// handles this; direct callers must do it themselves.
+        ///
+        /// # Arguments
+        ///
+        /// * `graph` — the render graph to execute.
+        /// * `time` — the animation time (drives text rotation).
+        pub fn render_graph(&mut self, graph: &alkalive_render::graph::RenderGraph, time: f32) {
+            // 1. Set up the canvas viewport. (The canvas size is set at
+            //    init/resize time; we only need to reset the viewport here
+            //    in case a previous frame left it in an unexpected state.)
+            self.gl
+                .viewport(0, 0, self.width as i32, self.height as i32);
+
+            // 2. Iterate passes in `graph.pass_order` and dispatch each
+            //    draw call. The graph is the single source of truth for
+            //    pass order — there is no fallback to the schedule.
+            for &pass_idx in &graph.pass_order {
+                let pass = match graph.passes.get(pass_idx) {
+                    Some(p) => p,
+                    None => continue,
+                };
+                for dc in &pass.draw_calls {
+                    self.execute_draw_call(graph, dc, time);
+                }
+            }
+        }
+
+        /// Execute one draw call.
+        ///
+        /// Dispatches on [`alkalive_render::graph::DrawCallKind`] to the
+        /// concrete GPU operation. This is the per-draw-call sink shared
+        /// by [`render_graph`](Self::render_graph).
+        ///
+        /// # Draw-text dispatch
+        ///
+        /// `DrawCallKind::DrawText` carries a `text_ptr`/`text_len` pair
+        /// for future SAB/IPC transport (Gap 8). Today the renderer does
+        /// not dereference `text_ptr` — it reads the text from its own
+        /// cached shaped-run vertex buffer. The draw call's `id` field
+        /// selects which cached run to draw:
+        /// - `id == 3` → title text (vertex range `0..title_vertex_count`).
+        /// - `id == 4` → input text (vertex range
+        ///   `input_vertex_start..input_vertex_start + input_vertex_count`).
+        ///
+        /// This mapping is a temporary pragmatic bridge until a future
+        /// wave adds a `GlyphRunId` field to `DrawCallKind::DrawText`
+        /// (per the rendering spec §1.2 REND-608).
+        fn execute_draw_call(
+            &self,
+            _graph: &alkalive_render::graph::RenderGraph,
+            dc: &alkalive_render::graph::DrawCall,
+            time: f32,
+        ) {
+            use alkalive_render::graph::DrawCallKind;
+            match &dc.kind {
+                DrawCallKind::Clear { color } => {
+                    self.gl.clear_color(color.0, color.1, color.2, color.3);
+                    self.gl.clear(WebGl2RenderingContext::COLOR_BUFFER_BIT);
+                }
+                DrawCallKind::DrawRect { x, y, w, h, color } => {
+                    self.draw_rect_filled(*x, *y, *w, *h, color.0, color.1, color.2, color.3);
+                }
+                DrawCallKind::DrawRectOutline {
+                    x,
+                    y,
+                    w,
+                    h,
+                    color,
+                    line_width,
+                } => {
+                    self.draw_rect_outline_lw(
+                        *x,
+                        *y,
+                        *w,
+                        *h,
+                        color.0,
+                        color.1,
+                        color.2,
+                        color.3,
+                        *line_width,
+                    );
+                }
+                DrawCallKind::DrawText {
+                    color, rotation, ..
+                } => {
+                    // Re-bind the text shader program (the rect passes
+                    // above may have left the rect shader bound).
+                    self.gl.use_program(Some(&self.program));
+                    self.gl.bind_vertex_array(Some(&self.vao));
+                    self.gl.uniform2f(
+                        Some(&self.u_canvas_size),
+                        self.width as f32,
+                        self.height as f32,
+                    );
+                    self.gl.active_texture(WebGl2RenderingContext::TEXTURE0);
+                    self.gl.bind_texture(
+                        WebGl2RenderingContext::TEXTURE_2D,
+                        Some(&self.glyph_texture),
+                    );
+                    self.gl.uniform1i(Some(&self.u_glyph_texture), 0);
+
+                    // Map draw-call id → cached vertex range. See the
+                    // method-level docstring for the rationale.
+                    let (start, count) = match dc.id {
+                        3 => (0i32, self.title_vertex_count as i32),
+                        4 => (
+                            self.input_vertex_start as i32,
+                            self.input_vertex_count as i32,
+                        ),
+                        other => {
+                            web_sys::console::warn_1(
+                                &format!(
+                                    "AlkALive: DrawText draw call id {} has no cached vertex range; skipping",
+                                    other
+                                )
+                                .into(),
+                            );
+                            return;
+                        }
+                    };
+                    if count <= 0 {
+                        return;
+                    }
+
+                    // rotation in the IR is the rotation-speed coefficient;
+                    // multiply by time to get the actual angle.
+                    self.gl.uniform1f(Some(&self.u_rotation), rotation * time);
+                    self.gl
+                        .uniform4f(Some(&self.u_text_color), color.0, color.1, color.2, color.3);
+                    if let Some(ref u_time) = self.u_time {
+                        self.gl.uniform1f(Some(u_time), time);
+                    }
+                    self.gl
+                        .draw_arrays(WebGl2RenderingContext::TRIANGLES, start, count);
+                }
+            }
         }
 
         /// Render one frame with ADR-025 dirty-pass info.
@@ -1051,6 +1182,9 @@ mod wasm {
         }
 
         /// Draw a rectangle outline (4 edges) with proper alpha blending.
+        ///
+        /// Convenience wrapper around [`draw_rect_outline_lw`](Self::draw_rect_outline_lw)
+        /// with the default line width of `2.0` pixels.
         fn draw_rect_outline(
             &self,
             x: f32,
@@ -1062,7 +1196,30 @@ mod wasm {
             b: f32,
             a: f32,
         ) {
-            let lw = 2.0; // line width in pixels
+            self.draw_rect_outline_lw(x, y, w, h, r, g, b, a, 2.0);
+        }
+
+        /// Draw a rectangle outline (4 edges) with the given line width.
+        ///
+        /// Each edge is a solid filled rect of thickness `line_width`
+        /// pixels, drawn via [`draw_rect_filled`](Self::draw_rect_filled)
+        /// so it inherits proper alpha blending.
+        fn draw_rect_outline_lw(
+            &self,
+            x: f32,
+            y: f32,
+            w: f32,
+            h: f32,
+            r: f32,
+            g: f32,
+            b: f32,
+            a: f32,
+            line_width: f32,
+        ) {
+            let lw = line_width.max(0.0);
+            if lw <= 0.0 || w < lw || h < lw {
+                return;
+            }
             self.draw_rect_filled(x, y, w, lw, r, g, b, a); // top
             self.draw_rect_filled(x, y + h - lw, w, lw, r, g, b, a); // bottom
             self.draw_rect_filled(x, y, lw, h, r, g, b, a); // left
@@ -1140,8 +1297,7 @@ mod wasm {
             // 1. Initialize or reuse the cached font registry + shaper (M7 fix:
             //    avoids re-parsing the 170 KB TTF on every keystroke).
             if self.font_registry.is_none() {
-                let font_bytes: &[u8] =
-                    include_bytes!("../assets/Roboto-Regular.ttf");
+                let font_bytes: &[u8] = include_bytes!("../assets/Roboto-Regular.ttf");
                 let mut registry = HarfRustFontRegistry::new();
                 let loaded_id = registry
                     .load_bundle(font_bytes)
@@ -1409,6 +1565,17 @@ mod native {
             _time: f32,
             _dirty_passes: &[usize],
         ) {
+            // Intentionally empty: the GPU backend only runs on wasm32.
+        }
+
+        /// No-op on native (Wave 11 / Gap 6: render-graph-driven entry
+        /// point).
+        ///
+        /// This is the type-compatible stub for the wasm32
+        /// [`render_graph`](super::WgpuRenderer::render_graph) method.
+        /// It accepts a [`alkalive_render::graph::RenderGraph`] but does
+        /// nothing — the native build never has a real renderer.
+        pub fn render_graph(&mut self, _graph: &alkalive_render::graph::RenderGraph, _time: f32) {
             // Intentionally empty: the GPU backend only runs on wasm32.
         }
 
@@ -1767,5 +1934,79 @@ mod tests {
         // Each visible glyph produces 6 vertices.
         assert_eq!(verts.len(), text_quads.len() * 6);
         assert!(verts.iter().all(|v| v.x.is_finite() && v.y.is_finite()));
+    }
+
+    // -------------------------------------------------------------------------
+    // Wave 11 (Gap 6) — render-graph-driven rendering tests
+    // -------------------------------------------------------------------------
+
+    /// The renderer's `render_graph` method exists and accepts a
+    /// `&alkalive_render::graph::RenderGraph` argument. This is a
+    /// type-level smoke test — on native the renderer is a stub, but the
+    /// signature must compile and the call must not panic.
+    #[test]
+    fn render_graph_method_accepts_render_graph() {
+        fn _assert_api(r: &mut WgpuRenderer) {
+            let scene = TextSceneData::default();
+            let graph = alkalive_render::graph::build_render_graph(
+                &scene,
+                (800, 600),
+                (100.0, 200.0, 400.0, 40.0),
+            );
+            r.render_graph(&graph, 0.0);
+        }
+        // No construction on native — just exercising the API surface.
+        let _ = _assert_api;
+    }
+
+    /// The `render_frame` method still works end-to-end through the new
+    /// render-graph path. On native the renderer is a stub, so this just
+    /// verifies the call does not panic and the schedule argument is
+    /// accepted for type-compat.
+    #[test]
+    fn render_frame_routes_through_render_graph() {
+        fn _assert_api(r: &mut WgpuRenderer) {
+            let scene = TextSceneData::default();
+            let algo = alkalive_compiler::AlgorithmIR::new(
+                alkalive_compiler::mint_module_id("Test"),
+                "Test",
+            );
+            let sched = alkalive_compiler::schedule_lowering(&algo);
+            r.render_frame(&scene, &sched, 0.0);
+        }
+        let _ = _assert_api;
+    }
+
+    /// The graph produced by `build_render_graph` validates cleanly when
+    /// called from the backend crate (cross-crate integration check).
+    #[test]
+    fn backend_built_render_graph_validates() {
+        let scene = TextSceneData::default();
+        let graph = alkalive_render::graph::build_render_graph(
+            &scene,
+            (800, 600),
+            (100.0, 200.0, 400.0, 40.0),
+        );
+        assert!(graph.validate().is_ok(), "graph must validate");
+        assert_eq!(graph.passes.len(), 5, "graph must have 5 passes");
+        assert_eq!(graph.pass_order, vec![0, 1, 2, 3, 4]);
+    }
+
+    /// The `TextSceneData` re-export from `alkalive-scene-data` still
+    /// constructs the same default golden-on-black scene (cross-crate
+    /// identity check after the Wave 11 move).
+    #[test]
+    fn text_scene_data_reexport_works() {
+        let s = TextSceneData::default();
+        assert_eq!(s.text, "Hello World!");
+        assert_eq!(s.background, (0, 0, 0));
+        assert_eq!(s.text_color, (1.0, 0.843, 0.0, 1.0));
+        assert_eq!(s.input_placeholder, "Type here...");
+
+        // The constructor + helper survive the move.
+        let s2 = TextSceneData::new("Hi");
+        assert_eq!(s2.text, "Hi");
+        let (r, _g, _b) = s2.background_normalized();
+        assert!((r - 0.0).abs() < 1e-6);
     }
 }

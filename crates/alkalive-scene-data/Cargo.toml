@@ -1,15 +1,13 @@
 [package]
-name = "alkalive-render"
+name = "alkalive-scene-data"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "AlkALive alkalive-render crate"
+description = "AlkALive per-frame scene data (TextSceneData) shared between compiler, render, and backend"
 
 [lib]
 path = "src/lib.rs"
 
 [dependencies]
 alkalive-core = { workspace = true }
-alkalive-text = { workspace = true }
-alkalive-scene-data = { workspace = true }
