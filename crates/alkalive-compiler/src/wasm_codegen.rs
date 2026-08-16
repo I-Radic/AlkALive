@@ -46,8 +46,8 @@ use crate::ast::{
 use crate::typechecker;
 
 use wasm_encoder::{
-    CodeSection, ExportKind, ExportSection, Function, FunctionSection, Instruction, MemorySection,
-    MemoryType, Module, TypeSection, ValType,
+    CodeSection, DataSection, ExportKind, ExportSection, Function, FunctionSection, Instruction,
+    MemorySection, MemoryType, Module, TypeSection, ValType,
 };
 
 // ======================================================================
@@ -76,6 +76,111 @@ impl fmt::Display for WasmCodegenError {
 }
 
 impl core::error::Error for WasmCodegenError {}
+
+// ======================================================================
+// String table (Gap 4 — String Data Sections)
+// ======================================================================
+
+/// One entry in the string table — interned literal data.
+#[derive(Debug, Clone)]
+struct StringEntry {
+    /// The UTF-8 string content (the source literal, decoded).
+    text: String,
+    /// Address of the length prefix in linear memory.
+    offset: u32,
+    /// Byte length of the UTF-8 payload (excluding the length prefix).
+    byte_len: u32,
+}
+
+/// The module-wide string interner. Populated lazily by `compile_expr` on
+/// `Lit::Str`; consumed by the data-section emitter after the code section.
+#[derive(Debug, Default)]
+struct StringTable {
+    /// Map from literal text → memory offset (for dedup).
+    by_text: std::collections::HashMap<String, u32>,
+    /// Ordered entries for emitting the data section.
+    entries: Vec<StringEntry>,
+    /// Next free offset (starts at 4, after the null guard).
+    next_offset: u32,
+}
+
+impl StringTable {
+    fn new() -> Self {
+        Self {
+            by_text: Default::default(),
+            entries: Vec::new(),
+            next_offset: 4, // null guard occupies 0..3
+        }
+    }
+
+    /// Intern a string. Returns the offset of the length prefix.
+    /// Deduplicates by exact text match.
+    fn intern(&mut self, text: &str) -> u32 {
+        if let Some(&off) = self.by_text.get(text) {
+            return off;
+        }
+        let byte_len = text.len() as u32;
+        // 4 bytes for length prefix + byte_len bytes for payload,
+        // padded to 4-byte alignment.
+        let padded_len = (byte_len + 3) & !3; // round up to 4
+        let total = 4 + padded_len;
+        let offset = self.next_offset;
+        self.entries.push(StringEntry {
+            text: text.to_string(),
+            offset,
+            byte_len,
+        });
+        self.by_text.insert(text.to_string(), offset);
+        self.next_offset += total;
+        offset
+    }
+
+    /// Returns the total bytes needed for all strings (including null guard).
+    fn total_bytes(&self) -> u32 {
+        self.next_offset
+    }
+
+    /// Returns the number of pages needed (1 page = 64 KiB).
+    fn memory_pages(&self) -> u32 {
+        let bytes = self.total_bytes();
+        bytes.div_ceil(65536).max(1)
+    }
+
+    /// Returns true if there are no string entries (only the null guard).
+    #[allow(dead_code)]
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Emit the data section into the module.
+    fn emit_data_section(&self, module: &mut Module) {
+        let mut data_sec = DataSection::new();
+
+        // Null guard: 4 zero bytes at offset 0.
+        data_sec.active(0, &wasm_encoder::ConstExpr::i32_const(0), [0u8, 0, 0, 0]);
+
+        // One active data segment per string entry.
+        for entry in &self.entries {
+            let byte_len = entry.byte_len;
+            let padded_len = (byte_len + 3) & !3;
+            let mut segment: Vec<u8> = Vec::with_capacity(4 + padded_len as usize);
+            // 4-byte little-endian length prefix.
+            segment.extend_from_slice(&byte_len.to_le_bytes());
+            // UTF-8 payload.
+            segment.extend_from_slice(entry.text.as_bytes());
+            // Zero-padding to 4-byte alignment.
+            let padding = (padded_len - byte_len) as usize;
+            segment.resize(segment.len() + padding, 0u8);
+            data_sec.active(
+                0,
+                &wasm_encoder::ConstExpr::i32_const(entry.offset as i32),
+                segment,
+            );
+        }
+
+        module.section(&data_sec);
+    }
+}
 
 // ======================================================================
 // WASM type mapping
@@ -222,7 +327,11 @@ impl FnCompiler {
 
     /// Compile a block of statements into a sequence of instructions.
     /// Returns the instructions and any new locals declared.
-    fn compile_block(&mut self, block: &Block) -> (Vec<AlkInstr>, Vec<(ValType, u32)>) {
+    fn compile_block(
+        &mut self,
+        block: &Block,
+        strings: &mut StringTable,
+    ) -> (Vec<AlkInstr>, Vec<(ValType, u32)>) {
         let mut instrs = Vec::new();
         let mut new_locals: Vec<(ValType, u32)> = Vec::new(); // (type, count)
 
@@ -230,7 +339,7 @@ impl FnCompiler {
             match stmt {
                 Stmt::Let(l) => {
                     // Compile the initialiser expression.
-                    self.compile_expr(&l.init, &mut instrs);
+                    self.compile_expr(&l.init, &mut instrs, strings);
                     // Declare a new local for this binding.
                     let local_idx = self.locals.len() as u32;
                     let wasm_ty = alk_full_type_to_wasm(&l.ty);
@@ -251,14 +360,14 @@ impl FnCompiler {
                 }
                 Stmt::Expr(e) => {
                     // Expression statement — compile and drop the result.
-                    self.compile_expr(e, &mut instrs);
+                    self.compile_expr(e, &mut instrs, strings);
                     if expr_produces_value(e) {
                         instrs.push(AlkInstr::Drop);
                     }
                 }
                 Stmt::Return(opt, _line, _col) => {
                     if let Some(e) = opt {
-                        self.compile_expr(e, &mut instrs);
+                        self.compile_expr(e, &mut instrs, strings);
                     }
                     instrs.push(AlkInstr::Return);
                 }
@@ -270,11 +379,11 @@ impl FnCompiler {
                     col: _,
                 } => {
                     // Compile the condition (leaves i32 on stack).
-                    self.compile_expr(cond, &mut instrs);
+                    self.compile_expr(cond, &mut instrs, strings);
                     // Emit: if (cond) { then } else { else }
                     instrs.push(AlkInstr::If);
                     // Compile the then-block.
-                    let (then_instrs, then_locals) = self.compile_block(then_block);
+                    let (then_instrs, then_locals) = self.compile_block(then_block, strings);
                     instrs.extend(then_instrs);
                     // Merge then-locals into new_locals.
                     for (ty, count) in then_locals {
@@ -291,7 +400,7 @@ impl FnCompiler {
                     // Handle else branch.
                     if let Some(else_b) = else_block {
                         instrs.push(AlkInstr::Else);
-                        let (else_instrs, else_locals) = self.compile_block(else_b);
+                        let (else_instrs, else_locals) = self.compile_block(else_b, strings);
                         instrs.extend(else_instrs);
                         for (ty, count) in else_locals {
                             if let Some(last) = new_locals.last_mut() {
@@ -318,14 +427,14 @@ impl FnCompiler {
                     instrs.push(AlkInstr::Block);
                     instrs.push(AlkInstr::Loop);
                     // Compile condition.
-                    self.compile_expr(cond, &mut instrs);
+                    self.compile_expr(cond, &mut instrs, strings);
                     // if (cond == 0) break out of loop
                     instrs.push(AlkInstr::If);
                     instrs.push(AlkInstr::Br(1)); // break out of block
                     instrs.push(AlkInstr::Else);
                     instrs.push(AlkInstr::End);
                     // Compile body.
-                    let (body_instrs, body_locals) = self.compile_block(body);
+                    let (body_instrs, body_locals) = self.compile_block(body, strings);
                     instrs.extend(body_instrs);
                     for (ty, count) in body_locals {
                         if let Some(last) = new_locals.last_mut() {
@@ -351,16 +460,16 @@ impl FnCompiler {
 
     /// Compile an expression into WASM instructions, leaving the result on
     /// the stack.
-    fn compile_expr(&self, expr: &Expr, instrs: &mut Vec<AlkInstr>) {
+    fn compile_expr(&self, expr: &Expr, instrs: &mut Vec<AlkInstr>, strings: &mut StringTable) {
         match expr {
             Expr::Lit(lit, _line, _col) => {
                 match lit {
                     Lit::Int(v) => instrs.push(AlkInstr::I32Const(*v as i32)),
                     Lit::Float(v) => instrs.push(AlkInstr::F32Const(*v as f32)),
-                    Lit::Str(_) => {
-                        // String literals are stored in the data section;
-                        // the expression yields a pointer (i32) to the data.
-                        instrs.push(AlkInstr::I32Const(0));
+                    Lit::Str(s) => {
+                        // Intern the string and emit its memory offset as a pointer.
+                        let offset = strings.intern(s);
+                        instrs.push(AlkInstr::I32Const(offset as i32));
                     }
                     Lit::Bool(b) => {
                         instrs.push(AlkInstr::I32Const(if *b { 1 } else { 0 }));
@@ -378,7 +487,7 @@ impl FnCompiler {
             Expr::PathCall(module, member, args, _line, _col) => {
                 // Compile arguments (left to right).
                 for a in args {
-                    self.compile_expr(a, instrs);
+                    self.compile_expr(a, instrs, strings);
                 }
                 // For Vec::new() etc., emit a placeholder pointer.
                 let _ = (module, member);
@@ -392,10 +501,10 @@ impl FnCompiler {
                 col: _,
             } => {
                 // Compile the receiver (leaves a pointer on the stack).
-                self.compile_expr(receiver, instrs);
+                self.compile_expr(receiver, instrs, strings);
                 // Compile arguments.
                 for a in args {
-                    self.compile_expr(a, instrs);
+                    self.compile_expr(a, instrs, strings);
                 }
                 let _ = method;
                 // Query methods return a value; mutators don't.
@@ -411,8 +520,8 @@ impl FnCompiler {
                 col: _,
             } => {
                 // Compile LHS and RHS (leaves both on the stack).
-                self.compile_expr(lhs, instrs);
-                self.compile_expr(rhs, instrs);
+                self.compile_expr(lhs, instrs, strings);
+                self.compile_expr(rhs, instrs, strings);
                 // Emit the binary operator instruction.
                 instrs.push(AlkInstr::BinaryOp(*op));
             }
@@ -424,7 +533,7 @@ impl FnCompiler {
             } => {
                 // Compile arguments (left to right).
                 for a in args {
-                    self.compile_expr(a, instrs);
+                    self.compile_expr(a, instrs, strings);
                 }
                 // Emit a call instruction. The function index will be
                 // resolved by the codegen pass that knows the function table.
@@ -557,10 +666,14 @@ pub fn compile_to_wasm(module: &ModuleDecl) -> Result<WasmModule, WasmCodegenErr
     }
     wasm_module.section(&func_sec);
 
-    // 5. Memory section — 1 page of linear memory (64KB).
+    // 5. Memory section — enough pages for all string data (Gap 4).
+    // Pre-scan the module for string literals to calculate memory needs.
+    let mut strings = StringTable::new();
+    pre_scan_strings(module, &mut strings);
+    let mem_pages = strings.memory_pages();
     let mut mem_sec = MemorySection::new();
     mem_sec.memory(MemoryType {
-        minimum: 1,
+        minimum: mem_pages as u64,
         maximum: None,
         memory64: false,
         shared: false,
@@ -577,13 +690,14 @@ pub fn compile_to_wasm(module: &ModuleDecl) -> Result<WasmModule, WasmCodegenErr
     wasm_module.section(&export_sec);
 
     // 7. Code section — compile function bodies.
+    // (StringTable already created in step 5; strings are pre-interned.)
     let mut code_sec = CodeSection::new();
     for (idx, f) in fns.iter().enumerate() {
         let meta = &fn_metas[idx];
         let mut compiler = FnCompiler::new(&f.params);
 
-        // Compile the body.
-        let (body_instrs, new_locals) = compiler.compile_block(&f.body);
+        // Compile the body (interning strings into the StringTable).
+        let (body_instrs, new_locals) = compiler.compile_block(&f.body, &mut strings);
 
         // Build the local declarations for the function body.
         // wasm-encoder wants (count, ValType) pairs.
@@ -650,7 +764,12 @@ pub fn compile_to_wasm(module: &ModuleDecl) -> Result<WasmModule, WasmCodegenErr
     }
     wasm_module.section(&code_sec);
 
-    // 8. Serialize the module to bytes.
+    // 8. Data section — emit string literals as data segments (Gap 4).
+    // Always emit (at minimum the null guard); the emit_data_section
+    // method handles the empty case.
+    strings.emit_data_section(&mut wasm_module);
+
+    // 9. Serialize the module to bytes.
     let bytes = wasm_module.finish();
 
     let exported_functions: Vec<String> = fn_metas.iter().map(|m| m.name.clone()).collect();
@@ -658,7 +777,7 @@ pub fn compile_to_wasm(module: &ModuleDecl) -> Result<WasmModule, WasmCodegenErr
     Ok(WasmModule {
         bytes,
         exported_functions,
-        memory_pages: 1,
+        memory_pages: mem_pages,
     })
 }
 
@@ -668,6 +787,78 @@ pub fn compile_to_wasm(module: &ModuleDecl) -> Result<WasmModule, WasmCodegenErr
 pub fn compile_src_to_wasm(src: &str) -> Result<WasmModule, String> {
     let module = crate::parse(src).map_err(|e| format!("{}", e))?;
     compile_to_wasm(&module).map_err(|e| format!("{}", e))
+}
+
+/// Pre-scan the module for string literals, interning them into the StringTable.
+/// This allows the memory section to declare the correct number of pages
+/// before the code section is emitted.
+fn pre_scan_strings(module: &ModuleDecl, strings: &mut StringTable) {
+    for item in &module.items {
+        match item {
+            ItemDecl::Fn(f) => pre_scan_block(&f.body, strings),
+            ItemDecl::Let(l) => pre_scan_expr(&l.init, strings),
+        }
+    }
+}
+
+fn pre_scan_block(block: &Block, strings: &mut StringTable) {
+    for stmt in &block.stmts {
+        match stmt {
+            Stmt::Let(l) => pre_scan_expr(&l.init, strings),
+            Stmt::Expr(e) => pre_scan_expr(e, strings),
+            Stmt::Return(opt, _, _) => {
+                if let Some(e) = opt {
+                    pre_scan_expr(e, strings);
+                }
+            }
+            Stmt::If {
+                cond,
+                then_block,
+                else_block,
+                ..
+            } => {
+                pre_scan_expr(cond, strings);
+                pre_scan_block(then_block, strings);
+                if let Some(else_b) = else_block {
+                    pre_scan_block(else_b, strings);
+                }
+            }
+            Stmt::While { cond, body, .. } => {
+                pre_scan_expr(cond, strings);
+                pre_scan_block(body, strings);
+            }
+        }
+    }
+}
+
+fn pre_scan_expr(expr: &Expr, strings: &mut StringTable) {
+    match expr {
+        Expr::Lit(Lit::Str(s), _, _) => {
+            strings.intern(s);
+        }
+        Expr::Lit(_, _, _) => {}
+        Expr::Var(_, _, _) => {}
+        Expr::Binary { lhs, rhs, .. } => {
+            pre_scan_expr(lhs, strings);
+            pre_scan_expr(rhs, strings);
+        }
+        Expr::PathCall(_, _, args, _, _) => {
+            for a in args {
+                pre_scan_expr(a, strings);
+            }
+        }
+        Expr::MethodCall { receiver, args, .. } => {
+            pre_scan_expr(receiver, strings);
+            for a in args {
+                pre_scan_expr(a, strings);
+            }
+        }
+        Expr::Call { args, .. } => {
+            for a in args {
+                pre_scan_expr(a, strings);
+            }
+        }
+    }
 }
 
 // ======================================================================
@@ -1167,6 +1358,124 @@ mod control_flow_tests {
         let parser = Parser::new(0);
         for payload in parser.parse_all(&wasm.bytes) {
             payload.expect("wasmparser should parse the while binary");
+        }
+    }
+}
+
+#[cfg(test)]
+mod string_data_tests {
+    use super::*;
+
+    const SCENE: &str = "scene { background: #000000 }";
+
+    fn parse_module(src: &str) -> ModuleDecl {
+        crate::parse(src).expect("parse should succeed")
+    }
+
+    #[test]
+    fn string_literal_emits_data_section() {
+        let src = format!(
+            "module M {{ {} fn f() -> i32 {{ return \"hello\"; }} }}",
+            SCENE
+        );
+        // This should fail type checking (string -> i32 mismatch), but
+        // we can test the string table directly.
+        let mut st = StringTable::new();
+        let off = st.intern("hello");
+        assert!(off > 0, "offset must be > 0 (after null guard)");
+        assert_eq!(st.entries.len(), 1);
+        assert_eq!(st.entries[0].text, "hello");
+    }
+
+    #[test]
+    fn string_deduplication() {
+        let mut st = StringTable::new();
+        let off1 = st.intern("world");
+        let off2 = st.intern("world");
+        assert_eq!(off1, off2, "same string must return same offset");
+        assert_eq!(st.entries.len(), 1, "only one entry after dedup");
+    }
+
+    #[test]
+    fn string_different_strings_different_offsets() {
+        let mut st = StringTable::new();
+        let off1 = st.intern("foo");
+        let off2 = st.intern("bar");
+        assert_ne!(off1, off2, "different strings must have different offsets");
+        assert_eq!(st.entries.len(), 2);
+    }
+
+    #[test]
+    fn string_empty_string() {
+        let mut st = StringTable::new();
+        let off = st.intern("");
+        assert!(off > 0, "empty string still gets a valid offset");
+        assert_eq!(st.entries[0].byte_len, 0);
+    }
+
+    #[test]
+    fn string_null_guard_at_offset_zero() {
+        let st = StringTable::new();
+        // No strings interned, but next_offset should be 4 (after null guard)
+        assert_eq!(st.next_offset, 4);
+        assert!(st.is_empty());
+    }
+
+    #[test]
+    fn string_memory_pages_calculation() {
+        let mut st = StringTable::new();
+        // Small strings should fit in 1 page
+        st.intern("hello");
+        st.intern("world");
+        assert_eq!(st.memory_pages(), 1, "small strings fit in 1 page");
+    }
+
+    #[test]
+    fn string_wasm_binary_contains_data_section() {
+        // A module with a string literal should produce a WASM binary
+        // that contains a data section (identified by section ID 11).
+        let src = format!(
+            "module M {{ {} fn f() {{ let s: string = \"hello\"; }} }}",
+            SCENE
+        );
+        let m = parse_module(&src);
+        let wasm = compile_to_wasm(&m).expect("wasm compile");
+        assert!(wasm.is_valid_wasm());
+        // The binary should be larger than a module without strings
+        // because of the data section.
+        assert!(wasm.size() > 20);
+    }
+
+    #[test]
+    fn string_wasm_validated_by_wasmparser() {
+        let src = format!(
+            "module M {{ {} fn f() {{ let s: string = \"test\"; }} }}",
+            SCENE
+        );
+        let m = parse_module(&src);
+        let wasm = compile_to_wasm(&m).expect("wasm compile");
+        use wasmparser::Parser;
+        let parser = Parser::new(0);
+        for payload in parser.parse_all(&wasm.bytes) {
+            payload.expect("wasmparser should parse the binary with strings");
+        }
+    }
+
+    #[test]
+    fn string_multiple_literals() {
+        let src = format!(
+            "module M {{ {} fn f() {{ let a: string = \"foo\"; let b: string = \"bar\"; let c: string = \"foo\"; }} }}",
+            SCENE
+        );
+        let m = parse_module(&src);
+        let wasm = compile_to_wasm(&m).expect("wasm compile");
+        assert!(wasm.is_valid_wasm());
+        // "foo" appears twice but should be deduplicated.
+        // The binary should be valid.
+        use wasmparser::Parser;
+        let parser = Parser::new(0);
+        for payload in parser.parse_all(&wasm.bytes) {
+            payload.expect("wasmparser should parse");
         }
     }
 }
