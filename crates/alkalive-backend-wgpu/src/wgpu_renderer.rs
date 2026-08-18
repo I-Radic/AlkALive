@@ -278,6 +278,22 @@ impl WgpuBackendRenderer {
         })
     }
 
+    /// Render one frame from scene data, building and executing a render graph.
+    /// This is the high-level entry point matching the `WgpuRenderer::render_frame` API.
+    pub fn render_frame(
+        &mut self,
+        scene: &TextSceneData,
+        _schedule: &alkalive_compiler::ScheduleIR,
+        time: f32,
+    ) {
+        let graph = alkalive_render::graph::build_render_graph(
+            scene,
+            (self.width, self.height),
+            self.input_field_bounds,
+        );
+        self.render_graph(&graph, time);
+    }
+
     /// Render one frame using the render graph.
     ///
     /// This method consumes a `RenderGraph` and executes its passes using

@@ -66,6 +66,7 @@ use std::cell::RefCell;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
+pub mod render_worker;
 pub mod signal_store;
 
 // ---------------------------------------------------------------------------

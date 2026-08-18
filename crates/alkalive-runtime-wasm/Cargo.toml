@@ -15,6 +15,8 @@ path = "src/lib.rs"
 alkalive-backend-wgpu = { workspace = true }
 alkalive-compiler = { workspace = true }
 alkalive-text = { workspace = true }
+alkalive-render = { workspace = true }
+alkalive-scene-data = { workspace = true }
 
 # wasm-bindgen + web-sys for browser DOM/Canvas/WebGL2/event bindings.
 wasm-bindgen = { workspace = true }
@@ -32,4 +34,9 @@ web-sys = { version = "0.3", features = [
   "MouseEvent",
   "console",
   "Performance",
+  "Worker",
+  "OffscreenCanvas",
+  "Blob",
+  "Url",
+  "MessageEvent",
 ] }

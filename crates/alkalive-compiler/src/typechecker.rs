@@ -841,6 +841,7 @@ impl TypeEnv {
 /// This is the main entry point, called between parsing and IR lowering.
 /// Uses a four-pass algorithm (Gap 1 — OO model + Gap 3 — full type inference):
 ///   Pass 1: collect all function + class-method signatures into FnSigTable.
+///   Pass 1.1: resolve imports via ModuleResolver (file-based resolution).
 ///   Pass 1.5: collect all class signatures into ClassTable.
 ///   Pass 2: collect module-level `let` bindings.
 ///   Pass 3: check each function body AND class method body.
@@ -851,24 +852,39 @@ pub fn check_module(module: &ModuleDecl) -> TypeErrorSet {
     let mut sigs = FnSigTable::new();
     collect_signatures(module, &mut sigs);
 
-    // Pass 1.1: resolve imports — add imported names to the FnSigTable
-    // as external entries. This allows calls to imported functions to
-    // resolve without "unknown function" errors. Return types are unknown
-    // (None) because we don't have the imported module's signatures.
+    // Pass 1.1: resolve imports using the ModuleResolver (file-based).
+    // This attempts to load and parse imported .alk files, collecting their
+    // pub fn signatures into the FnSigTable. If a module file cannot be
+    // found (e.g., std/ modules), the import is still registered with
+    // unknown params/return type so calls don't produce "unknown function" errors.
+    {
+        let mut resolver = crate::module_resolver::ModuleResolver::new(".");
+        if let Err(e) = resolver.resolve_imports(module, &mut sigs) {
+            // Resolution error — log it but continue (don't block compilation).
+            // The import names are still added as stubs below.
+        }
+    }
+
+    // Pass 1.1b: for any imports that weren't resolved by the file-based
+    // resolver (e.g., std/ modules, or files that weren't found), add them
+    // as stub entries so calls don't produce "unknown function" errors.
     for imp in &module.imports {
         for (name, alias) in &imp.names {
             let local_name = alias.as_ref().unwrap_or(name);
-            sigs.insert(
-                local_name.clone(),
-                FnSig {
-                    name: local_name.clone(),
-                    params: Vec::new(),       // unknown — will skip arity check
-                    return_type: None,        // unknown — callers use declared type
-                    param_names: Vec::new(),
-                    receiver_class: None,
-                    imported_from: Some(imp.module_path.clone()),
-                },
-            );
+            // Only insert a stub if the name wasn't already resolved.
+            if sigs.lookup(local_name).is_none() {
+                sigs.insert(
+                    local_name.clone(),
+                    FnSig {
+                        name: local_name.clone(),
+                        params: Vec::new(),
+                        return_type: None,
+                        param_names: Vec::new(),
+                        receiver_class: None,
+                        imported_from: Some(imp.module_path.clone()),
+                    },
+                );
+            }
         }
     }
 
