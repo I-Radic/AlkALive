@@ -254,12 +254,14 @@ fn collect_classes(
                 }
             }
         }
-        // Compute strides.
-        let total_fields = total_field_count(classes, name);
-        let total_methods = total_unique_method_count(classes, name);
-        if let Some(sig) = classes.lookup_mut(name) {
-            sig.field_stride = 4 * (1 + total_fields);
-            sig.vtable_slot_count = total_methods;
+        // Compute strides — skip if cyclic (would loop forever).
+        if classes.find_cycle(name).is_none() {
+            let total_fields = total_field_count(classes, name);
+            let total_methods = total_unique_method_count(classes, name);
+            if let Some(sig) = classes.lookup_mut(name) {
+                sig.field_stride = 4 * (1 + total_fields);
+                sig.vtable_slot_count = total_methods;
+            }
         }
     }
 }
@@ -509,8 +511,12 @@ impl ClassTable {
 /// (the derived class's own fields + all base-class fields).
 fn total_field_count(classes: &ClassTable, class_name: &str) -> u32 {
     let mut count = 0u32;
+    let mut visited = std::collections::HashSet::new();
     let mut current = Some(class_name);
     while let Some(c) = current {
+        if !visited.insert(c.to_string()) {
+            break; // cycle guard
+        }
         if let Some(sig) = classes.lookup(c) {
             count += sig.fields.len() as u32;
             current = sig.base.as_deref();
@@ -525,8 +531,12 @@ fn total_field_count(classes: &ClassTable, class_name: &str) -> u32 {
 /// same vtable slot, so this is the count of UNIQUE method names).
 fn total_unique_method_count(classes: &ClassTable, class_name: &str) -> u32 {
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut visited = std::collections::HashSet::new();
     let mut current = Some(class_name);
     while let Some(c) = current {
+        if !visited.insert(c.to_string()) {
+            break; // cycle guard
+        }
         if let Some(sig) = classes.lookup(c) {
             for m in &sig.methods {
                 seen.insert(m.name.clone());
