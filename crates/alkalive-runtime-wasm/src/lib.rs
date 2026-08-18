@@ -262,9 +262,34 @@ pub fn start(
     let width = (css_width * dpr).max(1.0) as u32;
     let height = (css_height * dpr).max(1.0) as u32;
 
+    // 5.5. ADR-003: Check whether the render worker architecture is available.
+    //      When supported (OffscreenCanvas + Worker + crossOriginIsolated),
+    //      the runtime can use a dedicated render worker that owns the GPU
+    //      device (ADR-003). When unsupported, it falls back to single-threaded
+    //      main-thread rendering (the current production path).
+    #[cfg(target_arch = "wasm32")]
+    {
+        let worker_supported = render_worker::supports_render_worker();
+        if worker_supported {
+            web_sys::console::log_1(
+                &"AlkALive: render worker supported — GPU device isolation available (ADR-003)."
+                    .into(),
+            );
+        } else {
+            web_sys::console::log_1(
+                &"AlkALive: render worker not supported — using single-threaded fallback.".into(),
+            );
+        }
+    }
+
     // 6. Kick off async GPU backend init. The WgpuRenderer::init_from_canvas
     //    future resolves once the WebGL2 context is acquired, shaders are
     //    compiled, and the glyph atlas texture is created.
+    //    ADR-006: When the wgpu-backend feature is active and the render
+    //    worker is supported, the runtime would use the wgpu renderer with
+    //    WGSL shaders. Currently, the GLSL/WebGL2 renderer is the production
+    //    path; the wgpu renderer (WgpuBackendRenderer) is available as an
+    //    alternative backend when the feature is enabled.
     spawn_local(async move {
         if let Err(e) = init_runtime(
             canvas,

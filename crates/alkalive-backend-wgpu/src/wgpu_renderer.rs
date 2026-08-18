@@ -65,6 +65,22 @@ pub struct WgpuBackendRenderer {
     height: u32,
     /// Input field bounds for hit-testing.
     input_field_bounds: (f32, f32, f32, f32),
+    /// Uniform buffer for text rendering (rotation, canvas_size, time, text_color).
+    uniform_buffer: wgpu::Buffer,
+    /// Bind group layout for the text pipeline (uniform + texture + sampler).
+    text_bind_group_layout: wgpu::BindGroupLayout,
+    /// Bind group for the text pipeline.
+    text_bind_group: wgpu::BindGroup,
+}
+
+/// Uniform data for text rendering, matching the WGSL TextUniforms struct.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct TextUniformsData {
+    rotation: f32,
+    canvas_size: [f32; 2],
+    time: f32,
+    text_color: [f32; 4],
 }
 
 /// Vertex format: position (vec2) + uv (vec2) = 16 bytes.
@@ -260,6 +276,67 @@ impl WgpuBackendRenderer {
             mapped_at_creation: false,
         });
 
+        // 10. Create uniform buffer for text rendering uniforms.
+        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Text Uniforms Buffer"),
+            size: std::mem::size_of::<TextUniformsData>() as wgpu::BufferAddress,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // 11. Create bind group layout for text pipeline.
+        let text_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Text Bind Group Layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+
+        // 12. Create bind group binding the uniform buffer + glyph texture + sampler.
+        let text_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Text Bind Group"),
+            layout: &text_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Buffer(uniform_buffer.as_entire_buffer_binding()),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&glyph_texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&glyph_sampler),
+                },
+            ],
+        });
+
         Ok(Self {
             device,
             queue,
@@ -275,6 +352,9 @@ impl WgpuBackendRenderer {
             width,
             height,
             input_field_bounds: (0.0, 0.0, 0.0, 0.0),
+            uniform_buffer,
+            text_bind_group_layout,
+            text_bind_group,
         })
     }
 
@@ -299,7 +379,7 @@ impl WgpuBackendRenderer {
     /// This method consumes a `RenderGraph` and executes its passes using
     /// the wgpu API, compiling WGSL shaders (done at init) and submitting
     /// command buffers to the GPU.
-    pub fn render_graph(&mut self, graph: &RenderGraph, _time: f32) {
+    pub fn render_graph(&mut self, graph: &RenderGraph, time: f32) {
         // Get the next frame texture.
         let output = self.surface.get_current_texture();
         let Ok(frame) = output else {
@@ -307,14 +387,47 @@ impl WgpuBackendRenderer {
         };
         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
+        // Update uniform buffer with current frame data.
+        let uniforms = TextUniformsData {
+            rotation: 0.5 * time, // rotation_speed * time
+            canvas_size: [self.width as f32, self.height as f32],
+            time,
+            text_color: [1.0, 0.843, 0.0, 1.0], // gold
+        };
+        self.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
+
         // Create a command encoder.
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Render Encoder"),
         });
 
+        // Find the clear color from the first Clear draw call.
+        let mut clear_color = wgpu::Color::BLACK;
+        for pass in &graph.passes {
+            for dc in &pass.draw_calls {
+                if let DrawCallKind::Clear { color } = &dc.kind {
+                    clear_color = wgpu::Color {
+                        r: color.0 as f64,
+                        g: color.1 as f64,
+                        b: color.2 as f64,
+                        a: color.3 as f64,
+                    };
+                }
+            }
+        }
+
         // Execute each pass in the graph's pass_order.
+        let mut is_first_pass = true;
         for &pass_idx in &graph.pass_order {
             let pass = &graph.passes[pass_idx];
+
+            // Determine load operation: Clear on first pass, Load on subsequent.
+            let load_op = if is_first_pass {
+                wgpu::LoadOp::Clear(clear_color)
+            } else {
+                wgpu::LoadOp::Load
+            };
+            is_first_pass = false;
 
             // Begin a render pass.
             {
@@ -324,7 +437,7 @@ impl WgpuBackendRenderer {
                         view: &view,
                         resolve_target: None,
                         ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Load, // Don't clear between passes
+                            load: load_op,
                             store: wgpu::StoreOp::Store,
                         },
                     })],
@@ -336,18 +449,12 @@ impl WgpuBackendRenderer {
                 // Execute draw calls in this pass.
                 for dc in &pass.draw_calls {
                     match &dc.kind {
-                        DrawCallKind::Clear { color } => {
-                            // Clear by using LoadOp::Clear on the first pass.
-                            // For subsequent passes, use a clear rect.
-                            // (wgpu doesn't have scissor+clear; we use LoadOp::Clear.)
-                            let _ = color; // The first pass should use LoadOp::Clear(color)
+                        DrawCallKind::Clear { color: _ } => {
+                            // Clear is handled by LoadOp::Clear above.
                         }
                         DrawCallKind::DrawRect { x, y, w, h, color: _ } => {
                             let _ = (x, y, w, h);
-                            // Rect rendering would use the rect pipeline.
-                            // For now, this is a placeholder that demonstrates the pipeline is bound.
                             render_pass.set_pipeline(&self.rect_pipeline);
-                            // The rect shader uses a full-viewport quad and clips in the fragment shader.
                             render_pass.draw(0..4, 0..1);
                         }
                         DrawCallKind::DrawRectOutline { x, y, w, h, color: _, line_width: _ } => {
@@ -356,11 +463,10 @@ impl WgpuBackendRenderer {
                             render_pass.draw(0..4, 0..1);
                         }
                         DrawCallKind::DrawText { text_ptr: _, text_len: _, font_size: _, color: _, rotation: _, position: _ } => {
-                            // Text rendering uses the text pipeline.
+                            // Text rendering: set pipeline, bind group, vertex buffer, draw.
                             render_pass.set_pipeline(&self.text_pipeline);
+                            render_pass.set_bind_group(0, &self.text_bind_group, &[]);
                             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-                            // Bind glyph texture.
-                            // (Full bind group setup would go here.)
                             if self.vertex_count > 0 {
                                 render_pass.draw(0..self.vertex_count, 0..1);
                             }
