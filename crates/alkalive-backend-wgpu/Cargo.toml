@@ -46,9 +46,13 @@ web-sys = { version = "0.3", features = [
 ] }
 
 [features]
-default = []
-# Enable real wgpu dependency (currently unused — the crate uses raw WebGL2
-# via web-sys as the GPU backend, which is simpler and works in every
-# browser without extra deps). Kept here so the crate name
-# `alkalive-backend-wgpu` keeps its intent for future migration to wgpu.
-wgpu-backend = []
+default = ["wgpu-backend"]
+# Enable the wgpu-based renderer with WGSL shaders (ADR-006).
+# When disabled, falls back to the raw WebGL2 backend with GLSL.
+wgpu-backend = ["dep:wgpu"]
+
+[dependencies.wgpu]
+version = "24"
+features = ["webgl"]
+optional = true
+default-features = true

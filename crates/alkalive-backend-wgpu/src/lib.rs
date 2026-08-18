@@ -410,6 +410,8 @@ pub fn quads_from_text(
 // ---------------------------------------------------------------------------
 
 pub mod wgsl_shaders;
+#[cfg(all(feature = "wgpu-backend", target_arch = "wasm32"))]
+pub mod wgpu_renderer;
 
 #[cfg(target_arch = "wasm32")]
 mod wasm {
