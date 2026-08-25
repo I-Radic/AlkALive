@@ -222,10 +222,17 @@ This is the entire runtime state. There is no signal store, no dependency graph,
 
 **`start()` entry point** (lines 118–149, `#[wasm_bindgen]`):
 1. Installs a panic hook.
-2. Compiles the embedded `.alk` source (`HELLO_ALK_SRC`, line 52: `include_str!("../../../examples/hello.alk")`) via `alkalive_compiler::compile()`.
-3. Lowers the `SceneIR` to `TextSceneData` via `build_scene_from_ir()` (lines 207–242).
+2. Compiles the embedded `.alk` source (`HELLO_ALK_SRC`, `include_str!("../../../examples/hello.alk")`) via `alkalive_compiler::compile_full()` — the full ADR-024/025/026 chain (schedule lowering → incremental analysis → e-graph optimization), which since the Wave 5 audit also runs the type checker and file-based module resolution (a missing non-`std/` import is a hard compile error).
+3. Lowers the `ScheduledScene` to `TextSceneData` via `build_scene_from_scheduled()`.
 4. Reads canvas dimensions.
-5. Spawns async GPU init via `spawn_local(init_runtime(...))`.
+5. Selects the renderer: wgpu/WGSL when a WebGPU adapter is available, otherwise the raw WebGL2/GLSL fallback; the selection and any fallback reason are logged at startup.
+
+> **Wave 5 audit correction (2026-08-25):** earlier revisions of this section
+> cited `compile()` and pre-ADR-024 line numbers. The production runtime now
+> enters through `compile_full()`; the legacy no-typecheck `compile()` entry
+> remains for backward compatibility only. Per-frame work is driven by the
+> schedule + dependency graph (ADR-024/025), not the bare
+> `render_frame(&scene, time)` loop described in older revisions below.
 
 **`build_scene_from_ir()`** (lines 207–242): walks `ir.nodes`, picks the first `NodeIR::Text` and first `NodeIR::InputField`, copies fields into `TextSceneData`. **This is the only place the runtime consumes the compiler's IR.** ADR-024's rename of `build_scene_from_ir()` → `build_scene_from_scheduled()` is a one-function change.
 

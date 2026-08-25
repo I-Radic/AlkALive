@@ -32,7 +32,10 @@ Add an `egraph_optimization` compiler pass (after `incremental_analysis` from AD
 
 ## Status
 
-Proposed.
+Accepted and implemented (Wave 5 audit, 2026-08-25). `egraph_optimization` lives in
+`crates/alkalive-compiler/src/egraph.rs` (custom e-graph per the ADR-018 policy) and is executed
+in the production startup path via `compile_full()` — the entry point the WASM runtime calls —
+with unit coverage for all four rewrite rules plus idempotency and cycle termination.
 
 ## Consequences
 
