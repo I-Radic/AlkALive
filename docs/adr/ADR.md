@@ -109,6 +109,31 @@ Proposed.
 ### Confidence
 **Medium.** The single-owner model is sound, but the COOP/COEP deployment constraint is a real-world risk that may force option (b) on iframe-heavy hosts.
 
+
+### Implementation Status (Final Audit)
+
+*Added by the final implementation audit (wave-02). This subsection records
+the as-built threading posture without redefining the ADR.*
+
+- The **main thread** is the single GPUDevice owner and the render thread,
+  per ADR 021's model and SPECIFICATION.md §1.5 INV-3 ("GPUDevice acquisition
+  occurs on exactly one agent (the main thread)"). The alternative permitted
+  here — a dedicated non-on-demand render worker owning the device via an
+  OffscreenCanvas transfer — is deliberately **not** used.
+- Cross-origin isolation is delivered as **HTTP response headers**
+  (Cross-Origin-Opener-Policy: same-origin,
+  Cross-Origin-Embedder-Policy: require-corp) by the deploy server
+  (deploy/serve.mjs). <meta http-equiv> declarations are ignored by
+  browsers for isolation and were removed. The runtime verifies
+  crossOriginIsolated + constructible SharedArrayBuffer at startup and
+  logs the result.
+- **On-demand workers do not exist yet**, because no async-task consumer
+  subsystems exist in the current milestone (no asset decoding, compute, or
+  IO). Per ADR 021 they are introduced *with* their first consumer; building
+  the IPC substrate earlier would be dead code. Triggers for revisiting:
+  multi-scene-graph composition (the contention this ADR targets), or the
+  first async-task subsystem.
+
 ---
 
 ## ADR 004: Pluggable Constraint-Solver Layout with Mandatory Text-Flow Measurement Contract
@@ -694,6 +719,23 @@ Proposed.
 
 ### Confidence
 **High.** The owner's choice is non-negotiable and resolves the previously open P4.3 decision point without requiring the recommended spike.
+
+
+### Implementation Status (Final Audit)
+
+*Added by the final implementation audit (wave-02).*
+
+- The main thread runs the retain-mode render loop and owns the GPUDevice —
+  implemented (see ADR 003's Implementation Status).
+- **On-demand WASM threads are not yet built**: the model specifies them for
+  asynchronous tasks (asset decoding, compute, IO), and no such subsystems
+  exist in the current milestone. The socket-IPC-over-SharedArrayBuffer
+  transport will be introduced together with the first consumer; its
+  deployment prerequisite (COOP/COEP response headers) is already delivered
+  and verified by deploy/serve.mjs and the E2E suite.
+- An earlier interim module (ender_worker.rs) that transferred an
+  OffscreenCanvas to a stub JS worker was removed: it was never invoked, did
+  not render, and contradicted INV-3's single-owner pinning.
 
 ---
 

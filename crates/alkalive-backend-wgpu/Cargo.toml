@@ -1,16 +1,16 @@
-[package]
+﻿[package]
 name = "alkalive-backend-wgpu"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "AlkALive GPU rendering backend — WebGL2/WebGPU canvas renderer for WASM"
+description = "AlkALive GPU rendering backend â€” WebGL2/WebGPU canvas renderer for WASM"
 
 [lib]
 path = "src/lib.rs"
 
 [dependencies]
-# Internal workspace crates — text shaping + glyph atlas, scene IR, the
+# Internal workspace crates â€” text shaping + glyph atlas, scene IR, the
 # render-graph IR, and the per-frame TextSceneData.
 alkalive-text = { workspace = true }
 alkalive-compiler = { workspace = true }
@@ -30,10 +30,6 @@ web-sys = { version = "0.3", features = [
     "Window",
     "Document",
     "Element",
-    "Gpu",
-    "GpuCanvasContext",
-    "GpuDevice",
-    "GpuQueue",
     "WebGl2RenderingContext",
     "WebGlBuffer",
     "WebGlProgram",

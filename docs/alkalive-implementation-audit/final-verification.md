@@ -1,3 +1,9 @@
+> **SUPERSEDED:** this report predates the final audit series.
+> Its worker/wgpu completion claims were falsified — see
+> wave-00-final-gap-audit.md, wave-02-worker-isolation-truth.md and
+> wave-01-renderer-selection.md for the corrected record. Retained for
+> audit-trail history only.
+
 # Final Verification — Fresh Independent Audit
 
 > **This document supersedes `final-100-percent-verification.md`.**

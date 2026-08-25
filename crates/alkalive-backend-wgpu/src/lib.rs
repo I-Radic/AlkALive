@@ -307,12 +307,6 @@ pub fn build_vertex_buffer(quads: &[GlyphQuad]) -> Vec<Vertex> {
     verts
 }
 
-/// Convert a list of [`alkalive_text::Quad`]s (in baseline-relative pixel
-/// space, Y-up) plus the run's metrics into canvas-centered [`GlyphQuad`]s.
-///
-/// `canvas_w`/`canvas_h` is the viewport size in pixels. The text is
-/// centered horizontally and vertically (ascender at the top of the
-/// vertical center).
 /// Build baseline-relative glyph quads from a shaped run.
 pub(crate) fn build_text_quads(
     run: &alkalive_text::ShapedRun,
@@ -348,6 +342,14 @@ pub(crate) fn build_text_quads(
     quads
 }
 
+/// Convert a list of [`alkalive_text::Quad`]s (in baseline-relative pixel
+/// space, Y-up) plus the run's metrics into canvas-centered [`GlyphQuad`]s.
+///
+/// `canvas_w`/`canvas_h` is the viewport size in pixels. The text is
+/// centered horizontally and vertically (ascender at the top of the
+/// vertical center). Vertex positions are in screen-space pixels (Y-down,
+/// origin at the canvas top-left); the text stack produces quads in
+/// baseline-relative Y-up space, so Y is converted here.
 pub fn quads_from_text(
     text_quads: &[alkalive_text::Quad],
     ascent: f32,

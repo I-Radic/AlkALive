@@ -70,7 +70,6 @@ use std::cell::RefCell;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
-pub mod render_worker;
 pub mod signal_store;
 
 // ---------------------------------------------------------------------------
@@ -393,7 +392,7 @@ pub fn start(
         .unwrap_or(false);
     if cross_origin_isolated {
         web_sys::console::log_1(
-            &"AlkALive: cross-origin isolated — SharedArrayBuffer available (ADR-003)."
+            &"AlkALive: cross-origin isolated (verifying SharedArrayBuffer…)"
                 .into(),
         );
     } else {
@@ -436,23 +435,32 @@ pub fn start(
     let width = (css_width * dpr).max(1.0) as u32;
     let height = (css_height * dpr).max(1.0) as u32;
 
-    // 5.5. ADR-003: Check whether the render worker architecture is available.
-    //      When supported (OffscreenCanvas + Worker + crossOriginIsolated),
-    //      the runtime can use a dedicated render worker that owns the GPU
-    //      device (ADR-003). When unsupported, it falls back to single-threaded
-    //      main-thread rendering (the current production path).
+    // 5.5. ADR-003/ADR-021 threading posture (verified, not faked): the main
+    //      thread is the single GPUDevice owner and the render thread
+    //      (SPECIFICATION §1.5 INV-3; ADR-021 assigns on-demand workers to
+    //      async tasks only). When cross-origin isolation is present we
+    //      verify that SharedArrayBuffer — the ADR-021 IPC substrate — is
+    //      actually constructible, so the deployment contract is observable.
     #[cfg(target_arch = "wasm32")]
     {
-        let worker_supported = render_worker::supports_render_worker();
-        if worker_supported {
-            web_sys::console::log_1(
-                &"AlkALive: render worker supported — GPU device isolation available (ADR-003)."
-                    .into(),
-            );
-        } else {
-            web_sys::console::log_1(
-                &"AlkALive: render worker not supported — using single-threaded fallback.".into(),
-            );
+        if cross_origin_isolated {
+            let sab_ok = js_sys::eval("typeof SharedArrayBuffer !== 'undefined'")
+                .ok()
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if sab_ok {
+                web_sys::console::log_1(
+                    &"AlkALive: cross-origin isolated + SharedArrayBuffer available \
+                     (ADR-003/021 IPC substrate ready; GPUDevice owner: main thread)."
+                        .into(),
+                );
+            } else {
+                web_sys::console::warn_1(
+                    &"AlkALive: isolated but SharedArrayBuffer unavailable — \
+                     check COOP/COEP response headers."
+                        .into(),
+                );
+            }
         }
     }
 

@@ -4,13 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>AlkALive Hello World</title>
-  <!-- ADR-003: COOP/COEP headers for SharedArrayBuffer support (Gap 8).
-       These must also be set as HTTP response headers by the server:
+  <!-- ADR-003/ADR-021: cross-origin isolation (SharedArrayBuffer) requires
+       COOP/COEP as HTTP RESPONSE headers — <meta http-equiv> is ignored by
+       browsers for this purpose. Serve this directory with:
+         node deploy/serve.mjs [port]
+       which sets:
          Cross-Origin-Opener-Policy: same-origin
          Cross-Origin-Embedder-Policy: require-corp
-       When set, enable crossOriginIsolated mode for Worker + SAB rendering. -->
-  <meta http-equiv="Cross-Origin-Opener-Policy" content="same-origin">
-  <meta http-equiv="Cross-Origin-Embedder-Policy" content="require-corp">
+       The runtime verifies and logs the isolation state at startup. -->
   <style>body{margin:0;overflow:hidden}canvas{display:block;width:100vw;height:100vh}#ime{position:absolute;left:-9999px;opacity:0}</style>
 </head>
 <body>
@@ -22,11 +23,8 @@
     const canvas = document.getElementById('canvas');
     const ime = document.getElementById('ime');
     // The WASM runtime owns canvas sizing (via devicePixelRatio for high-DPI),
-    // the resize listener, the frame loop, and input forwarding. No JS needed
-    // beyond this bootstrap.
-    // ADR-003: When crossOriginIsolated is true, the runtime can optionally
-    // use a Web Worker render thread with OffscreenCanvas for GPU-device
-    // isolation. See Gap 8 specification for details.
+    // the resize listener, the frame loop, input forwarding, renderer
+    // selection (WebGPU primary, WebGL2 fallback) and threading posture.
     await wasm.start(canvas, ime);
   </script>
 </body>

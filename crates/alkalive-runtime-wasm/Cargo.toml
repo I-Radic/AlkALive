@@ -34,11 +34,6 @@ web-sys = { version = "0.3", features = [
   "MouseEvent",
   "console",
   "Performance",
-  "Worker",
-  "OffscreenCanvas",
-  "Blob",
-  "Url",
-  "MessageEvent",
 ] }
 
 [features]
