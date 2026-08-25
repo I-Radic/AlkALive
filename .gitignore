@@ -19,3 +19,7 @@ vendor/harfrust/target
 
 test/e2e/node_modules/
 test/e2e/artifacts/
+
+# npm deps of the pinned deploy-build toolchain (manifests are committed;
+# installed packages are not)
+/node_modules/

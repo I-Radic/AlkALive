@@ -1,0 +1,13 @@
+{
+  "afterCargoBytes": 6121049,
+  "afterBindgenBytes": 5186480,
+  "afterWasmOptBytes": 2580436,
+  "finalSha256": "2d93d07e373ce5bc195d1d8310ca0767822a56a50df42379c739bff36a92b70c",
+  "generatedAt": "2026-08-25T19:34:36.741Z",
+  "pipeline": {
+    "cargoProfile": "wasm-release",
+    "wasmBindgen": "0.2.127",
+    "wasmOpt": "binaryen@132.0.0 -Oz (shrinkLevel=2)"
+  },
+  "note": "Sizes are measured on this machine/toolchain; the reduction claim is the delta recorded in this file, not an assumed percentage."
+}

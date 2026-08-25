@@ -1,0 +1,13 @@
+{
+  "name": "alkalive-build",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Deterministic deploy build pipeline for the AlkALive WASM artifact (ADR-017)",
+  "type": "module",
+  "scripts": {
+    "build": "node build-deploy.mjs"
+  },
+  "devDependencies": {
+    "binaryen": "132.0.0"
+  }
+}
