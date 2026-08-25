@@ -1,14 +1,14 @@
-﻿# Wave 02 â€” Worker/Isolation Truth: Fake Worker Removal + Real COOP/COEP Deployment Contract
+# Wave 02 — Worker/Isolation Truth: Fake Worker Removal + Real COOP/COEP Deployment Contract
 
-> **Read `wave-00-final-gap-audit.md` Â§4B first** (requirements 20â€“22).
-> **Lifecycle:** Plan â†’ Implement â†’ Test â†’ Independent Review â†’ DoD â†’ Document â†’ Commit â†’ Push.
+> **Read `wave-00-final-gap-audit.md` §4B first** (requirements 20–22).
+> **Lifecycle:** Plan → Implement → Test → Independent Review → DoD → Document → Commit → Push.
 
 ## Objective
 
-1. **R20/R22** â€” Replace the fake render-worker module with the documented,
+1. **R20/R22** — Replace the fake render-worker module with the documented,
    evidence-based ADR-003/ADR-021 threading posture; remove all dead
    worker-related code and configuration.
-2. **R21** â€” Make cross-origin isolation *real*: serve COOP/COEP as HTTP
+2. **R21** — Make cross-origin isolation *real*: serve COOP/COEP as HTTP
    response headers (the `<meta http-equiv>` tags are ignored by browsers for
    isolation), verify `crossOriginIsolated` + constructible
    `SharedArrayBuffer` at runtime, and assert both in E2E.
@@ -20,13 +20,13 @@
 - Deleted `crates/alkalive-runtime-wasm/src/render_worker.rs`: its worker was
   an inline-JS stub whose handlers were comments ("The worker would initialize
   the wgpu renderer here"), it had zero callers, and its GPU-in-worker model
-  contradicted SPECIFICATION Â§1.5 INV-3 ("GPUDevice acquisition occurs on
+  contradicted SPECIFICATION §1.5 INV-3 ("GPUDevice acquisition occurs on
   exactly one agent (**the main thread**)").
 - Removed the five web-sys features that existed only for it (`Worker`,
   `OffscreenCanvas`, `Blob`, `Url`, `MessageEvent`) and the four unused
   `Gpu*` features in the backend crate (audit H4).
-- The startup "render worker supported" log â€” which claimed capability while
-  nothing existed â€” is replaced by an honest isolation/SAB verification log.
+- The startup "render worker supported" log — which claimed capability while
+  nothing existed — is replaced by an honest isolation/SAB verification log.
 
 ### 2. Real isolation delivery + verification
 
@@ -61,10 +61,10 @@ decision's rationale or status line.
 
 | Question | Evidence-based answer |
 |----------|----------------------|
-| Does ADR-003 require a worker? | No â€” "(either the main thread or a dedicated non-on-demand worker)"; SPEC INV-3 resolves this to the main thread |
+| Does ADR-003 require a worker? | No — "(either the main thread or a dedicated non-on-demand worker)"; SPEC INV-3 resolves this to the main thread |
 | What does ADR-021 assign to workers? | On-demand async tasks (asset decode/compute/IO); none exist in this milestone |
-| Would worker rendering help low-end devices? | No â€” spawn + transfer + per-frame copy latency with zero benefit for a single graph |
-| What IS required now? | Exactly-one-owner discipline âœ“, isolation readiness âœ“ (headers + verification), honest documentation âœ“ |
+| Would worker rendering help low-end devices? | No — spawn + transfer + per-frame copy latency with zero benefit for a single graph |
+| What IS required now? | Exactly-one-owner discipline ✓, isolation readiness ✓ (headers + verification), honest documentation ✓ |
 
 ## Files changed
 

@@ -1,4 +1,4 @@
-﻿//! WGSL shader sources for the AlkALive GPU backend (ADR-006).
+//! WGSL shader sources for the AlkALive GPU backend (ADR-006).
 //!
 //! These WGSL shaders are the WebGPU-native rendering programs used by
 //! [`crate::wgpu_renderer::WgpuBackendRenderer`]. They provide the same
@@ -34,26 +34,26 @@
 //! constants documented here.
 //!
 //! `TextUniformsData` (WGSL offsets):
-//! - `rotation: f32`         â†’ 0
-//! - `_pad0: f32`            â†’ 4   *(Rust-only explicit padding)*
-//! - `canvas_size: vec2f`    â†’ 8   (vec2 alignment = 8)
-//! - `time: f32`             â†’ 16
-//! - `_pad1: vec3f`          â†’ 20  *(Rust-only explicit padding to 32)*
-//! - `text_color: vec4f`     â†’ 32  (vec4 alignment = 16)
-//! - total size              â†’ 48  (multiple of 16 â€” valid uniform stride)
+//! - `rotation: f32`         → 0
+//! - `_pad0: f32`            → 4   *(Rust-only explicit padding)*
+//! - `canvas_size: vec2f`    → 8   (vec2 alignment = 8)
+//! - `time: f32`             → 16
+//! - `_pad1: vec3f`          → 20  *(Rust-only explicit padding to 32)*
+//! - `text_color: vec4f`     → 32  (vec4 alignment = 16)
+//! - total size              → 48  (multiple of 16 — valid uniform stride)
 //!
 //! `RectUniformsData` (WGSL offsets):
-//! - `rect: vec4f`           â†’ 0   (x, y, w, h in pixels)
-//! - `color: vec4f`          â†’ 16
-//! - `canvas_size: vec2f`    â†’ 32
-//! - `line_width: f32`       â†’ 40  (0.0 = filled rect; > 0 = outline)
-//! - `_pad1: f32`            â†’ 44  *(Rust-only explicit padding)*
-//! - total size              â†’ 48
+//! - `rect: vec4f`           → 0   (x, y, w, h in pixels)
+//! - `color: vec4f`          → 16
+//! - `canvas_size: vec2f`    → 32
+//! - `line_width: f32`       → 40  (0.0 = filled rect; > 0 = outline)
+//! - `_pad1: f32`            → 44  *(Rust-only explicit padding)*
+//! - total size              → 48
 
 /// WGSL vertex shader for text quad rendering.
 ///
 /// Vertex positions are canvas pixel coordinates (Y-down). The Y-axis
-/// rotation scales X about the canvas center â€” the same transform as the
+/// rotation scales X about the canvas center — the same transform as the
 /// GLSL fallback vertex shader. Pixel space is converted to clip space
 /// with the same flip as the GLSL path.
 pub const TEXT_VERTEX_WGSL: &str = r#"
@@ -94,7 +94,7 @@ fn vs_main(
 /// WGSL fragment shader for text quad rendering.
 ///
 /// Samples the single-channel glyph atlas and outputs premultiplied-alpha
-/// text colored by the per-draw `text_color` uniform â€” matching the GLSL
+/// text colored by the per-draw `text_color` uniform — matching the GLSL
 /// fallback fragment shader.
 pub const TEXT_FRAGMENT_WGSL: &str = r#"
 struct TextUniforms {
@@ -170,7 +170,7 @@ struct RectUniforms {
 
 @fragment
 fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
-    // Framebuffer coords are Y-down pixel coords â€” the same space as
+    // Framebuffer coords are Y-down pixel coords — the same space as
     // RectUniforms.rect.
     let x = frag_coord.x;
     let y = frag_coord.y;
@@ -275,7 +275,7 @@ mod tests {
         assert_eq!(
             offsets,
             vec![0, 8, 16, 32],
-            "TextUniforms WGSL offsets changed â€” update TextUniformsData and its parity test"
+            "TextUniforms WGSL offsets changed — update TextUniformsData and its parity test"
         );
 
         let rmodule = naga::front::wgsl::parse_str(RECT_VERTEX_WGSL).expect("rect vertex parses");
@@ -293,7 +293,7 @@ mod tests {
         assert_eq!(
             roffsets,
             vec![0, 16, 32, 40],
-            "RectUniforms WGSL offsets changed â€” update RectUniformsData and its parity test"
+            "RectUniforms WGSL offsets changed — update RectUniformsData and its parity test"
         );
     }
 }

@@ -22,7 +22,7 @@
 
 use core::fmt;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::ast::{ItemDecl, ModuleDecl, Visibility};
 use crate::parser::parse;
@@ -52,7 +52,6 @@ impl core::error::Error for ResolveError {}
 /// A resolved module: its parsed AST and exported signatures.
 struct ResolvedModule {
     /// The parsed module AST.
-    decl: ModuleDecl,
     /// The module's exported function signatures (pub items only).
     sigs: FnSigTable,
 }
@@ -137,15 +136,6 @@ impl ModuleResolver {
                 self.cache.insert(
                     path.to_string(),
                     ResolvedModule {
-                        decl: ModuleDecl {
-                            name: path.to_string(),
-                            scene: None,
-                            attributes: Vec::new(),
-                            items: Vec::new(),
-                            imports: Vec::new(),
-                            line: 0,
-                            col: 0,
-                        },
                         sigs: empty_sigs,
                     },
                 );
@@ -201,7 +191,6 @@ impl ModuleResolver {
         self.cache.insert(
             path.to_string(),
             ResolvedModule {
-                decl: decl.clone(),
                 sigs,
             },
         );

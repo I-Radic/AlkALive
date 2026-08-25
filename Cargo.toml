@@ -16,7 +16,6 @@ members = [
     "crates/alkalive-error",
     "crates/alkalive-test",
     "crates/alkalive-compiler",
-    "crates/alkalive-app",
     "crates/alkalive-backend-wgpu",
     "crates/alkalive-runtime-wasm",
     "vendor/harfrust/harfrust",

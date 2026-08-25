@@ -13,7 +13,6 @@ AlkALive is a custom, module- and object-oriented language that compiles to WebA
 | `crates/alkalive-scene-data/` | Shared `TextSceneData` type (breaks render↔backend dependency cycle) |
 | `crates/alkalive-text/` | HarfRust text shaping + glyph atlas rasterization (vendored HarfRust fork) |
 | `crates/alkalive-core/` | Core types: `ModuleId`, `Type`, `Visibility`, `Interface`, WASM validation types |
-| `crates/alkalive-app/` | Legacy CPU software renderer (not used in the WASM pipeline; font asset retained) |
 | `crates/alkalive-{layout,style,input,dom,a11y,ipc,perf,error,test}/` | Supporting infrastructure crates |
 | `vendor/harfrust/` | Vendored HarfRust text shaping engine (MIT) |
 | `vendor/rasterizer/` | Vendored glyph rasterizer (MIT) |
@@ -35,11 +34,11 @@ AlkALive is a custom, module- and object-oriented language that compiles to WebA
 ### Rendering (`alkalive-backend-wgpu` + `alkalive-render`)
 
 - **Render-graph IR** (ADR-001): `RenderGraph` with `RenderPass`/`Attachment`/`DrawCall`/`DrawCallKind`; `build_render_graph()` constructs the graph from scene data; `WgpuRenderer::render_graph()` executes the graph
-- **WebGL2 backend**: GLSL ES 3.00 shaders for text quad rendering (Y-axis rotation, glyph atlas sampling) and rectangle rendering (alpha-blended); rect shader replaces scissor+clear hack
-- **WGSL shaders** (ADR-006 target): 4 WGSL shader programs defined in `wgsl_shaders.rs` (text vertex/fragment, rect vertex/fragment); ready for `wgpu` migration
+- **wgpu/WGSL renderer (primary, ADR-001/ADR-006)**: WebGPU via the `wgpu` crate; 4 WGSL programs compiled at init; dynamic-offset uniform rings; explicit bind-group layouts; falls back automatically (with a logged reason) when WebGPU is unavailable
+- **WebGL2 fallback**: GLSL ES 3.00 shaders for text quad rendering (Y-axis rotation, glyph atlas sampling) and rectangle rendering (alpha-blended); rect shader replaces scissor+clear hack
 - **Text stack** (ADR-022): HarfRust shaping + vendored rasterizer; 512×512 R8 glyph atlas; cached font registry (parsed once, not per-keystroke)
 - **GPU features**: high-DPI rendering via `devicePixelRatio`; frame-rate-independent animation via `performance.now()`; alpha blending for rect transparency
-- **COOP/COEP** (ADR-003): headers set in HTML; `crossOriginIsolated` check in runtime startup; single-threaded fallback when SAB unavailable
+- **COOP/COEP** (ADR-003): isolation enabled via HTTP response headers served by `deploy/serve.mjs` (`<meta http-equiv>` is ignored by browsers for this purpose); runtime verifies `crossOriginIsolated` + constructible `SharedArrayBuffer` at startup; single-threaded fallback when SAB unavailable
 
 ### Runtime (`alkalive-runtime-wasm`)
 
@@ -71,7 +70,7 @@ The Hello World demo is a **genuine end-to-end AlkALive application**:
 # Build the compiler and all workspace crates
 cargo build --workspace
 
-# Run the test suite (1240+ tests)
+# Run the test suite
 cargo test --workspace
 
 # Build the WASM runtime binary
@@ -85,10 +84,9 @@ wasm-bindgen --target web --out-dir deploy/pkg --out-name alkalive_runtime_wasm 
 ### Run the demo
 
 ```bash
-# Serve the deploy directory
-cd deploy && python3 -m http.server 8080
-
-# Open http://localhost:8080 in a browser
+# Serve deploy/ with the COOP/COEP isolation headers required by ADR-003/021
+node deploy/serve.mjs 8080
+# then open http://127.0.0.1:8080 in a WebGPU- or WebGL2-capable browser
 ```
 
 ### Compile `.alk` source
@@ -104,7 +102,7 @@ cargo run --bin alkalive-compiler -- lint examples/hello.alk
 ## Architecture
 
 ```
-hello.alk → [alkalive-compiler] → SceneIR → [alkalive-runtime-wasm] → render graph → WebGL2 → <canvas>
+hello.alk → [alkalive-compiler] → SceneIR+Schedule+DepGraph → [alkalive-runtime-wasm] → render graph → wgpu/WGSL (primary) or WebGL2/GLSL (fallback) → <canvas>
 ```
 
 1. **`.alk` source** — declares the scene using the AlkALive language (modules, scenes, text nodes, input fields)

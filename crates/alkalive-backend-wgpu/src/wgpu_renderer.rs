@@ -202,7 +202,7 @@ pub fn create_uniform_rings(
 }
 
 /// Glyph-atlas GPU resources (512×512 R8 texture + view + filtering sampler).
-pub(crate) struct GlyphAtlasResources {
+pub struct GlyphAtlasResources {
     /// The R8 atlas texture (upload target).
     pub texture: wgpu::Texture,
     /// Texture view bound into the text pipeline's bind group.
@@ -212,7 +212,7 @@ pub(crate) struct GlyphAtlasResources {
 }
 
 /// Create the empty glyph-atlas resources.
-pub(crate) fn create_glyph_atlas_resources(device: &wgpu::Device) -> GlyphAtlasResources {
+pub fn create_glyph_atlas_resources(device: &wgpu::Device) -> GlyphAtlasResources {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("glyph atlas"),
         size: wgpu::Extent3d {

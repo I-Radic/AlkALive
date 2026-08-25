@@ -392,8 +392,6 @@ impl TypeSectionBuilder {
 struct CompileContext<'a> {
     /// The class table built by the type checker.
     classes: &'a typechecker::ClassTable,
-    /// Map from function name (or `"Class::method"`) → WASM function index.
-    fn_indices: &'a std::collections::HashMap<String, u32>,
     /// Map from class name → vtable_base (table index where the class's
     /// vtable begins).
     vtable_bases: &'a std::collections::HashMap<String, u32>,
@@ -512,10 +510,6 @@ struct FnCompiler<'ctx> {
     local_types: Vec<Option<Type>>,
     /// The class table (Gap 1). Empty for modules with no classes.
     classes: &'ctx typechecker::ClassTable,
-    /// Map from function name (or `"Class::method"`) → WASM function index.
-    /// Used to resolve `Expr::Call`, `Expr::StaticCall`, and
-    /// `Expr::PathCall` to a direct `call <idx>`.
-    fn_indices: &'ctx std::collections::HashMap<String, u32>,
     /// Map from class name → vtable_base (table index where the class's
     /// vtable begins). Used to seed object literals.
     vtable_bases: &'ctx std::collections::HashMap<String, u32>,
@@ -536,7 +530,6 @@ impl<'ctx> FnCompiler<'ctx> {
             locals,
             local_types,
             classes: ctx.classes,
-            fn_indices: ctx.fn_indices,
             vtable_bases: ctx.vtable_bases,
             enclosing_class: None,
             is_instance: false,
@@ -568,7 +561,6 @@ impl<'ctx> FnCompiler<'ctx> {
             locals,
             local_types,
             classes: ctx.classes,
-            fn_indices: ctx.fn_indices,
             vtable_bases: ctx.vtable_bases,
             enclosing_class: Some(class_name.to_string()),
             is_instance: m.is_instance,
@@ -1591,7 +1583,6 @@ pub fn compile_to_wasm(module: &ModuleDecl) -> Result<WasmModule, WasmCodegenErr
     // 11. Code section — compile function + method bodies.
     let ctx = CompileContext {
         classes: &classes,
-        fn_indices: &fn_indices,
         vtable_bases: &vtable_bases,
     };
 

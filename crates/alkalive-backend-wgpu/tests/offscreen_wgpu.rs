@@ -1,9 +1,9 @@
-﻿//! Offscreen GPU integration test for the wgpu/WGSL production pipeline.
+//! Offscreen GPU integration test for the wgpu/WGSL production pipeline.
 //!
 //! This is the deterministic proof that the WGSL programs rasterize the
 //! Hello-World frame correctly: it drives the SAME constructors and the SAME
-//! [`record_frame`] encoder the browser surface path uses â€” WGSL compilation,
-//! pipelines, dynamic-offset uniform rings, glyph-atlas sampling â€” but
+//! [`record_frame`] encoder the browser surface path uses — WGSL compilation,
+//! pipelines, dynamic-offset uniform rings, glyph-atlas sampling — but
 //! renders into an offscreen texture whose bytes are read back and asserted.
 //!
 //! Skips (with a loud note) only when no GPU adapter exists at all; on any
@@ -143,7 +143,7 @@ fn offscreen_gpu_frame_renders_golden_text() {
                 &atlas.sampler,
             );
 
-        // --- Scene â†’ tessellation â†’ uploads -----------------------------------
+        // --- Scene → tessellation → uploads -----------------------------------
         let scene = TextSceneData::default(); // golden-on-black Hello World
         let tess = tessellate_scene(&scene, WIDTH as f32, HEIGHT as f32).expect("tessellate");
 
@@ -158,7 +158,7 @@ fn offscreen_gpu_frame_renders_golden_text() {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         });
 
-        // --- Graph â†’ plan â†’ rings ----------------------------------------------
+        // --- Graph → plan → rings ----------------------------------------------
         let graph = alkalive_render::graph::build_render_graph(
             &scene,
             (WIDTH, HEIGHT),

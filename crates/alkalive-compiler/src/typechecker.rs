@@ -582,60 +582,6 @@ fn find_field_in_chain<'a>(
     None
 }
 
-/// Compute the byte offset of a field in the object layout. Returns `None`
-/// if the field is not found. The vtable_base occupies offset 0; base-class
-/// fields come next (in declaration order), then derived-class fields.
-fn field_offset(classes: &ClassTable, class_name: &str, field_name: &str) -> Option<u32> {
-    let chain = build_chain(classes, class_name); // root first
-    let mut offset = 4u32; // skip vtable_base
-    for c in &chain {
-        if let Some(sig) = classes.lookup(c) {
-            for f in &sig.fields {
-                if f.name == field_name {
-                    return Some(offset);
-                }
-                offset += 4;
-            }
-        }
-    }
-    None
-}
-
-/// Compute the vtable layout for a class. Returns a vec of
-/// `(method_name, defining_class_name)` in vtable slot order (base-class
-/// methods first, then derived; overrides update the defining_class of the
-/// base method's slot).
-fn vtable_layout(classes: &ClassTable, class_name: &str) -> Vec<(String, String)> {
-    let chain = build_chain(classes, class_name); // root first
-    let mut layout: Vec<(String, String)> = Vec::new();
-    for c in &chain {
-        if let Some(sig) = classes.lookup(c) {
-            for m in &sig.methods {
-                if let Some(slot) = layout.iter().position(|(n, _)| n == &m.name) {
-                    // Override: update defining_class.
-                    layout[slot].1 = c.clone();
-                } else {
-                    layout.push((m.name.clone(), c.clone()));
-                }
-            }
-        }
-    }
-    layout
-}
-
-/// Returns the vtable slot index for a method on a class (or its base chain).
-/// Returns `None` if the method is not found.
-fn vtable_slot_for_method(
-    classes: &ClassTable,
-    class_name: &str,
-    method_name: &str,
-) -> Option<u32> {
-    let layout = vtable_layout(classes, class_name);
-    layout
-        .iter()
-        .position(|(n, _)| n == method_name)
-        .map(|i| i as u32)
-}
 
 /// Returns `true` iff `sub <: super_` for full types, consulting the
 /// `ClassTable` for class subtyping (a derived class is a subtype of any of
@@ -859,7 +805,7 @@ pub fn check_module(module: &ModuleDecl) -> TypeErrorSet {
     // unknown params/return type so calls don't produce "unknown function" errors.
     {
         let mut resolver = crate::module_resolver::ModuleResolver::new(".");
-        if let Err(e) = resolver.resolve_imports(module, &mut sigs) {
+        if resolver.resolve_imports(module, &mut sigs).is_err() {
             // Resolution error — log it but continue (don't block compilation).
             // The import names are still added as stubs below.
         }
