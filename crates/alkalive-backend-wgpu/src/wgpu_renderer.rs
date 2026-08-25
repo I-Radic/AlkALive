@@ -1,134 +1,127 @@
-//! wgpu-based renderer using WGSL shaders (ADR-006).
+//! wgpu-based GPU renderer using WGSL shaders — the ADR-001/ADR-006
+//! production rendering backend.
 //!
-//! This module implements the GPU rendering backend using the `wgpu` crate
-//! with WGSL shaders, replacing the raw WebGL2/GLSL path. The wgpu crate
-//! provides a unified API that works with both WebGPU (when available) and
-//! WebGL2 (via the `webgl` feature) as a fallback.
+//! This renderer is the **primary** production path selected by the runtime
+//! (`alkalive-runtime-wasm`). It renders through the `wgpu` crate (WebGPU
+//! where the browser provides it). The raw-WebGL2/GLSL renderer
+//! ([`crate::WgpuRenderer`]) remains available as an explicit,
+//! independently-tested fallback for browsers/devices without WebGPU.
 //!
-//! # Architecture
+//! # Frame pipeline
 //!
-//! The renderer:
-//! 1. Creates a `wgpu::Surface` from the HTML canvas.
-//! 2. Requests a `wgpu::Device` and `wgpu::Queue`.
-//! 3. Compiles WGSL shaders via `wgpu::Device::create_shader_module`.
-//! 4. Creates render pipelines for text and rect rendering.
-//! 5. Creates vertex buffers and a glyph atlas texture.
-//! 6. Per frame: builds a command encoder, executes render passes, submits.
+//! 1. **Tessellate** — [`crate::tessellate::tessellate_scene`] shapes the
+//!    title + input-field runs through the HarfRust stack, rasterizes the
+//!    glyph atlas page, and produces the combined pixel-space vertex buffer
+//!    (re-run only when atlas inputs change).
+//! 2. **Graph** — [`alkalive_render::graph::build_render_graph`] produces
+//!    the 5-pass render-graph IR (ADR-001): Clear → InputFieldBackground →
+//!    InputFieldBorder → TitleText → InputText.
+//! 3. **Plan** — [`collect_frame_plan`] walks the graph in `pass_order`
+//!    once and produces every per-draw-call uniform record plus an encode
+//!    plan (pure function, unit-tested off-GPU in `frame_plan`).
+//! 4. **Encode** — one command encoder records every pass: the first pass
+//!    clears to the plan's clear color, later passes load; each draw call
+//!    selects its pipeline and binds its per-draw uniforms through dynamic
+//!    offsets into a ring buffer.
+//! 5. **Submit + present.**
 //!
-//! # WGSL Shaders
+//! # Uniform delivery
 //!
-//! The shaders are defined in [`crate::wgsl_shaders`] and are compiled
-//! at runtime by the wgpu device. This replaces the GLSL ES 3.00 shaders
-//! that were compiled manually via `WebGl2RenderingContext::compile_shader`.
+//! Per-draw-call data lives in two ring buffers (text / rect) laid out in
+//! device-aligned slots (`dynamic_stride`, ≥ 256 B). One bind group per
+//! pipeline is created at init with `has_dynamic_offset: true`; encoding
+//! binds the group with the slot offset. Slot assignment is deterministic:
+//! nth rect-kind call ↔ nth rect slot, nth text-kind call ↔ nth text slot.
 
 #![cfg(feature = "wgpu-backend")]
 
-use std::sync::Arc;
+use std::num::NonZeroU64;
 use wgpu::util::DeviceExt;
 
-use alkalive_scene_data::TextSceneData;
-use alkalive_render::graph::{DrawCallKind, RenderGraph};
-
+use crate::frame_plan::{collect_frame_plan, PlannedDraw, RectUniformsData, TextUniformsData};
+use crate::tessellate::{tessellate_scene, SceneTessellation};
 use crate::wgsl_shaders;
+use crate::{Vertex, ATLAS_PAGE_BYTES, ATLAS_SIZE};
 
-/// A wgpu-based GPU renderer that uses WGSL shaders.
-///
-/// This is the ADR-006 compliant renderer: it uses WGSL (not GLSL) and
-/// the `wgpu` API (not raw WebGL2). The `webgl` feature on the `wgpu`
-/// crate ensures WebGL2 fallback when WebGPU is not available.
+/// Maximum number of rect-kind and text-kind draw calls schedulable per
+/// frame (the canonical Hello-World graph uses two of each).
+pub const MAX_DYNAMIC_SLOTS: usize = 16;
+
+/// Minimum byte size of one dynamic-offset slot before device alignment.
+const BASE_SLOT_SIZE: u64 = 256;
+
+/// Unit-corner quad (triangle list) consumed by `RECT_VERTEX_WGSL`: corner
+/// components are 0 or 1 and are mapped through the per-draw rect uniform
+/// into pixel space.
+const RECT_CORNERS: [[f32; 2]; 6] = [
+    [0.0, 0.0],
+    [1.0, 0.0],
+    [1.0, 1.0],
+    [0.0, 0.0],
+    [1.0, 1.0],
+    [0.0, 1.0],
+];
+
+/// The wgpu/WGSL production renderer (ADR-006).
 pub struct WgpuBackendRenderer {
-    /// The wgpu device (owns the GPU context).
     device: wgpu::Device,
-    /// The wgpu queue (for submitting command buffers).
     queue: wgpu::Queue,
-    /// The surface configuration.
     config: wgpu::SurfaceConfiguration,
-    /// The render surface.
     surface: wgpu::Surface<'static>,
-    /// The text render pipeline (WGSL vertex + fragment).
+
     text_pipeline: wgpu::RenderPipeline,
-    /// The rect render pipeline (WGSL vertex + fragment).
     rect_pipeline: wgpu::RenderPipeline,
-    /// The glyph atlas texture.
-    glyph_texture: wgpu::Texture,
-    /// The glyph texture view.
-    glyph_texture_view: wgpu::TextureView,
-    /// The glyph texture sampler.
-    glyph_sampler: wgpu::Sampler,
-    /// The vertex buffer for text quads.
-    vertex_buffer: wgpu::Buffer,
-    /// The vertex count (6 per glyph quad).
-    vertex_count: u32,
-    /// Canvas width in physical pixels.
-    width: u32,
-    /// Canvas height in physical pixels.
-    height: u32,
-    /// Input field bounds for hit-testing.
-    input_field_bounds: (f32, f32, f32, f32),
-    /// Uniform buffer for text rendering (rotation, canvas_size, time, text_color).
-    uniform_buffer: wgpu::Buffer,
-    /// Bind group layout for the text pipeline (uniform + texture + sampler).
-    text_bind_group_layout: wgpu::BindGroupLayout,
-    /// Bind group for the text pipeline.
+
     text_bind_group: wgpu::BindGroup,
-}
+    rect_bind_group: wgpu::BindGroup,
 
-/// Uniform data for text rendering, matching the WGSL TextUniforms struct.
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct TextUniformsData {
-    rotation: f32,
-    canvas_size: [f32; 2],
-    time: f32,
-    text_color: [f32; 4],
-}
+    text_uniform_buffer: wgpu::Buffer,
+    rect_uniform_buffer: wgpu::Buffer,
+    dynamic_stride: u64,
 
-/// Vertex format: position (vec2) + uv (vec2) = 16 bytes.
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct Vertex {
-    position: [f32; 2],
-    uv: [f32; 2],
-}
+    // These are kept alive for the lifetime of the renderer because the bind
+    // groups reference their views/samplers; Rust has no way to express that
+    // borrow beyond struct fields, so the "never read" lint is expected.
+    #[allow(dead_code)]
+    glyph_texture: wgpu::Texture,
+    #[allow(dead_code)]
+    glyph_texture_view: wgpu::TextureView,
+    #[allow(dead_code)]
+    glyph_sampler: wgpu::Sampler,
 
-impl Vertex {
-    const ATTRIBS: [wgpu::VertexAttribute; 2] = wgpu::vertex_attr_array![
-        0 => Float32x2,  // position
-        1 => Float32x2,  // uv
-    ];
+    rect_vertex_buffer: wgpu::Buffer,
+    text_vertex_buffer: Option<wgpu::Buffer>,
 
-    fn desc() -> wgpu::VertexBufferLayout<'static> {
-        wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &Self::ATTRIBS,
-        }
-    }
+    tess: Option<SceneTessellation>,
+    last_input_display: String,
+    /// Set at init and on resize; forces one re-tessellation.
+    tess_dirty: bool,
+
+    width: u32,
+    height: u32,
 }
 
 impl WgpuBackendRenderer {
-    /// Initialize the wgpu renderer from an HTML canvas element.
+    /// Initialize the renderer from an HTML canvas element.
     ///
-    /// This creates a wgpu surface, requests a device, compiles WGSL shaders,
-    /// and creates render pipelines.
+    /// Creates the wgpu instance/surface/adapter/device, compiles the WGSL
+    /// programs, creates explicit-layout pipelines, ring buffers, bind
+    /// groups, and the empty glyph-atlas texture. Any failure returns a
+    /// descriptive `Err` so the runtime can select the fallback renderer.
     pub async fn init_from_canvas(
         canvas: web_sys::HtmlCanvasElement,
         width: u32,
         height: u32,
     ) -> Result<Self, String> {
-        // 1. Create a wgpu instance.
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             ..Default::default()
         });
 
-        // 2. Create a surface from the canvas.
-        // The Canvas variant is available when wgpu's `webgl` feature is enabled.
         let surface = instance
             .create_surface(wgpu::SurfaceTarget::Canvas(canvas))
-            .expect("Failed to create surface");
+            .map_err(|e| format!("create_surface failed: {e:?}"))?;
 
-        // 3. Request an adapter.
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
@@ -136,9 +129,8 @@ impl WgpuBackendRenderer {
                 force_fallback_adapter: false,
             })
             .await
-            .ok_or("Failed to request adapter")?;
+            .ok_or("no compatible GPU adapter (WebGPU unavailable?)")?;
 
-        // 4. Request a device and queue.
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
@@ -147,112 +139,72 @@ impl WgpuBackendRenderer {
                     required_limits: wgpu::Limits::downlevel_webgl2_defaults(),
                     memory_hints: wgpu::MemoryHints::default(),
                 },
-                None, // no trace path
+                None,
             )
             .await
-            .map_err(|e| format!("Failed to request device: {:?}", e))?;
+            .map_err(|e| format!("request_device failed: {e:?}"))?;
 
-        // 5. Configure the surface.
+        // Surface configuration: prefer an sRGB format when offered.
         let caps = surface.get_capabilities(&adapter);
         let format = caps
             .formats
             .iter()
             .copied()
             .find(|f| f.is_srgb())
-            .unwrap_or(wgpu::TextureFormat::Bgra8Unorm);
+            .unwrap_or(caps.formats[0]);
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
-            width,
-            height,
+            width: width.max(1),
+            height: height.max(1),
             present_mode: wgpu::PresentMode::AutoVsync,
             desired_maximum_frame_latency: 2,
-            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            alpha_mode: caps.alpha_modes[0],
             view_formats: vec![],
         };
         surface.configure(&device, &config);
 
-        // 6. Compile WGSL shaders.
-        let text_vs = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Text Vertex Shader (WGSL)"),
-            source: wgpu::ShaderSource::Wgsl(wgsl_shaders::TEXT_VERTEX_WGSL.into()),
+        // Dynamic-offset alignment: slot stride must be a multiple of the
+        // device's minimum uniform buffer offset alignment.
+        let align = device.limits().min_uniform_buffer_offset_alignment as u64;
+        let dynamic_stride = ((BASE_SLOT_SIZE + align - 1) / align) * align;
+        let ring_size = dynamic_stride * MAX_DYNAMIC_SLOTS as u64;
+
+        // --- WGSL programs ---------------------------------------------------
+        let make_module = |label: &'static str, src: &'static str| {
+            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(label),
+                source: wgpu::ShaderSource::Wgsl(src.into()),
+            })
+        };
+        let text_vs = make_module("text vs (WGSL)", wgsl_shaders::TEXT_VERTEX_WGSL);
+        let text_fs = make_module("text fs (WGSL)", wgsl_shaders::TEXT_FRAGMENT_WGSL);
+        let rect_vs = make_module("rect vs (WGSL)", wgsl_shaders::RECT_VERTEX_WGSL);
+        let rect_fs = make_module("rect fs (WGSL)", wgsl_shaders::RECT_FRAGMENT_WGSL);
+
+        // --- Ring buffers -----------------------------------------------------
+        let ring_usage = wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST;
+        let text_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("text uniform ring"),
+            size: ring_size,
+            usage: ring_usage,
+            mapped_at_creation: false,
         });
-        let text_fs = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Text Fragment Shader (WGSL)"),
-            source: wgpu::ShaderSource::Wgsl(wgsl_shaders::TEXT_FRAGMENT_WGSL.into()),
-        });
-        let rect_vs = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Rect Vertex Shader (WGSL)"),
-            source: wgpu::ShaderSource::Wgsl(wgsl_shaders::RECT_VERTEX_WGSL.into()),
-        });
-        let rect_fs = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Rect Fragment Shader (WGSL)"),
-            source: wgpu::ShaderSource::Wgsl(wgsl_shaders::RECT_FRAGMENT_WGSL.into()),
+        let rect_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("rect uniform ring"),
+            size: ring_size,
+            usage: ring_usage,
+            mapped_at_creation: false,
         });
 
-        // 7. Create render pipelines.
-        let text_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Text Render Pipeline"),
-            layout: None,
-            vertex: wgpu::VertexState {
-                module: &text_vs,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[Vertex::desc()],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &text_fs,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
-
-        let rect_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Rect Render Pipeline"),
-            layout: None,
-            vertex: wgpu::VertexState {
-                module: &rect_vs,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &rect_fs,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleStrip,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
-
-        // 8. Create glyph atlas texture (512×512 R8).
+        // --- Glyph atlas resources ---------------------------------------------
         let glyph_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Glyph Atlas"),
-            size: wgpu::Extent3d { width: 512, height: 512, depth_or_array_layers: 1 },
+            label: Some("glyph atlas"),
+            size: wgpu::Extent3d {
+                width: ATLAS_SIZE,
+                height: ATLAS_SIZE,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -262,39 +214,26 @@ impl WgpuBackendRenderer {
         });
         let glyph_texture_view = glyph_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let glyph_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("Glyph Sampler"),
+            label: Some("glyph sampler"),
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
 
-        // 9. Create an initial vertex buffer (will be updated per frame).
-        let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Vertex Buffer"),
-            size: 1024 * 16, // initial size; will be recreated as needed
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        // 10. Create uniform buffer for text rendering uniforms.
-        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Text Uniforms Buffer"),
-            size: std::mem::size_of::<TextUniformsData>() as wgpu::BufferAddress,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        // 11. Create bind group layout for text pipeline.
-        let text_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Text Bind Group Layout"),
+        // --- Explicit layouts + bind groups ------------------------------------
+        //
+        // Layouts are explicit (not shader-derived) so a WGSL binding change
+        // fails loudly here rather than silently re-ordering the interface.
+        let text_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("text BGL"),
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
                     visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                        has_dynamic_offset: true,
+                        min_binding_size: NonZeroU64::new(TextUniformsData::WGSL_SIZE),
                     },
                     count: None,
                 },
@@ -316,15 +255,17 @@ impl WgpuBackendRenderer {
                 },
             ],
         });
-
-        // 12. Create bind group binding the uniform buffer + glyph texture + sampler.
         let text_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Text Bind Group"),
-            layout: &text_bind_group_layout,
+            label: Some("text BG"),
+            layout: &text_bgl,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::Buffer(uniform_buffer.as_entire_buffer_binding()),
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &text_uniform_buffer,
+                        offset: 0,
+                        size: NonZeroU64::new(TextUniformsData::WGSL_SIZE),
+                    }),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -337,6 +278,127 @@ impl WgpuBackendRenderer {
             ],
         });
 
+        let rect_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("rect BGL"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: true,
+                    min_binding_size: NonZeroU64::new(RectUniformsData::WGSL_SIZE),
+                },
+                count: None,
+            }],
+        });
+        let rect_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("rect BG"),
+            layout: &rect_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &rect_uniform_buffer,
+                    offset: 0,
+                    size: NonZeroU64::new(RectUniformsData::WGSL_SIZE),
+                }),
+            }],
+        });
+
+        // --- Pipelines -----------------------------------------------------------
+        let position_attr = wgpu::VertexAttribute {
+            format: wgpu::VertexFormat::Float32x2,
+            offset: 0,
+            shader_location: 0,
+        };
+        let uv_attr = wgpu::VertexAttribute {
+            format: wgpu::VertexFormat::Float32x2,
+            offset: 8,
+            shader_location: 1,
+        };
+
+        let text_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("text pipeline layout"),
+                bind_group_layouts: &[&text_bgl],
+                push_constant_ranges: &[],
+            });
+        let text_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("text pipeline (WGSL)"),
+            layout: Some(&text_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &text_vs,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<Vertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[position_attr, uv_attr],
+                }],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &text_fs,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        let rect_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("rect pipeline layout"),
+                bind_group_layouts: &[&rect_bgl],
+                push_constant_ranges: &[],
+            });
+        let rect_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("rect corner quad"),
+            contents: bytemuck::cast_slice(&RECT_CORNERS),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let rect_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("rect pipeline (WGSL)"),
+            layout: Some(&rect_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &rect_vs,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: 8,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[position_attr],
+                }],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &rect_fs,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
         Ok(Self {
             device,
             queue,
@@ -344,167 +406,219 @@ impl WgpuBackendRenderer {
             surface,
             text_pipeline,
             rect_pipeline,
+            text_bind_group,
+            rect_bind_group,
+            text_uniform_buffer,
+            rect_uniform_buffer,
+            dynamic_stride,
             glyph_texture,
             glyph_texture_view,
             glyph_sampler,
-            vertex_buffer,
-            vertex_count: 0,
+            rect_vertex_buffer,
+            text_vertex_buffer: None,
+            tess: None,
+            last_input_display: String::new(),
+            tess_dirty: true,
             width,
             height,
-            input_field_bounds: (0.0, 0.0, 0.0, 0.0),
-            uniform_buffer,
-            text_bind_group_layout,
-            text_bind_group,
         })
     }
 
-    /// Render one frame from scene data, building and executing a render graph.
-    /// This is the high-level entry point matching the `WgpuRenderer::render_frame` API.
+    /// Render one frame from scene data via the render-graph IR.
+    ///
+    /// Re-tessellates when the glyph-atlas inputs changed (first frame,
+    /// input-text change, or resize), then plans and encodes the graph.
+    /// Failures are logged to the browser console — a skipped frame is made
+    /// visible there rather than silent.
     pub fn render_frame(
         &mut self,
-        scene: &TextSceneData,
+        scene: &crate::TextSceneData,
         _schedule: &alkalive_compiler::ScheduleIR,
         time: f32,
     ) {
+        let input_display = if scene.input_text.is_empty() {
+            scene.input_placeholder.as_str()
+        } else {
+            scene.input_text.as_str()
+        };
+
+        if self.tess_dirty || self.last_input_display != input_display {
+            match tessellate_scene(scene, self.width as f32, self.height as f32) {
+                Ok(t) => {
+                    if let Err(e) = self.upload_tessellation(&t) {
+                        web_sys::console::error_1(
+                            &format!("AlkALive(wgpu): tessellation upload failed: {e}").into(),
+                        );
+                        return;
+                    }
+                    self.last_input_display = input_display.to_string();
+                    self.tess_dirty = false;
+                }
+                Err(e) => {
+                    web_sys::console::error_1(
+                        &format!("AlkALive(wgpu): tessellation failed: {e}").into(),
+                    );
+                    return;
+                }
+            }
+        }
+
+        let (input_vertex_start, title_vertex_count, input_vertex_count, field_bounds) =
+            match &self.tess {
+                Some(t) => (
+                    t.input_vertex_start as u32,
+                    t.title_vertex_count as u32,
+                    t.input_vertex_count as u32,
+                    t.input_field_bounds,
+                ),
+                None => return,
+            };
+
+        // Build the render graph for this frame (ADR-001 IR).
         let graph = alkalive_render::graph::build_render_graph(
             scene,
             (self.width, self.height),
-            self.input_field_bounds,
+            field_bounds,
         );
-        self.render_graph(&graph, time);
-    }
-
-    /// Render one frame using the render graph.
-    ///
-    /// This method consumes a `RenderGraph` and executes its passes using
-    /// the wgpu API, compiling WGSL shaders (done at init) and submitting
-    /// command buffers to the GPU.
-    pub fn render_graph(&mut self, graph: &RenderGraph, time: f32) {
-        // Get the next frame texture.
-        let output = self.surface.get_current_texture();
-        let Ok(frame) = output else {
+        if let Err(e) = graph.validate() {
+            web_sys::console::error_1(
+                &format!("AlkALive(wgpu): render graph invalid: {e:?}").into(),
+            );
             return;
-        };
-        let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-        // Update uniform buffer with current frame data.
-        let uniforms = TextUniformsData {
-            rotation: 0.5 * time, // rotation_speed * time
-            canvas_size: [self.width as f32, self.height as f32],
-            time,
-            text_color: [1.0, 0.843, 0.0, 1.0], // gold
-        };
-        self.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
-
-        // Create a command encoder.
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Render Encoder"),
-        });
-
-        // Find the clear color from the first Clear draw call.
-        let mut clear_color = wgpu::Color::BLACK;
-        for pass in &graph.passes {
-            for dc in &pass.draw_calls {
-                if let DrawCallKind::Clear { color } = &dc.kind {
-                    clear_color = wgpu::Color {
-                        r: color.0 as f64,
-                        g: color.1 as f64,
-                        b: color.2 as f64,
-                        a: color.3 as f64,
-                    };
-                }
-            }
         }
 
-        // Execute each pass in the graph's pass_order.
+        let plan = collect_frame_plan(&graph, self.width as f32, self.height as f32, time);
+        if plan.text_slot_count() > MAX_DYNAMIC_SLOTS || plan.rect_slot_count() > MAX_DYNAMIC_SLOTS
+        {
+            web_sys::console::error_1(
+                &format!(
+                    "AlkALive(wgpu): frame needs {} rect / {} text slots (max {MAX_DYNAMIC_SLOTS})",
+                    plan.rect_slot_count(),
+                    plan.text_slot_count()
+                )
+                .into(),
+            );
+            return;
+        }
+
+        // Upload the uniform rings (one write per ring per frame).
+        self.write_ring(&self.text_uniform_buffer, &plan.text_uniforms);
+        self.write_ring(&self.rect_uniform_buffer, &plan.rect_uniforms);
+
+        // Acquire the swapchain frame.
+        let frame = match self.surface.get_current_texture() {
+            Ok(f) => f,
+            Err(e) => {
+                web_sys::console::error_1(
+                    &format!("AlkALive(wgpu): acquire frame failed: {e}").into(),
+                );
+                return;
+            }
+        };
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
+        let mut encoder = self.device.create_command_encoder(
+            &wgpu::CommandEncoderDescriptor {
+                label: Some("AlkALive frame encoder"),
+            },
+        );
+
+        let clear = wgpu::Color {
+            r: plan.clear_color[0] as f64,
+            g: plan.clear_color[1] as f64,
+            b: plan.clear_color[2] as f64,
+            a: plan.clear_color[3] as f64,
+        };
+
+        let mut planned = plan.draws.iter();
         let mut is_first_pass = true;
+
         for &pass_idx in &graph.pass_order {
             let pass = &graph.passes[pass_idx];
-
-            // Determine load operation: Clear on first pass, Load on subsequent.
             let load_op = if is_first_pass {
-                wgpu::LoadOp::Clear(clear_color)
+                is_first_pass = false;
+                wgpu::LoadOp::Clear(clear)
             } else {
                 wgpu::LoadOp::Load
             };
-            is_first_pass = false;
 
-            // Begin a render pass.
-            {
-                let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some(&pass.name),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: load_op,
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                });
+            let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some(&pass.name),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: load_op,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
 
-                // Execute draw calls in this pass.
-                for dc in &pass.draw_calls {
-                    match &dc.kind {
-                        DrawCallKind::Clear { color: _ } => {
-                            // Clear is handled by LoadOp::Clear above.
-                        }
-                        DrawCallKind::DrawRect { x, y, w, h, color: _ } => {
-                            let _ = (x, y, w, h);
-                            render_pass.set_pipeline(&self.rect_pipeline);
-                            render_pass.draw(0..4, 0..1);
-                        }
-                        DrawCallKind::DrawRectOutline { x, y, w, h, color: _, line_width: _ } => {
-                            let _ = (x, y, w, h);
-                            render_pass.set_pipeline(&self.rect_pipeline);
-                            render_pass.draw(0..4, 0..1);
-                        }
-                        DrawCallKind::DrawText { text_ptr: _, text_len: _, font_size: _, color: _, rotation: _, position: _ } => {
-                            // Text rendering: set pipeline, bind group, vertex buffer, draw.
-                            render_pass.set_pipeline(&self.text_pipeline);
-                            render_pass.set_bind_group(0, &self.text_bind_group, &[]);
-                            render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-                            if self.vertex_count > 0 {
-                                render_pass.draw(0..self.vertex_count, 0..1);
-                            }
-                        }
+            for _dc in &pass.draw_calls {
+                match planned.next() {
+                    Some(PlannedDraw::Clear) => {}
+                    Some(PlannedDraw::Rect(slot)) => {
+                        let offset = (*slot as u64) * self.dynamic_stride;
+                        rpass.set_pipeline(&self.rect_pipeline);
+                        rpass.set_bind_group(0, &self.rect_bind_group, &[offset as u32]);
+                        rpass.set_vertex_buffer(0, self.rect_vertex_buffer.slice(..));
+                        rpass.draw(0..6, 0..1);
                     }
+                    Some(PlannedDraw::Text(slot, is_input)) => {
+                        let (start, count) = if *is_input {
+                            (input_vertex_start, input_vertex_count)
+                        } else {
+                            (0, title_vertex_count)
+                        };
+                        if count == 0 {
+                            continue;
+                        }
+                        let Some(vb) = &self.text_vertex_buffer else {
+                            continue;
+                        };
+                        let offset = (*slot as u64) * self.dynamic_stride;
+                        rpass.set_pipeline(&self.text_pipeline);
+                        rpass.set_bind_group(0, &self.text_bind_group, &[offset as u32]);
+                        rpass.set_vertex_buffer(0, vb.slice(..));
+                        rpass.draw(start..(start + count), 0..1);
+                    }
+                    None => break,
                 }
             }
         }
 
-        // Submit the command buffer.
         self.queue.submit(std::iter::once(encoder.finish()));
         frame.present();
     }
 
-    /// Resize the canvas + surface.
-    pub fn resize(&mut self, width: u32, height: u32) {
-        if width == 0 || height == 0 {
-            return;
+    /// Write per-draw-call records into a ring buffer, one aligned slot per
+    /// record.
+    fn write_ring<T: bytemuck::Pod>(&self, buffer: &wgpu::Buffer, records: &[T]) {
+        let rec_bytes = std::mem::size_of::<T>();
+        let mut ring = vec![0u8; (self.dynamic_stride * MAX_DYNAMIC_SLOTS as u64) as usize];
+        for (slot, rec) in records.iter().enumerate() {
+            let off = slot * self.dynamic_stride as usize;
+            let bytes = bytemuck::bytes_of(rec);
+            debug_assert_eq!(bytes.len(), rec_bytes);
+            ring[off..off + rec_bytes].copy_from_slice(bytes);
         }
-        self.width = width;
-        self.height = height;
-        self.config.width = width;
-        self.config.height = height;
-        self.surface.configure(&self.device, &self.config);
+        self.queue.write_buffer(buffer, 0, &ring);
     }
 
-    /// Update the vertex buffer with new text quad data.
-    pub fn update_vertices(&mut self, vertices: &[Vertex]) {
-        self.vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Vertex Buffer"),
-            contents: bytemuck::cast_slice(vertices),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-        self.vertex_count = vertices.len() as u32;
-    }
-
-    /// Update the glyph atlas texture.
-    pub fn update_glyph_texture(&mut self, data: &[u8]) {
+    /// Upload tessellation output: rebuild the text vertex buffer, upload
+    /// the glyph atlas page, cache bounds.
+    fn upload_tessellation(&mut self, t: &SceneTessellation) -> Result<(), String> {
+        if t.atlas_page.len() != ATLAS_PAGE_BYTES {
+            return Err(format!(
+                "atlas page has {} bytes, expected {ATLAS_PAGE_BYTES}",
+                t.atlas_page.len()
+            ));
+        }
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.glyph_texture,
@@ -512,25 +626,64 @@ impl WgpuBackendRenderer {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            data,
+            &t.atlas_page,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(512),
-                rows_per_image: Some(512),
+                bytes_per_row: Some(ATLAS_SIZE),
+                rows_per_image: Some(ATLAS_SIZE),
             },
-            wgpu::Extent3d { width: 512, height: 512, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width: ATLAS_SIZE,
+                height: ATLAS_SIZE,
+                depth_or_array_layers: 1,
+            },
         );
+
+        if !t.vertices.is_empty() {
+            let buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("text vertices"),
+                contents: bytemuck::cast_slice(&t.vertices),
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            });
+            self.text_vertex_buffer = Some(buf);
+        }
+
+        self.tess = Some(t.clone());
+        Ok(())
     }
 
-    /// Check if a point is inside the input field rectangle.
+    /// Resize the surface. The next frame re-tessellates so geometry tracks
+    /// the new dimensions.
+    pub fn resize(&mut self, width: u32, height: u32) {
+        let (width, height) = (width.max(1), height.max(1));
+        if width == self.width && height == self.height {
+            return;
+        }
+        self.width = width;
+        self.height = height;
+        self.config.width = width;
+        self.config.height = height;
+        self.surface.configure(&self.device, &self.config);
+        // Force re-tessellation: cached geometry reflects the old size.
+        self.tess_dirty = true;
+    }
+
+    /// Check whether a point lies inside the input field rectangle.
     pub fn hit_test_input_field(&self, x: f32, y: f32) -> bool {
-        let (fx, fy, fw, fh) = self.input_field_bounds;
+        let Some(t) = &self.tess else {
+            return false;
+        };
+        let (fx, fy, fw, fh) = t.input_field_bounds;
         x >= fx && x <= fx + fw && y >= fy && y <= fy + fh
     }
 
-    /// Returns the canvas width.
-    pub fn width(&self) -> u32 { self.width }
+    /// Canvas width in physical pixels.
+    pub fn width(&self) -> u32 {
+        self.width
+    }
 
-    /// Returns the canvas height.
-    pub fn height(&self) -> u32 { self.height }
+    /// Canvas height in physical pixels.
+    pub fn height(&self) -> u32 {
+        self.height
+    }
 }

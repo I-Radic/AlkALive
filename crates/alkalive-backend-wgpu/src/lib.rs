@@ -314,7 +314,7 @@ pub fn build_vertex_buffer(quads: &[GlyphQuad]) -> Vec<Vertex> {
 /// centered horizontally and vertically (ascender at the top of the
 /// vertical center).
 /// Build baseline-relative glyph quads from a shaped run.
-fn build_text_quads(
+pub(crate) fn build_text_quads(
     run: &alkalive_text::ShapedRun,
     atlas: &mut alkalive_text::HarfRustGlyphAtlas,
     font_size: f32,
@@ -406,9 +406,18 @@ pub fn quads_from_text(
 }
 
 // ---------------------------------------------------------------------------
-// WgpuRenderer — wasm32 implementation (real WebGL2 GPU backend)
+// Shared tessellation + WGSL backend modules
 // ---------------------------------------------------------------------------
 
+/// The fixed glyph-atlas page edge length in pixels (single R8 page).
+pub const ATLAS_SIZE: u32 = 512;
+
+/// Byte size of one glyph-atlas page (`ATLAS_SIZE × ATLAS_SIZE`, 1 byte per
+/// pixel).
+pub const ATLAS_PAGE_BYTES: usize = (ATLAS_SIZE * ATLAS_SIZE) as usize;
+
+pub mod frame_plan;
+pub mod tessellate;
 pub mod wgsl_shaders;
 #[cfg(all(feature = "wgpu-backend", target_arch = "wasm32"))]
 pub mod wgpu_renderer;

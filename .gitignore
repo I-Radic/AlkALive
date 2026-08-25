@@ -16,3 +16,6 @@ Thumbs.db
 
 # Vendor (HarfRust fork is committed; build artifacts are not)
 vendor/harfrust/target
+
+test/e2e/node_modules/
+test/e2e/artifacts/

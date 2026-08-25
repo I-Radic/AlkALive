@@ -40,3 +40,11 @@ web-sys = { version = "0.3", features = [
   "Url",
   "MessageEvent",
 ] }
+
+[features]
+default = ["wgpu-backend"]
+# Forward the wgpu-backend feature to the GPU backend crate. When enabled
+# (the default), the runtime selects the wgpu/WGSL renderer (ADR-006) as the
+# primary production backend and falls back to raw WebGL2/GLSL if WebGPU
+# initialization fails. When disabled, only the GLSL fallback is built.
+wgpu-backend = ["alkalive-backend-wgpu/wgpu-backend"]

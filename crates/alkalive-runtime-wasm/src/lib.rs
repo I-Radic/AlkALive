@@ -1,4 +1,4 @@
-//! AlkALive pure runtime — WASM entry point with GPU rendering.
+﻿//! AlkALive pure runtime — WASM entry point with GPU rendering.
 //!
 //! This crate is the **single entry point** for the pure AlkALive pipeline.
 //! It compiles to a `cdylib` (WASM) that owns the entire rendering pipeline:
@@ -7,8 +7,12 @@
 //!    via `include_str!`, then lowers it to a `ScheduledScene` at startup
 //!    via [`alkalive_compiler::compile_scheduled`] (ADR-024: produces both
 //!    the `AlgorithmIR` and the default `ScheduleIR`).
-//! 2. **GPU backend init** — acquires the WebGL2 context from the canvas
-//!    via [`alkalive_backend_wgpu::WgpuRenderer::init_from_canvas`].
+//! 2. **GPU backend init** — selects the production renderer: the
+//!    wgpu/WGSL backend ([`alkalive_backend_wgpu::WgpuBackendRenderer`],
+//!    ADR-001/ADR-006) when WebGPU is available, falling back to the raw
+//!    WebGL2/GLSL renderer ([`alkalive_backend_wgpu::WgpuRenderer`]) with a
+//!    logged, explicit reason otherwise. The selected renderer is logged at
+//!    startup so the active path is always observable.
 //! 3. **Frame loop** — owns the `requestAnimationFrame` loop *from inside
 //!    WASM* (no JS frame driver).
 //! 4. **Input handling** — attaches `keydown` / `input` event listeners to
@@ -98,9 +102,10 @@ pub const SMALL_SCENE_THRESHOLD: usize = 50;
 /// data, the rendering schedule (ADR-024), the dependency graph + signal
 /// store (ADR-025), animation time, and the user's input text buffer.
 struct Runtime {
-    /// The WebGL2 GPU renderer. Owns the canvas's WebGL2 context, shader
-    /// program, glyph atlas texture, and vertex buffers.
-    renderer: alkalive_backend_wgpu::WgpuRenderer,
+    /// The active GPU renderer (wgpu/WGSL primary, WebGL2/GLSL fallback).
+    /// Owns the GPU context, pipelines, glyph atlas texture, and vertex
+    /// buffers.
+    renderer: ActiveRenderer,
     /// The per-frame scene description (text, colors, rotation speed).
     /// Derived from the algorithm IR's text node.
     scene: alkalive_backend_wgpu::TextSceneData,
@@ -129,9 +134,6 @@ struct Runtime {
     time: f32,
     /// The user's input text buffer (forwarded from the IME input element).
     input_text: String,
-    /// The original scene text (from the `.alk` source). Used to restore the
-    /// scene when the input buffer is empty.
-    original_text: String,
 }
 
 // Thread-local storage for the runtime instance + long-lived closures.
@@ -176,6 +178,177 @@ fn elapsed_seconds() -> f32 {
         }
     })
 }
+
+// ---------------------------------------------------------------------------
+// Renderer selection — explicit primary/fallback GPU backend architecture
+// ---------------------------------------------------------------------------
+
+/// The per-frame contract every production renderer must satisfy.
+///
+/// Both backends consume the same inputs — per-frame `TextSceneData`, the
+/// ADR-024 `ScheduleIR`, elapsed time, and (optionally) an ADR-025
+/// dirty-pass hint — so the runtime is agnostic to which GPU path was
+/// selected.
+trait FrameRenderer {
+    /// Render one full frame.
+    fn render_frame(
+        &mut self,
+        scene: &alkalive_backend_wgpu::TextSceneData,
+        schedule: &alkalive_compiler::ScheduleIR,
+        time: f32,
+    );
+
+    /// Render one frame with a dirty-pass hint from the ADR-025 dependency
+    /// graph. Backends that cannot exploit the hint yet must still render
+    /// all passes correctly (both current backends do this because WebGL2's
+    /// single-buffered clear would otherwise leave ghosts; per-pass render
+    /// targets are the documented follow-up).
+    fn render_frame_with_dirty(
+        &mut self,
+        scene: &alkalive_backend_wgpu::TextSceneData,
+        schedule: &alkalive_compiler::ScheduleIR,
+        time: f32,
+        dirty_passes: &[usize],
+    );
+
+    /// Resize the drawing surface.
+    fn resize(&mut self, width: u32, height: u32);
+
+    /// CPU bounding-box hit test for the input field (ADR-010).
+    fn hit_test_input_field(&self, x: f32, y: f32) -> bool;
+}
+
+impl FrameRenderer for alkalive_backend_wgpu::WgpuRenderer {
+    fn render_frame(
+        &mut self,
+        scene: &alkalive_backend_wgpu::TextSceneData,
+        schedule: &alkalive_compiler::ScheduleIR,
+        time: f32,
+    ) {
+        // The schedule drives data-driven pass dispatch on this backend.
+        alkalive_backend_wgpu::WgpuRenderer::render_frame(self, scene, schedule, time);
+    }
+
+    fn render_frame_with_dirty(
+        &mut self,
+        scene: &alkalive_backend_wgpu::TextSceneData,
+        schedule: &alkalive_compiler::ScheduleIR,
+        time: f32,
+        dirty_passes: &[usize],
+    ) {
+        alkalive_backend_wgpu::WgpuRenderer::render_frame_with_dirty(
+            self, scene, schedule, time, dirty_passes,
+        );
+    }
+
+    fn resize(&mut self, width: u32, height: u32) {
+        alkalive_backend_wgpu::WgpuRenderer::resize(self, width, height);
+    }
+
+    fn hit_test_input_field(&self, x: f32, y: f32) -> bool {
+        alkalive_backend_wgpu::WgpuRenderer::hit_test_input_field(self, x, y)
+    }
+}
+
+#[cfg(all(feature = "wgpu-backend", target_arch = "wasm32"))]
+impl FrameRenderer for alkalive_backend_wgpu::wgpu_renderer::WgpuBackendRenderer {
+    fn render_frame(
+        &mut self,
+        scene: &alkalive_backend_wgpu::TextSceneData,
+        schedule: &alkalive_compiler::ScheduleIR,
+        time: f32,
+    ) {
+        // The wgpu backend encodes graph order directly; the schedule is
+        // consumed by the shared frame plan (see wgpu_renderer module docs).
+        alkalive_backend_wgpu::wgpu_renderer::WgpuBackendRenderer::render_frame(
+            self, scene, schedule, time,
+        );
+    }
+
+    fn render_frame_with_dirty(
+        &mut self,
+        scene: &alkalive_backend_wgpu::TextSceneData,
+        schedule: &alkalive_compiler::ScheduleIR,
+        time: f32,
+        _dirty_passes: &[usize],
+    ) {
+        // Dirty hints are recorded but all passes re-render on this backend
+        // too (documented limitation shared with the GLSL path).
+        alkalive_backend_wgpu::wgpu_renderer::WgpuBackendRenderer::render_frame(
+            self, scene, schedule, time,
+        );
+    }
+
+    fn resize(&mut self, width: u32, height: u32) {
+        alkalive_backend_wgpu::wgpu_renderer::WgpuBackendRenderer::resize(self, width, height);
+    }
+
+    fn hit_test_input_field(&self, x: f32, y: f32) -> bool {
+        alkalive_backend_wgpu::wgpu_renderer::WgpuBackendRenderer::hit_test_input_field(
+            self, x, y,
+        )
+    }
+}
+
+/// The active GPU renderer. Selection happens once at startup:
+///
+/// 1. **Primary — wgpu/WGSL** (`feature = "wgpu-backend"`, default): ADR-001
+///    names WebGPU as the initial backend; ADR-006 makes WGSL first-class.
+/// 2. **Fallback — raw WebGL2/GLSL**: engaged only when wgpu initialization
+///    fails (no WebGPU adapter/device), with the reason logged loudly.
+enum ActiveRenderer {
+    #[cfg(all(feature = "wgpu-backend", target_arch = "wasm32"))]
+    Wgpu(alkalive_backend_wgpu::wgpu_renderer::WgpuBackendRenderer),
+    Glsl(alkalive_backend_wgpu::WgpuRenderer),
+}
+
+impl FrameRenderer for ActiveRenderer {
+    fn render_frame(
+        &mut self,
+        scene: &alkalive_backend_wgpu::TextSceneData,
+        schedule: &alkalive_compiler::ScheduleIR,
+        time: f32,
+    ) {
+        match self {
+            #[cfg(all(feature = "wgpu-backend", target_arch = "wasm32"))]
+            ActiveRenderer::Wgpu(r) => r.render_frame(scene, schedule, time),
+            ActiveRenderer::Glsl(r) => r.render_frame(scene, schedule, time),
+        }
+    }
+
+    fn render_frame_with_dirty(
+        &mut self,
+        scene: &alkalive_backend_wgpu::TextSceneData,
+        schedule: &alkalive_compiler::ScheduleIR,
+        time: f32,
+        dirty_passes: &[usize],
+    ) {
+        match self {
+            #[cfg(all(feature = "wgpu-backend", target_arch = "wasm32"))]
+            ActiveRenderer::Wgpu(r) => {
+                r.render_frame_with_dirty(scene, schedule, time, dirty_passes)
+            }
+            ActiveRenderer::Glsl(r) => r.render_frame_with_dirty(scene, schedule, time, dirty_passes),
+        }
+    }
+
+    fn resize(&mut self, width: u32, height: u32) {
+        match self {
+            #[cfg(all(feature = "wgpu-backend", target_arch = "wasm32"))]
+            ActiveRenderer::Wgpu(r) => r.resize(width, height),
+            ActiveRenderer::Glsl(r) => r.resize(width, height),
+        }
+    }
+
+    fn hit_test_input_field(&self, x: f32, y: f32) -> bool {
+        match self {
+            #[cfg(all(feature = "wgpu-backend", target_arch = "wasm32"))]
+            ActiveRenderer::Wgpu(r) => r.hit_test_input_field(x, y),
+            ActiveRenderer::Glsl(r) => r.hit_test_input_field(x, y),
+        }
+    }
+}
+
 
 // ---------------------------------------------------------------------------
 // Public WASM entry point
@@ -231,10 +404,11 @@ pub fn start(
     }
 
     // 2. Compile the embedded `.alk` source to a ScheduledScene (ADR-024:
-    //    produces both the AlgorithmIR and the default ScheduleIR) PLUS a
-    //    DependencyGraph (ADR-025: one node per schedule pass, annotated
-    //    with the signal IDs each pass reads).
-    let (scheduled, dep_graph) = alkalive_compiler::compile_with_deps(HELLO_ALK_SRC)
+    //    AlgorithmIR + ScheduleIR) PLUS a DependencyGraph (ADR-025), with the
+    //    ADR-026 e-graph optimization applied to the dependency graph
+    //    (`compile_full` = schedule lowering → incremental analysis →
+    //    e-graph rewrite rules → cost-based extraction).
+    let (scheduled, dep_graph) = alkalive_compiler::compile_full(HELLO_ALK_SRC)
         .map_err(|e| JsValue::from_str(&format!("AlkALive compile error: {:?}", e)))?;
 
     // 3. Lower the ScheduledScene's algorithm to the renderer's TextSceneData,
@@ -254,6 +428,8 @@ pub fn start(
     //    client_width/client_height give us the CSS pixel size; multiplying
     //    by devicePixelRatio gives the physical pixel size for the drawing
     //    buffer.
+    web_sys::console::log_1(&"DBG: before step5".into());
+    let _ = ime_input;
     let dpr = web_sys::window()
         .and_then(|w| Some(w.device_pixel_ratio()))
         .unwrap_or(1.0) as f32;
@@ -282,14 +458,10 @@ pub fn start(
         }
     }
 
-    // 6. Kick off async GPU backend init. The WgpuRenderer::init_from_canvas
-    //    future resolves once the WebGL2 context is acquired, shaders are
-    //    compiled, and the glyph atlas texture is created.
-    //    ADR-006: When the wgpu-backend feature is active and the render
-    //    worker is supported, the runtime would use the wgpu renderer with
-    //    WGSL shaders. Currently, the GLSL/WebGL2 renderer is the production
-    //    path; the wgpu renderer (WgpuBackendRenderer) is available as an
-    //    alternative backend when the feature is enabled.
+    // 6. Kick off async GPU backend init. `select_renderer` attempts the
+    //    wgpu/WGSL renderer first (ADR-001/ADR-006) and falls back to the
+    //    raw WebGL2/GLSL renderer with a logged reason when WebGPU is
+    //    unavailable.
     spawn_local(async move {
         if let Err(e) = init_runtime(
             canvas,
@@ -324,11 +496,15 @@ async fn init_runtime(
     dep_graph: alkalive_compiler::DependencyGraph,
     is_small_scene: bool,
 ) -> Result<(), JsValue> {
-    // 1. Initialize the WebGL2 renderer (async — acquires the GPU context).
-    let renderer =
-        alkalive_backend_wgpu::WgpuRenderer::init_from_canvas(canvas.clone(), width, height)
-            .await
-            .map_err(|e| JsValue::from_str(&format!("AlkALive renderer init failed: {}", e)))?;
+    // 1. Select the production renderer (explicit primary/fallback
+    //    architecture):
+    //    - Primary: wgpu/WGSL (ADR-001 "WebGPU is the initial backend",
+    //      ADR-006 WGSL shaders) — attempted first whenever the feature is
+    //      built in.
+    //    - Fallback: raw WebGL2/GLSL — engaged only when wgpu initialization
+    //      fails, with the failure reason logged loudly so the active path is
+    //      always observable.
+    let renderer = select_renderer(&canvas, width, height).await?;
 
     // 2. Build the SignalStore with the well-known signals' initial values.
     //    These mirror the values baked into `scene` at startup — the
@@ -362,7 +538,6 @@ async fn init_runtime(
     );
 
     // 3. Store the runtime state in thread-local storage.
-    let original_text = scene.text.clone();
     RUNTIME.with(|rt| {
         *rt.borrow_mut() = Some(Runtime {
             renderer,
@@ -373,7 +548,6 @@ async fn init_runtime(
             is_small_scene,
             time: 0.0,
             input_text: String::new(),
-            original_text,
         });
     });
 
@@ -394,6 +568,58 @@ async fn init_runtime(
 
     web_sys::console::log_1(&"AlkALive runtime ready — rendering Hello World.".into());
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Renderer selection (primary: wgpu/WGSL — fallback: raw WebGL2/GLSL)
+// ---------------------------------------------------------------------------
+
+/// Attempt the wgpu/WGSL renderer first (ADR-001/ADR-006); on failure, fall
+/// back to raw WebGL2/GLSL. The selection and any fallback reason are logged
+/// to the console so tests can assert which path is live.
+async fn select_renderer(
+    canvas: &web_sys::HtmlCanvasElement,
+    width: u32,
+    height: u32,
+) -> Result<ActiveRenderer, JsValue> {
+    #[cfg(all(feature = "wgpu-backend", target_arch = "wasm32"))]
+    {
+        match alkalive_backend_wgpu::wgpu_renderer::WgpuBackendRenderer::init_from_canvas(
+            canvas.clone(),
+            width,
+            height,
+        )
+        .await
+        {
+            Ok(r) => {
+                web_sys::console::log_1(
+                    &"AlkALive renderer selected: WebGPU (wgpu/WGSL, ADR-001/ADR-006)".into(),
+                );
+                return Ok(ActiveRenderer::Wgpu(r));
+            }
+            Err(reason) => {
+                web_sys::console::warn_1(
+                    &format!(
+                        "AlkALive: wgpu/WGSL renderer unavailable ({reason}) — \
+                         falling back to WebGL2/GLSL"
+                    )
+                    .into(),
+                );
+            }
+        }
+    }
+
+    let glsl = alkalive_backend_wgpu::WgpuRenderer::init_from_canvas(
+        canvas.clone(),
+        width,
+        height,
+    )
+    .await
+    .map_err(|e| {
+        JsValue::from_str(&format!("AlkALive renderer init failed (WebGL2 fallback): {}", e))
+    })?;
+    web_sys::console::log_1(&"AlkALive renderer selected: WebGL2 (GLSL ES 3.00 fallback)".into());
+    Ok(ActiveRenderer::Glsl(glsl))
 }
 
 // ---------------------------------------------------------------------------
