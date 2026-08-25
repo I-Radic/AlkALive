@@ -1,14 +1,18 @@
-﻿{
+{
   "name": "alkalive-e2e",
   "private": true,
   "version": "1.0.0",
   "description": "Browser end-to-end verification for the AlkALive deploy artifact",
   "type": "module",
   "scripts": {
-    "test": "node e2e.mjs"
+    "test": "node e2e.mjs",
+    "test:e2e": "node e2e.mjs",
+    "test:firefox": "node firefox-e2e.mjs"
   },
   "devDependencies": {
+    "geckodriver": "^5.0.0",
     "playwright-core": "1.49.1",
-    "pngjs": "7.0.0"
+    "pngjs": "7.0.0",
+    "selenium-webdriver": "^4.27.0"
   }
 }

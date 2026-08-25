@@ -581,8 +581,12 @@ async fn init_runtime(
 // ---------------------------------------------------------------------------
 
 /// Attempt the wgpu/WGSL renderer first (ADR-001/ADR-006); on failure, fall
-/// back to raw WebGL2/GLSL. The selection and any fallback reason are logged
-/// to the console so tests can assert which path is live.
+/// back to raw WebGL2/GLSL. The selection, any fallback reason, and the live
+/// state are published to the console AND to `window.__alkalive` so tests and
+/// support tooling can assert which path is active.
+// The tail statements are reachable only when `wgpu-backend` is compiled out;
+// silence the unreachable-code lint for the default build.
+#[allow(unreachable_code)]
 async fn select_renderer(
     canvas: &web_sys::HtmlCanvasElement,
     width: u32,
@@ -601,33 +605,52 @@ async fn select_renderer(
                  falling back to WebGL2/GLSL"
                     .into(),
             );
-        } else {
-            match alkalive_backend_wgpu::wgpu_renderer::WgpuBackendRenderer::init_from_canvas(
-                canvas.clone(),
-                width,
-                height,
-            )
-            .await
-            {
-                Ok(r) => {
-                    web_sys::console::log_1(
-                        &"AlkALive renderer selected: WebGPU (wgpu/WGSL, ADR-001/ADR-006)".into(),
-                    );
-                    return Ok(ActiveRenderer::Wgpu(r));
-                }
-                Err(reason) => {
-                    web_sys::console::warn_1(
-                        &format!(
-                            "AlkALive: wgpu/WGSL renderer unavailable ({reason}) — \
-                             falling back to WebGL2/GLSL"
-                        )
-                        .into(),
-                    );
-                }
+            let glsl = select_glsl_fallback(canvas, width, height).await?;
+            publish_renderer_state("WebGL2", Some("WebGPU adapter probe returned none"));
+            return Ok(glsl);
+        }
+        match alkalive_backend_wgpu::wgpu_renderer::WgpuBackendRenderer::init_from_canvas(
+            canvas.clone(),
+            width,
+            height,
+        )
+        .await
+        {
+            Ok(r) => {
+                web_sys::console::log_1(
+                    &"AlkALive renderer selected: WebGPU (wgpu/WGSL, ADR-001/ADR-006)".into(),
+                );
+                publish_renderer_state("WebGPU", None);
+                return Ok(ActiveRenderer::Wgpu(r));
+            }
+            Err(reason) => {
+                web_sys::console::warn_1(
+                    &format!(
+                        "AlkALive: wgpu/WGSL renderer unavailable ({reason}) — \
+                         falling back to WebGL2/GLSL"
+                    )
+                    .into(),
+                );
+                let glsl = select_glsl_fallback(canvas, width, height).await?;
+                publish_renderer_state("WebGL2", Some(reason.as_str()));
+                return Ok(glsl);
             }
         }
     }
 
+    // wgpu-backend not built into this artifact — WebGL2 is the only path.
+    let glsl = select_glsl_fallback(canvas, width, height).await?;
+    publish_renderer_state("WebGL2", Some("wgpu-backend feature not built"));
+    Ok(glsl)
+}
+
+/// Initialize the WebGL2/GLSL fallback renderer with the error context the
+/// runtime reports when it is engaged.
+async fn select_glsl_fallback(
+    canvas: &web_sys::HtmlCanvasElement,
+    width: u32,
+    height: u32,
+) -> Result<ActiveRenderer, JsValue> {
     let glsl = alkalive_backend_wgpu::WgpuRenderer::init_from_canvas(
         canvas.clone(),
         width,
@@ -639,6 +662,23 @@ async fn select_renderer(
     })?;
     web_sys::console::log_1(&"AlkALive renderer selected: WebGL2 (GLSL ES 3.00 fallback)".into());
     Ok(ActiveRenderer::Glsl(glsl))
+}
+
+/// Publish the live renderer state as `window.__alkalive = { renderer,
+/// fallbackReason }` so users, support tooling, and browser tests can
+/// observe which path is active without parsing console logs.
+fn publish_renderer_state(renderer: &str, fallback_reason: Option<&str>) {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let state = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(&state, &"renderer".into(), &renderer.into());
+    let reason = match fallback_reason {
+        Some(r) => JsValue::from_str(r),
+        None => JsValue::NULL,
+    };
+    let _ = js_sys::Reflect::set(&state, &"fallbackReason".into(), &reason);
+    let _ = js_sys::Reflect::set(&window.into(), &"__alkalive".into(), &state);
 }
 
 // ---------------------------------------------------------------------------

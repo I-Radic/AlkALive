@@ -1,88 +1,38 @@
-// AlkALive end-to-end browser verification.
+// AlkALive end-to-end browser verification (Chromium via Playwright).
 //
-// Verifies the REAL product path in a real (headless) Chromium:
+// Verifies the REAL product path in a real (headless) browser:
 //
 //   deploy/index.html → pkg/alkalive_runtime_wasm.js → WASM runtime
-//     → .alk compiled at startup by the real compiler
-//     → renderer selection logged ("AlkALive renderer selected: …")
+//     → .alk compiled at startup by the real compiler (compile_full:
+//       schedule → dep-graph → e-graph)
+//     → renderer selection logged AND published to window.__alkalive
 //     → render graph executed on the GPU
 //     → visible golden-on-black pixels on the canvas
 //
-// Two runs are performed:
-//   1. default flags — WebGPU is attempted first; whichever renderer the
-//      runtime selects must render real pixels. The selection line is
-//      recorded.
-//   2. WebGPU removed from the page before scripts run — the runtime MUST
-//      select the WebGL2/GLSL fallback and still render real pixels.
+// Runs:
+//   1. default flags — WebGPU attempted first; whichever renderer is
+//      selected must render real pixels. Selection asserted via
+//      window.__alkalive + console logs.
+//   2. WebGPU removed before scripts run — runtime MUST select WebGL2/GLSL,
+//      publish a fallback reason, and still render real pixels.
 //
-// The dev server sets COOP/COEP HTTP response headers (the deployment
-// configuration), so `crossOriginIsolated` is also asserted true.
+// NOTE on WebGPU-in-browser proof: where Chromium lacks an adapter, this
+// harness still passes by asserting the *selection contract*; the actual
+// wgpu/WGSL rendering path is proven IN-BROWSER by firefox-e2e.mjs
+// (Firefox ≥141 ships WebGPU) and OFFSCREEN by offscreen_wgpu.rs.
 //
 // Usage: node e2e.mjs [--headed]
 
 import { chromium } from 'playwright-core';
-import { PNG } from 'pngjs';
-import { createServer } from 'node:http';
-import { readFile, mkdir, writeFile } from 'node:fs/promises';
-import { join, extname, dirname } from 'node:path';
+import { writeFile, mkdir } from 'node:fs/promises';
+import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { startServer, analyzePng, assert } from './harness.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const DEPLOY_DIR = join(__dirname, '..', '..', 'deploy');
 const ARTIFACTS_DIR = join(__dirname, 'artifacts');
 
 const PORT = 8123;
-const MIME = {
-  '.html': 'text/html; charset=utf-8',
-  '.js': 'text/javascript',
-  '.mjs': 'text/javascript',
-  '.wasm': 'application/wasm',
-  '.json': 'application/json',
-  '.ts': 'text/plain',
-};
-
-function startServer() {
-  return new Promise((resolve) => {
-    const server = createServer(async (req, res) => {
-      // ADR-003 deployment requirement: cross-origin isolation must be
-      // enabled via HTTP RESPONSE headers (<meta http-equiv> does not work).
-      res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
-      res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
-      const url = req.url === '/' ? '/index.html' : req.url.split('?')[0];
-      if (url === '/favicon.ico') {
-        res.statusCode = 204;
-        res.end();
-        return;
-      }
-      try {
-        const data = await readFile(join(DEPLOY_DIR, url));
-        res.setHeader('Content-Type', MIME[extname(url)] ?? 'application/octet-stream');
-        res.setHeader('Cache-Control', 'no-store');
-        res.end(data);
-      } catch {
-        res.statusCode = 404;
-        res.end('not found');
-      }
-    });
-    server.listen(PORT, () => resolve(server));
-  });
-}
-
-async function analyzeCanvas(page) {
-  const buf = await page.locator('#canvas').screenshot({ type: 'png' });
-  const png = PNG.sync.read(buf);
-  let black = 0;
-  let golden = 0;
-  const total = png.width * png.height;
-  for (let i = 0; i < png.data.length; i += 4) {
-    const r = png.data[i];
-    const g = png.data[i + 1];
-    const b = png.data[i + 2];
-    if (r < 8 && g < 8 && b < 8) black++;
-    else if (r > 60 && r > g && g > b) golden++;
-  }
-  return { width: png.width, height: png.height, total, black, golden };
-}
 
 function collectLogs(page, sink) {
   page.on('console', (msg) => sink.push(`[console.${msg.type()}] ${msg.text()}`));
@@ -90,8 +40,8 @@ function collectLogs(page, sink) {
 }
 
 /**
- * Load the app in a fresh context and capture logs/pixels.
- * @returns {Promise<{logs: string[], isolated: ?boolean, sabOk: ?boolean, pixels: object}>}
+ * Load the app in a fresh context and capture logs/state/pixels.
+ * @returns {Promise<{logs: string[], state: ?object, isolated: ?boolean, sabOk: ?boolean, pixels: object}>}
  */
 async function loadAndCapture(browser, name, { hideWebGPU = false } = {}) {
   const context = await browser.newContext({
@@ -104,8 +54,6 @@ async function loadAndCapture(browser, name, { hideWebGPU = false } = {}) {
   if (hideWebGPU) {
     // Force the fallback path deterministically: remove WebGPU before any
     // page script runs so the runtime's adapter request must fail.
-    // `navigator.gpu` lives on the Navigator prototype as an accessor;
-    // redefine it there and verify from inside the page.
     await page.addInitScript(() => {
       const proto = Object.getPrototypeOf(navigator);
       try {
@@ -123,6 +71,12 @@ async function loadAndCapture(browser, name, { hideWebGPU = false } = {}) {
   await page.goto(`http://127.0.0.1:${PORT}/index.html`, { waitUntil: 'load' });
   await page.waitForTimeout(4000);
 
+  const state = await page.evaluate(() =>
+    window.__alkalive
+      ? { renderer: window.__alkalive.renderer, fallbackReason: window.__alkalive.fallbackReason }
+      : null,
+  );
+
   let isolated = null;
   let sabOk = null;
   if (!hideWebGPU) {
@@ -137,21 +91,18 @@ async function loadAndCapture(browser, name, { hideWebGPU = false } = {}) {
     });
   }
 
-  const pixels = await analyzeCanvas(page);
+  const buf = await page.locator('#canvas').screenshot({ type: 'png' });
+  const pixels = analyzePng(buf);
   await mkdir(ARTIFACTS_DIR, { recursive: true });
-  await writeFile(join(ARTIFACTS_DIR, `${name}.png`), await page.locator('#canvas').screenshot());
+  await writeFile(join(ARTIFACTS_DIR, `${name}.png`), buf);
   await writeFile(join(ARTIFACTS_DIR, `${name}.log.txt`), logs.join('\n'));
   await context.close();
-  return { logs, isolated, sabOk, pixels };
-}
-
-function assert(cond, message) {
-  if (!cond) throw new Error(`ASSERT FAILED: ${message}`);
+  return { logs, state, isolated, sabOk, pixels };
 }
 
 async function main() {
   const headed = process.argv.includes('--headed');
-  const server = await startServer();
+  const server = await startServer(PORT);
 
   const LAUNCH_ARGS = [
     // Permit real WebGPU where a hardware adapter exists.
@@ -194,37 +145,48 @@ async function main() {
 
   server.close();
 
-  // ---- Assertions --------------------------------------------------------
+  // ---- Assertions ----------------------------------------------------------
   assert(def.pixels.total > 0, 'canvas screenshot captured');
+  assert(def.state !== null, 'runtime must publish window.__alkalive');
+  assert(
+    ['WebGPU', 'WebGL2'].includes(def.state.renderer),
+    `published renderer must be a known path (got ${JSON.stringify(def.state)})`,
+  );
   assert(
     def.pixels.golden > def.pixels.total * 0.0005,
-    `golden text visible on default run (got ${def.pixels.golden} golden px of ${def.pixels.total})`
+    `golden text visible on default run (got ${def.pixels.golden} golden px of ${def.pixels.total})`,
   );
   assert(
     def.logs.some((l) => l.includes('AlkALive renderer selected:')),
-    'runtime logged its renderer selection'
+    'runtime logged its renderer selection',
   );
   assert(def.isolated === true, 'crossOriginIsolated must be true under COOP/COEP response headers');
   assert(def.sabOk === true, 'SharedArrayBuffer must be constructible when isolated');
 
   assert(
+    nowg.state !== null && nowg.state.renderer === 'WebGL2',
+    `fallback run must publish WebGL2 selection (got ${JSON.stringify(nowg.state)})`,
+  );
+  assert(
+    typeof nowg.state.fallbackReason === 'string' && nowg.state.fallbackReason.length > 0,
+    'fallback run must publish a fallback reason',
+  );
+  assert(
     nowg.logs.some((l) => l.includes('renderer selected: WebGL2')),
-    'fallback run must explicitly select the WebGL2/GLSL renderer'
+    'fallback run must explicitly select the WebGL2/GLSL renderer',
   );
   assert(
     nowg.pixels.golden > nowg.pixels.total * 0.0005,
-    `golden text visible on fallback run (got ${nowg.pixels.golden} golden px of ${nowg.pixels.total})`
+    `golden text visible on fallback run (got ${nowg.pixels.golden} golden px of ${nowg.pixels.total})`,
   );
 
   console.log('\n=== AlkALive E2E: ALL ASSERTIONS PASSED ===\n');
   console.log(
-    `[default] golden=${def.pixels.golden}/${def.pixels.total}px isolated=${def.isolated}`
+    `[default]   renderer=${def.state.renderer}${def.state.fallbackReason ? ` (${def.state.fallbackReason})` : ''} golden=${def.pixels.golden}/${def.pixels.total}px isolated=${def.isolated}`,
   );
-  console.log(`[no-webgpu] golden=${nowg.pixels.golden}/${nowg.pixels.total}px`);
-  const selectionLine = def.logs.find((l) => l.includes('AlkALive renderer selected:'));
-  console.log(`Default-run selection: ${selectionLine}`);
-  const fallbackReason = nowg.logs.find((l) => l.includes('wgpu/WGSL renderer unavailable'));
-  if (fallbackReason) console.log(`Fallback trigger: ${fallbackReason}`);
+  console.log(
+    `[no-webgpu] renderer=${nowg.state.renderer} reason="${nowg.state.fallbackReason}" golden=${nowg.pixels.golden}/${nowg.pixels.total}px`,
+  );
 }
 
 main().catch((err) => {
