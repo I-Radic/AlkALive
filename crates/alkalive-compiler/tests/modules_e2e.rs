@@ -12,7 +12,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use alkalive_compiler::compile_full_in;
+use alkalive_compiler::{compile_full_in, compile_src_to_wasm};
 
 static DIR_COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -206,4 +206,24 @@ fn std_imports_remain_lenient_when_unresolved() {
     );
 
     fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn wasm_output_is_byte_deterministic_across_compilations() {
+    // Two independent compilations construct independent HashMaps (fresh
+    // random seeds per map); if any section were emitted in HashMap
+    // iteration order, these byte strings would differ.
+    let src = r#"module M {
+  scene { background: #000000
+    text "Determinism!" { color: gold
+      font-size: 48
+      position: center }
+  }
+
+  fn f(x: i32) -> i32 { return x * 3 + 1; }
+}
+"#;
+    let a = compile_src_to_wasm(src).expect("first compile");
+    let b = compile_src_to_wasm(src).expect("second compile");
+    assert_eq!(a.bytes, b.bytes, "WASM output must be deterministic");
 }

@@ -104,13 +104,19 @@ async function main() {
   const headed = process.argv.includes('--headed');
   const server = await startServer(PORT);
 
-  const LAUNCH_ARGS = [
-    // Permit real WebGPU where a hardware adapter exists.
-    // (--enable-unsafe-swiftshader was evaluated and REJECTED: on Chrome 131
-    // headless-shell it disables the automatic software fallback without
-    // providing one, leaving neither WebGPU nor WebGL2 available.)
-    '--enable-unsafe-webgpu',
-  ];
+  // CI runners have no bundled Playwright browser; they do ship Google
+  // Chrome. ALKALIVE_BROWSER_CHANNEL selects a system browser there.
+  const channel = process.env.ALKALIVE_BROWSER_CHANNEL;
+  const LAUNCH_OPTS = {
+    headless: !headed,
+    args: [
+      // Permit real WebGPU where an adapter exists (SwiftShader counts).
+      '--enable-unsafe-webgpu',
+      '--enable-unsafe-swiftshader',
+      '--use-angle=swiftshader',
+    ],
+    ...(channel ? { channel } : {}),
+  };
 
   /**
    * Fresh browser per case: headless GPU-process state does not survive
@@ -118,7 +124,7 @@ async function main() {
    * warm-up pass before the real measurement.
    */
   async function withBrowser(fn) {
-    const browser = await chromium.launch({ headless: !headed, args: LAUNCH_ARGS });
+    const browser = await chromium.launch(LAUNCH_OPTS);
     try {
       const warm = await browser.newContext({ viewport: { width: 320, height: 240 } });
       const warmPage = await warm.newPage();

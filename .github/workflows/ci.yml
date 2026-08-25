@@ -1,0 +1,162 @@
+# AlkALive CI — reproducible verification of the production pipeline.
+#
+# Jobs:
+#   1. native-tests        : full Rust workspace test suite + warning-free check
+#   2. deploy-pipeline     : wasm32 release build -> version-gated bindgen ->
+#                            pinned binaryen wasm-opt -Oz -> validation gates
+#                            (size-reduction floor + artifact SHA match)
+#   3. e2e-chromium        : browser E2E of the built artifacts (renderer
+#                            selection contract incl. forced WebGL2 fallback,
+#                            COOP/COEP isolation, golden-pixel rendering)
+#   4. e2e-firefox-webgpu  : REAL in-browser WebGPU proof (Firefox >=141 ships
+#                            WebGPU): wgpu/WGSL-selected rendering asserted via
+#                            window.__alkalive + golden pixels, plus the forced
+#                            fallback case.
+#
+# Every job builds from a clean checkout; the browser jobs consume the exact
+# artifacts produced by the same commit's build-deploy pipeline.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  WASM_BINDGEN_VERSION: 0.2.127
+
+jobs:
+  native-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Check (zero warnings)
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo check --workspace 2>&1 | tee check.log
+          if grep -q "^warning" check.log; then echo "::error::compiler warnings present"; exit 1; fi
+      - name: Test workspace
+        run: cargo test --workspace
+
+  deploy-pipeline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: Install pinned wasm-bindgen CLI
+        run: cargo install wasm-bindgen-cli --version "$WASM_BINDGEN_VERSION"
+      - name: Build + optimize + validate deploy artifact
+        run: |
+          npm ci
+          node build-deploy.mjs
+      - name: Gate size reduction (ADR-017 compactness budget)
+        run: |
+          node -e "
+            const r = require('./deploy/pkg/build-report.json');
+            const saved = 100 * (r.afterBindgenBytes - r.afterWasmOptBytes) / r.afterBindgenBytes;
+            console.log('wasm-opt reduction:', saved.toFixed(1) + '%');
+            if (saved < 40) { console.error('FAIL: expected >=40% post-bindgen shrink'); process.exit(1); }
+          "
+      - name: Gate artifact SHA vs build report
+        run: |
+          node -e "
+            const fs = require('fs'), crypto = require('crypto');
+            const r = require('./deploy/pkg/build-report.json');
+            const sha = crypto.createHash('sha256').update(fs.readFileSync('./deploy/pkg/alkalive_runtime_wasm_bg.wasm')).digest('hex');
+            if (sha !== r.finalSha256) { console.error('FAIL: shipped artifact != reported SHA'); process.exit(1); }
+            console.log('SHA OK:', sha.slice(0, 16) + '...');
+          "
+      - name: Zero-warning wasm32 check
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo check -p alkalive-runtime-wasm --target wasm32-unknown-unknown 2>&1 | tee wasmcheck.log
+          if grep -q "^warning" wasmcheck.log; then echo "::error::wasm32 warnings present"; exit 1; fi
+
+  e2e-chromium:
+    runs-on: ubuntu-latest
+    needs: deploy-pipeline
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build deploy artifacts (same pipeline as release)
+        run: |
+          npm ci
+          cargo install wasm-bindgen-cli --version "$WASM_BINDGEN_VERSION"
+          node build-deploy.mjs
+      - name: Run Chromium E2E (system Chrome)
+        working-directory: test/e2e
+        env:
+          ALKALIVE_BROWSER_CHANNEL: chrome
+        run: |
+          npm ci
+          node e2e.mjs
+      - name: Upload E2E artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chromium-e2e-artifacts
+          path: test/e2e/artifacts/
+          retention-days: 7
+
+  e2e-firefox-webgpu:
+    runs-on: windows-latest
+    needs: deploy-pipeline
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build deploy artifacts (same pipeline as release)
+        shell: bash
+        run: |
+          npm ci
+          cargo install wasm-bindgen-cli --version "$WASM_BINDGEN_VERSION"
+          node build-deploy.mjs
+      - name: Provision geckodriver (pinned)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path test\e2e\artifacts\geckodriver | Out-Null
+          Invoke-WebRequest -Uri 'https://github.com/mozilla/geckodriver/releases/download/v0.36.0/geckodriver-v0.36.0-win64.zip' -OutFile test\e2e\artifacts\geckodriver\geckodriver.zip
+          Expand-Archive test\e2e\artifacts\geckodriver\geckodriver.zip -DestinationPath test\e2e\artifacts\geckodriver -Force
+      - name: Run Firefox WebGPU E2E (real in-browser wgpu/WGSL)
+        working-directory: test/e2e
+        shell: pwsh
+        run: |
+          npm ci
+          node firefox-e2e.mjs --headed
+      - name: Upload E2E artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: firefox-e2e-artifacts
+          path: test/e2e/artifacts/
+          retention-days: 7

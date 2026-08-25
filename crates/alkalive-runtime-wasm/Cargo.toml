@@ -26,8 +26,6 @@ web-sys = { version = "0.3", features = [
   "HtmlCanvasElement",
   "HtmlInputElement",
   "Window",
-  "Document",
-  "Element",
   "EventTarget",
   "KeyboardEvent",
   "InputEvent",
