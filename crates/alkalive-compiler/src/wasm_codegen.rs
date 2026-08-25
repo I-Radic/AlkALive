@@ -1355,8 +1355,21 @@ impl WasmModule {
 /// Returns `WasmCodegenError` if the type checker finds errors, or if a
 /// construct cannot be lowered to WASM.
 pub fn compile_to_wasm(module: &ModuleDecl) -> Result<WasmModule, WasmCodegenError> {
+    compile_to_wasm_in(module, std::path::Path::new("."))
+}
+
+/// Like [`compile_to_wasm`], but resolves file-based module imports
+/// relative to `project_dir` instead of the process working directory.
+///
+/// # Errors
+///
+/// Same as [`compile_to_wasm`].
+pub fn compile_to_wasm_in(
+    module: &ModuleDecl,
+    project_dir: &std::path::Path,
+) -> Result<WasmModule, WasmCodegenError> {
     // 1. Run the type checker first (ADR-009 source-level soundness).
-    let type_errors = typechecker::check_module(module);
+    let type_errors = typechecker::check_module_in(module, project_dir);
     if !type_errors.is_empty() {
         let first = &type_errors.errors[0];
         return Err(WasmCodegenError {
@@ -1855,8 +1868,17 @@ fn vtable_layout_public(
 ///
 /// This runs the full pipeline: lex → parse → typecheck → WASM codegen.
 pub fn compile_src_to_wasm(src: &str) -> Result<WasmModule, String> {
+    compile_src_to_wasm_in(src, std::path::Path::new("."))
+}
+
+/// Like [`compile_src_to_wasm`], but resolves file-based module imports
+/// relative to `project_dir` instead of the process working directory.
+pub fn compile_src_to_wasm_in(
+    src: &str,
+    project_dir: &std::path::Path,
+) -> Result<WasmModule, String> {
     let module = crate::parse(src).map_err(|e| format!("{}", e))?;
-    compile_to_wasm(&module).map_err(|e| format!("{}", e))
+    compile_to_wasm_in(&module, project_dir).map_err(|e| format!("{}", e))
 }
 
 /// Pre-scan the module for string literals, interning them into the StringTable.
@@ -2191,7 +2213,6 @@ mod tests {
 #[cfg(test)]
 mod binary_op_tests {
     use super::*;
-    use crate::ast::Qualifier;
 
     const SCENE: &str = "scene { background: #000000 }";
 
@@ -2405,12 +2426,9 @@ mod control_flow_tests {
 
     #[test]
     fn wasm_compile_while_loop() {
-        let src = format!(
-            "module M {{ {} fn f(n: i32) -> i32 {{ let i: i32 = 0; while (i < n) {{ i = i + 1; }} return i; }} }}",
-            SCENE
-        );
-        // Note: this test may fail to parse because we don't support `i = i + 1`
-        // (assignment to existing variable). Let's just test the while parse.
+        // Note: assignment to an existing variable (`i = i + 1`) is not
+        // part of the grammar, so this exercises the while-parse shape
+        // with an expression statement in the body instead.
         let src = format!(
             "module M {{ {} fn f(n: i32) {{ let i: i32 = 0; while (i < n) {{ i; }} }} }}",
             SCENE
@@ -2467,12 +2485,8 @@ mod string_data_tests {
 
     #[test]
     fn string_literal_emits_data_section() {
-        let src = format!(
-            "module M {{ {} fn f() -> i32 {{ return \"hello\"; }} }}",
-            SCENE
-        );
-        // This should fail type checking (string -> i32 mismatch), but
-        // we can test the string table directly.
+        // A string return would fail type checking (string -> i32), so the
+        // string table is exercised directly here.
         let mut st = StringTable::new();
         let off = st.intern("hello");
         assert!(off > 0, "offset must be > 0 (after null guard)");

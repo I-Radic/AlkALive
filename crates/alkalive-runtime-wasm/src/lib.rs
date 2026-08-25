@@ -3,10 +3,10 @@
 //! This crate is the **single entry point** for the pure AlkALive pipeline.
 //! It compiles to a `cdylib` (WASM) that owns the entire rendering pipeline:
 //!
-//! 1. **Scene loading** — embeds the compiled `.alk` source at build time
-//!    via `include_str!`, then lowers it to a `ScheduledScene` at startup
-//!    via [`alkalive_compiler::compile_scheduled`] (ADR-024: produces both
-//!    the `AlgorithmIR` and the default `ScheduleIR`).
+//! 1. **Scene loading** — embeds the `.alk` source at build time
+//!    via `include_str!`, then compiles it to a `ScheduledScene` at startup
+//!    via [`alkalive_compiler::compile_full`] (ADR-024 schedule lowering →
+//!    ADR-025 incremental analysis → ADR-026 e-graph optimization).
 //! 2. **GPU backend init** — selects the production renderer: the
 //!    wgpu/WGSL backend ([`alkalive_backend_wgpu::WgpuBackendRenderer`],
 //!    ADR-001/ADR-006) when WebGPU is available, falling back to the raw
@@ -79,8 +79,8 @@ pub mod signal_store;
 /// The canonical Hello World `.alk` source, embedded at build time.
 ///
 /// This is compiled to a `ScheduledScene` at startup via
-/// [`alkalive_compiler::compile_scheduled`] (ADR-024: produces both the
-/// `AlgorithmIR` and the default `ScheduleIR`), then lowered to a
+/// [`alkalive_compiler::compile_full`] (ADR-024 schedule lowering → ADR-025
+/// incremental analysis → ADR-026 e-graph optimization), then lowered to a
 /// [`TextSceneData`](alkalive_backend_wgpu::TextSceneData) for the renderer.
 const HELLO_ALK_SRC: &str = include_str!("../../../examples/hello.alk");
 

@@ -17,7 +17,7 @@ use alkalive_backend_wgpu::tessellate::tessellate_scene;
 use alkalive_backend_wgpu::wgpu_renderer::{
     upload_atlas_page, upload_ring,
     create_frame_pipelines, create_glyph_atlas_resources, create_uniform_rings,
-    dynamic_slot_stride, record_frame, FrameGpuRefs, TextRanges, MAX_DYNAMIC_SLOTS,
+    dynamic_slot_stride, record_frame, FrameGpuRefs, TextRanges,
 };
 use alkalive_scene_data::TextSceneData;
 use wgpu::util::DeviceExt;

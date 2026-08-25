@@ -111,7 +111,8 @@ pub use ast::{
     Type,
 };
 pub use codegen::{
-    compile, compile_full, compile_scheduled, compile_typecheck, compile_with_deps,
+    compile, compile_full, compile_full_in, compile_scheduled, compile_scheduled_in,
+    compile_typecheck, compile_typecheck_in, compile_with_deps, compile_with_deps_in,
     compile_with_lints, lower, CodegenError, CompileError, DEFAULT_FONT_SIZE,
 };
 pub use egraph::{
@@ -133,13 +134,13 @@ pub use seminative::{
     EvaluationStrategy,
 };
 pub use typechecker::{
-    check_module, effective_qualifier, param_qualifier, qualifier_is_subtype, type_is_subtype,
-    FnSig, FnSigTable, TypeEnv, TypeError, TypeErrorSet,
+    check_module, check_module_in, effective_qualifier, param_qualifier, qualifier_is_subtype,
+    type_is_subtype, FnSig, FnSigTable, TypeEnv, TypeError, TypeErrorSet,
 };
 pub use module_resolver::{ModuleResolver, ResolveError};
 pub use wasm_codegen::{
-    alk_full_type_to_wasm, alk_type_to_wasm, compile_src_to_wasm, compile_to_wasm,
-    WasmCodegenError, WasmModule,
+    alk_full_type_to_wasm, alk_type_to_wasm, compile_src_to_wasm, compile_src_to_wasm_in,
+    compile_to_wasm, compile_to_wasm_in, WasmCodegenError, WasmModule,
 };
 
 /// Re-export of [`alkalive_core::ModuleId`] so downstream consumers can

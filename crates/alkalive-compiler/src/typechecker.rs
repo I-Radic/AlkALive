@@ -792,6 +792,16 @@ impl TypeEnv {
 ///   Pass 2: collect module-level `let` bindings.
 ///   Pass 3: check each function body AND class method body.
 pub fn check_module(module: &ModuleDecl) -> TypeErrorSet {
+    check_module_in(module, std::path::Path::new("."))
+}
+
+/// Like [`check_module`], but resolves file-based imports relative to
+/// `project_dir` instead of the process working directory.
+///
+/// This is the pipeline entry used by the `*_in` compile variants
+/// ([`crate::compile_scheduled_in`] and friends) so that module resolution
+/// does not depend on the caller's current working directory.
+pub fn check_module_in(module: &ModuleDecl, project_dir: &std::path::Path) -> TypeErrorSet {
     let mut errors = TypeErrorSet::new();
 
     // Pass 1: collect all function + class-method signatures.
@@ -800,14 +810,18 @@ pub fn check_module(module: &ModuleDecl) -> TypeErrorSet {
 
     // Pass 1.1: resolve imports using the ModuleResolver (file-based).
     // This attempts to load and parse imported .alk files, collecting their
-    // pub fn signatures into the FnSigTable. If a module file cannot be
-    // found (e.g., std/ modules), the import is still registered with
-    // unknown params/return type so calls don't produce "unknown function" errors.
+    // pub fn signatures into the FnSigTable. `std/` modules may remain
+    // unresolved (host-provided); the import is then registered as a stub in
+    // pass 1.1b below. A missing/unreadable/unparseable NON-std module, or a
+    // non-std module that does not export an imported name, is a hard error.
     {
-        let mut resolver = crate::module_resolver::ModuleResolver::new(".");
-        if resolver.resolve_imports(module, &mut sigs).is_err() {
-            // Resolution error — log it but continue (don't block compilation).
-            // The import names are still added as stubs below.
+        let mut resolver = crate::module_resolver::ModuleResolver::new(project_dir);
+        if let Err(e) = resolver.resolve_imports(module, &mut sigs) {
+            errors.errors.push(TypeError {
+                message: e.to_string(),
+                line: module.line,
+                col: module.col,
+            });
         }
     }
 
@@ -2351,13 +2365,8 @@ mod oo_tests {
     // LANG-1T-16: upcast B → A is implicit (no WASM instruction).
     #[test]
     fn lang_1t_16_upcast_implicit() {
-        let src = format!(
-            "module M {{ {} class A {{}} class B : A {{}} fn main() {{ let b: B = B::new(); let a: A = b; }} }}",
-            SCENE
-        );
-        // Wait — B::new() requires B to have a `new` method. Since neither
-        // A nor B declares one, the typechecker would error on `B::new()`.
-        // Let's adjust: add `pub fn new() -> Self { Self { } }` to both.
+        // B::new() requires B to declare a `new` method, so both classes
+        // provide one; the test asserts the upcast `let a: A = b` is implicit.
         let src = format!(
             "module M {{ {} class A {{ pub fn new() -> Self {{ Self {{ }} }} }} class B : A {{ pub fn new() -> Self {{ Self {{ }} }} }} fn main() {{ let b: B = B::new(); let a: A = b; }} }}",
             SCENE
@@ -2548,10 +2557,12 @@ mod module_system_tests {
 
     #[test]
     fn import_does_not_break_local_functions() {
+        // std/ modules are host-provided and may stay unresolved; they must
+        // not break checking of the importing module's own items.
         let src = format!(
             r#"module M {{
   {}
-  import {{ ext }} from "other";
+  import {{ ext }} from "std/host";
   fn local() -> i32 {{ return 42; }}
   fn main() -> i32 {{ return local(); }}
 }}"#,
@@ -2559,5 +2570,32 @@ mod module_system_tests {
         );
         let errors = check(&src);
         assert!(errors.is_empty(), "local functions should still work, got: {}", errors);
+    }
+
+    #[test]
+    fn missing_non_std_module_is_a_hard_error() {
+        // A non-std import whose file does not exist is a compile error
+        // (surfaced through the type-error set at the module position).
+        let src = format!(
+            r#"module M {{
+  {}
+  import {{ helper }} from "does/not/exist";
+  fn main() -> i32 {{ return 1; }}
+}}"#,
+            SCENE
+        );
+        let errors = check(&src);
+        assert!(
+            !errors.is_empty(),
+            "missing non-std module must produce an error"
+        );
+        assert!(
+            errors
+                .errors
+                .iter()
+                .any(|e| e.message.contains("module resolution error")),
+            "error should be a module resolution error, got: {}",
+            errors
+        );
     }
 }

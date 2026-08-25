@@ -297,27 +297,36 @@ pub fn compile_with_lints(src: &str) -> Result<(AlgorithmIR, crate::lints::LintS
 /// [`CompileError::Type`] if the type checker finds errors, or
 /// [`CompileError::Codegen`] if semantic lowering fails.
 pub fn compile_typecheck(src: &str) -> Result<AlgorithmIR, CompileError> {
+    compile_typecheck_in(src, std::path::Path::new("."))
+}
+
+/// Like [`compile_typecheck`], but resolves file-based module imports
+/// relative to `project_dir` instead of the process working directory.
+///
+/// # Errors
+///
+/// Same as [`compile_typecheck`]; additionally, a missing/unreadable/
+/// unparseable non-`std/` imported module fails with
+/// [`CompileError::Type`] (module resolution errors are type errors).
+pub fn compile_typecheck_in(
+    src: &str,
+    project_dir: &std::path::Path,
+) -> Result<AlgorithmIR, CompileError> {
     let module = crate::parser::parse(src).map_err(CompileError::Parse)?;
-    let type_errors = crate::typechecker::check_module(&module);
+    let type_errors = crate::typechecker::check_module_in(&module, project_dir);
     if !type_errors.is_empty() {
         return Err(CompileError::Type(type_errors));
     }
     lower(&module).map_err(CompileError::Codegen)
 }
 
-/// Convenience: tokenize + parse + lower + schedule-lower in one call.
+/// Convenience: tokenize + parse + typecheck + lower + schedule-lower in one call.
 ///
 /// This is the ADR-024 entry point. It runs the full pipeline:
-/// `.alk source → AlgorithmIR → ScheduledScene`. The returned
+/// `.alk source → (typechecked) AlgorithmIR → ScheduledScene`. The returned
 /// [`ScheduledScene`] contains both the algorithm (what to render) and
 /// the default [`ScheduleIR`](crate::schedule::ScheduleIR) (how to
 /// render it).
-///
-/// # Errors
-///
-/// Returns [`CompileError`] only if lexing, parsing, or codegen fails.
-/// The [`schedule_lowering`] pass is infallible (it never fails for a
-/// well-formed [`AlgorithmIR`]).
 ///
 /// # Example
 ///
@@ -346,8 +355,29 @@ pub fn compile_typecheck(src: &str) -> Result<AlgorithmIR, CompileError> {
 /// // Five passes: Clear, InputFieldBackground, InputFieldBorder, TitleText, InputText.
 /// assert_eq!(scheduled.schedule.passes.len(), 5);
 /// ```
+///
+/// # Errors
+///
+/// Returns [`CompileError::Parse`] if lexing/parsing fails,
+/// [`CompileError::Type`] if the type checker or module resolution finds
+/// errors, or [`CompileError::Codegen`] if semantic lowering fails.
 pub fn compile_scheduled(src: &str) -> Result<ScheduledScene, CompileError> {
-    let algorithm = compile(src)?;
+    compile_scheduled_in(src, std::path::Path::new("."))
+}
+
+/// Like [`compile_scheduled`], but resolves file-based module imports
+/// relative to `project_dir` instead of the process working directory.
+///
+/// # Errors
+///
+/// Same as [`compile_scheduled`].
+pub fn compile_scheduled_in(
+    src: &str,
+    project_dir: &std::path::Path,
+) -> Result<ScheduledScene, CompileError> {
+    // Type-checked flow: the schedule is derived from the validated module
+    // (parse → typecheck → lower → schedule).
+    let algorithm = compile_typecheck_in(src, project_dir)?;
     let schedule = schedule_lowering(&algorithm);
     Ok(ScheduledScene {
         algorithm,
@@ -372,7 +402,9 @@ pub fn compile_scheduled(src: &str) -> Result<ScheduledScene, CompileError> {
 ///
 /// # Errors
 ///
-/// Returns [`CompileError`] only if lexing, parsing, or codegen fails.
+/// Returns [`CompileError::Parse`] if lexing/parsing fails,
+/// [`CompileError::Type`] if the type checker or module resolution finds
+/// errors, or [`CompileError::Codegen`] if semantic lowering fails.
 /// Both [`schedule_lowering`] and [`incremental_analysis`] are infallible.
 ///
 /// # Example
@@ -403,7 +435,20 @@ pub fn compile_scheduled(src: &str) -> Result<ScheduledScene, CompileError> {
 /// assert_eq!(dep_graph.nodes.len(), scheduled.schedule.passes.len());
 /// ```
 pub fn compile_with_deps(src: &str) -> Result<(ScheduledScene, DependencyGraph), CompileError> {
-    let scheduled = compile_scheduled(src)?;
+    compile_with_deps_in(src, std::path::Path::new("."))
+}
+
+/// Like [`compile_with_deps`], but resolves file-based module imports
+/// relative to `project_dir` instead of the process working directory.
+///
+/// # Errors
+///
+/// Same as [`compile_with_deps`].
+pub fn compile_with_deps_in(
+    src: &str,
+    project_dir: &std::path::Path,
+) -> Result<(ScheduledScene, DependencyGraph), CompileError> {
+    let scheduled = compile_scheduled_in(src, project_dir)?;
     let dep_graph = incremental_analysis(&scheduled);
     Ok((scheduled, dep_graph))
 }
@@ -434,7 +479,9 @@ pub fn compile_with_deps(src: &str) -> Result<(ScheduledScene, DependencyGraph),
 ///
 /// # Errors
 ///
-/// Returns [`CompileError`] only if lexing, parsing, or codegen fails.
+/// Returns [`CompileError::Parse`] if lexing/parsing fails,
+/// [`CompileError::Type`] if the type checker or module resolution finds
+/// errors, or [`CompileError::Codegen`] if semantic lowering fails.
 /// Both [`schedule_lowering`], [`incremental_analysis`], and
 /// [`egraph_optimization`](crate::egraph::egraph_optimization) are
 /// infallible.
@@ -468,7 +515,20 @@ pub fn compile_with_deps(src: &str) -> Result<(ScheduledScene, DependencyGraph),
 /// assert_eq!(dep_graph.nodes.len(), scheduled.schedule.passes.len());
 /// ```
 pub fn compile_full(src: &str) -> Result<(ScheduledScene, DependencyGraph), CompileError> {
-    let scheduled = compile_scheduled(src)?;
+    compile_full_in(src, std::path::Path::new("."))
+}
+
+/// Like [`compile_full`], but resolves file-based module imports relative
+/// to `project_dir` instead of the process working directory.
+///
+/// # Errors
+///
+/// Same as [`compile_full`].
+pub fn compile_full_in(
+    src: &str,
+    project_dir: &std::path::Path,
+) -> Result<(ScheduledScene, DependencyGraph), CompileError> {
+    let scheduled = compile_scheduled_in(src, project_dir)?;
     let dep_graph = incremental_analysis(&scheduled);
     let optimized = egraph_optimization(&dep_graph);
     Ok((scheduled, optimized))
