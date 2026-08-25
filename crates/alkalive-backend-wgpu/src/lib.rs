@@ -1,4 +1,4 @@
-//! AlkALive GPU rendering backend — `alkalive-backend-wgpu`.
+﻿//! AlkALive GPU rendering backend â€” `alkalive-backend-wgpu`.
 //!
 //! This crate implements the GPU rendering backend for AlkALive. It replaces
 //! the CPU-side `SoftwareRenderer` (in `alkalive-app`) with a real GPU
@@ -17,24 +17,24 @@
 //! 2. `web-sys` is already cached locally; pulling the `wgpu` crate would
 //!    add ~50 transitive deps and several minutes of build time.
 //! 3. The raw WebGL2 surface is small enough to fit in one file (~600 LOC)
-//!    and exposes the GPU directly — no extra abstraction layer.
+//!    and exposes the GPU directly â€” no extra abstraction layer.
 //!
 //! A future migration to `wgpu` (with the `webgl` feature for fallback) can
 //! swap the implementation behind the same `WgpuRenderer` API.
 //!
 //! # Architecture
 //!
-//! - [`TextSceneData`] — the per-frame scene description (text + colors).
-//! - [`WgpuRenderer`] — owns the WebGL2 context, shader program, glyph
+//! - [`TextSceneData`] â€” the per-frame scene description (text + colors).
+//! - [`WgpuRenderer`] â€” owns the WebGL2 context, shader program, glyph
 //!   atlas texture, and vertex buffers.
-//! - [`Vertex`] — `[position: vec2, uv: vec2]` per vertex.
-//! - [`Uniforms`] — `rotation`, `canvas_size`, `time`, `text_color`.
+//! - [`Vertex`] â€” `[position: vec2, uv: vec2]` per vertex.
+//! - [`Uniforms`] â€” `rotation`, `canvas_size`, `time`, `text_color`.
 //!
 //! # Cross-target compilation
 //!
 //! The crate compiles on **both** native and `wasm32` targets. On `wasm32`,
 //! the full GPU implementation is available. On native, the GPU fields are
-//! replaced with stubs and `init_from_canvas` returns an error — but the
+//! replaced with stubs and `init_from_canvas` returns an error â€” but the
 //! vertex/uniform math, shader source strings, and `TextSceneData` are all
 //! available for unit testing.
 //!
@@ -47,22 +47,22 @@
 use bytemuck::{Pod, Zeroable};
 
 // ---------------------------------------------------------------------------
-// Public scene-data types (re-exported from alkalive-scene-data — Gap 6)
+// Public scene-data types (re-exported from alkalive-scene-data â€” Gap 6)
 // ---------------------------------------------------------------------------
 
 /// Re-export of the per-frame scene description.
 ///
-/// `TextSceneData` was moved to `alkalive-scene-data` in Wave 11 (Gap 6 —
-/// Render-Graph IR) to break the `alkalive-render` ↔ `alkalive-backend-wgpu`
+/// `TextSceneData` was moved to `alkalive-scene-data` in Wave 11 (Gap 6 â€”
+/// Render-Graph IR) to break the `alkalive-render` â†” `alkalive-backend-wgpu`
 /// dependency cycle. It is re-exported here so existing call sites
 /// (`alkalive-runtime-wasm`) continue to compile unchanged.
 pub use alkalive_scene_data::TextSceneData;
 
 // ---------------------------------------------------------------------------
-// GPU vertex + uniform layouts (target-agnostic — compile everywhere)
+// GPU vertex + uniform layouts (target-agnostic â€” compile everywhere)
 // ---------------------------------------------------------------------------
 
-/// Vertex format: `[x, y, u, v]` — 4 floats = 16 bytes per vertex.
+/// Vertex format: `[x, y, u, v]` â€” 4 floats = 16 bytes per vertex.
 ///
 /// Matches the GLSL `layout(location=0) in vec2 position; layout(location=1)
 /// in vec2 uv;` declaration in [`VERTEX_SHADER_SRC`].
@@ -73,9 +73,9 @@ pub struct Vertex {
     pub x: f32,
     /// Screen-space Y (pixels, Y-up in shader).
     pub y: f32,
-    /// Atlas U (0–1).
+    /// Atlas U (0â€“1).
     pub u: f32,
-    /// Atlas V (0–1).
+    /// Atlas V (0â€“1).
     pub v: f32,
 }
 
@@ -94,7 +94,7 @@ impl Vertex {
 ///
 /// Layout (std140-equivalent, 32 bytes):
 /// - `rotation: f32`         (offset 0)
-/// - `_pad0: [f32; 2]`       (offset 4, 8 — padding to align vec2)
+/// - `_pad0: [f32; 2]`       (offset 4, 8 â€” padding to align vec2)
 /// - `canvas_size: [f32; 2]` (offset 16)
 /// - `time: f32`             (offset 24)
 /// - `text_color: [f32; 4]`  (in a separate uniform, but kept here for upload)
@@ -116,7 +116,7 @@ pub struct Uniforms {
 }
 
 // ---------------------------------------------------------------------------
-// WGSL-equivalent GLSL shader sources (target-agnostic — compile everywhere)
+// WGSL-equivalent GLSL shader sources (target-agnostic â€” compile everywhere)
 // ---------------------------------------------------------------------------
 
 /// Vertex shader (GLSL ES 3.00). Transforms quad vertices by applying a
@@ -148,7 +148,7 @@ void main() {
     // Y-axis rotation: scale X around the canvas CENTER (not origin).
     // This keeps the text centered while it narrows/widens.
     // When cos is negative, the text is mirrored (viewed from behind)
-    // — we flip the UV to keep the text readable.
+    // â€” we flip the UV to keep the text readable.
     float cos_r = cos(rotation);
     float center_x = canvas_size.x * 0.5;
 
@@ -168,7 +168,7 @@ void main() {
     // Pass UV through unchanged. When cos_r < 0, the X positions are
     // mirrored (text appears backwards), but the UVs stay correct so
     // the glyph atlas is sampled properly. The text appears mirrored
-    // on the backface — like reading the back of a sign — which is
+    // on the backface â€” like reading the back of a sign â€” which is
     // the expected behavior for a rotating sign.
     v_uv = uv;
 }
@@ -195,7 +195,7 @@ uniform vec4 text_color;
 out vec4 frag_color;
 
 void main() {
-    // Sample the red channel — the glyph atlas is single-channel grayscale.
+    // Sample the red channel â€” the glyph atlas is single-channel grayscale.
     float alpha = texture(glyph_texture, v_uv).r;
 
     // Discard fully-transparent pixels (no glyph coverage).
@@ -238,7 +238,7 @@ void main() {
 "#;
 
 // ---------------------------------------------------------------------------
-// Vertex-buffer generation (target-agnostic — unit-tested on native)
+// Vertex-buffer generation (target-agnostic â€” unit-tested on native)
 // ---------------------------------------------------------------------------
 
 /// A single glyph quad, in pixel space (Y-up, origin at the canvas center).
@@ -271,9 +271,9 @@ pub struct GlyphQuad {
 ///
 /// Each quad becomes two triangles with CCW winding (in Y-up space):
 /// ```text
-/// (x0,y1) ─── (x1,y1)
-///    │           │
-/// (x0,y0) ─── (x1,y0)
+/// (x0,y1) â”€â”€â”€ (x1,y1)
+///    â”‚           â”‚
+/// (x0,y0) â”€â”€â”€ (x1,y0)
 /// ```
 ///
 /// Triangles: `(x0,y0)-(x1,y0)-(x0,y1)` and `(x1,y0)-(x1,y1)-(x0,y1)`.
@@ -381,7 +381,7 @@ pub fn quads_from_text(
             // bitmap. The Y coordinate is computed as `offset_y - bearing.1`
             // which gives a negative value (Y-down convention: negative =
             // above baseline). Width/height are in `size`. UV box is in
-            // `uv` (x, y, w, h) — origin at the top-left of the glyph tile
+            // `uv` (x, y, w, h) â€” origin at the top-left of the glyph tile
             // in the atlas.
             let px = q.position.0;
             let py = q.position.1; // Y-down: negative = above baseline
@@ -412,19 +412,19 @@ pub fn quads_from_text(
 /// The fixed glyph-atlas page edge length in pixels (single R8 page).
 pub const ATLAS_SIZE: u32 = 512;
 
-/// Byte size of one glyph-atlas page (`ATLAS_SIZE × ATLAS_SIZE`, 1 byte per
+/// Byte size of one glyph-atlas page (`ATLAS_SIZE Ã— ATLAS_SIZE`, 1 byte per
 /// pixel).
 pub const ATLAS_PAGE_BYTES: usize = (ATLAS_SIZE * ATLAS_SIZE) as usize;
 
 pub mod frame_plan;
 pub mod tessellate;
 pub mod wgsl_shaders;
-#[cfg(all(feature = "wgpu-backend", target_arch = "wasm32"))]
+#[cfg(feature = "wgpu-backend")]
 pub mod wgpu_renderer;
 
 #[cfg(target_arch = "wasm32")]
 mod wasm {
-    //! Real GPU backend — WebGL2 via `web-sys::WebGl2RenderingContext`.
+    //! Real GPU backend â€” WebGL2 via `web-sys::WebGl2RenderingContext`.
 
     use super::*;
     use std::sync::Arc;
@@ -468,13 +468,13 @@ mod wasm {
         rect_u_rect: WebGlUniformLocation,
         rect_u_color: WebGlUniformLocation,
         rect_u_canvas: WebGlUniformLocation,
-        /// The glyph atlas texture (single-channel grayscale, 512×512).
+        /// The glyph atlas texture (single-channel grayscale, 512Ã—512).
         glyph_texture: WebGlTexture,
         /// Cached location of the `rotation` uniform.
         u_rotation: WebGlUniformLocation,
         /// Cached location of the `canvas_size` uniform.
         u_canvas_size: WebGlUniformLocation,
-        /// Cached location of the `time` uniform (optional — may be optimized away).
+        /// Cached location of the `time` uniform (optional â€” may be optimized away).
         u_time: Option<WebGlUniformLocation>,
         /// Cached location of the `text_color` uniform.
         u_text_color: WebGlUniformLocation,
@@ -490,7 +490,7 @@ mod wasm {
         height: u32,
         /// Whether the glyph atlas texture has been uploaded at least once.
         atlas_uploaded: bool,
-        /// The current vertex count (6 × number of glyph quads).
+        /// The current vertex count (6 Ã— number of glyph quads).
         vertex_count: u32,
         /// Last input text rendered (to detect changes for atlas re-upload).
         last_input_text: String,
@@ -595,7 +595,7 @@ mod wasm {
             );
             gl.bind_vertex_array(None);
 
-            // Create glyph atlas texture (empty 512×512 R8).
+            // Create glyph atlas texture (empty 512Ã—512 R8).
             // We'll upload pixels on the first render_frame call.
             let glyph_texture = gl
                 .create_texture()
@@ -621,7 +621,7 @@ mod wasm {
                 WebGl2RenderingContext::TEXTURE_WRAP_T,
                 WebGl2RenderingContext::CLAMP_TO_EDGE as i32,
             );
-            // Allocate a 512×512 R8 texture (initially zero).
+            // Allocate a 512Ã—512 R8 texture (initially zero).
             gl.tex_image_2d_with_i32_and_i32_and_i32_and_format_and_type_and_opt_u8_array(
                 WebGl2RenderingContext::TEXTURE_2D,
                 0,
@@ -771,7 +771,7 @@ mod wasm {
 
         /// Render one frame using the ADR-024 schedule.
         ///
-        /// Wave 11 (Gap 6 — Render-Graph IR): this method now drives
+        /// Wave 11 (Gap 6 â€” Render-Graph IR): this method now drives
         /// rendering through the render-graph IR. It builds a
         /// [`alkalive_render::graph::RenderGraph`] from `text_scene` +
         /// the renderer's cached `input_field_bounds` (populated by
@@ -813,7 +813,7 @@ mod wasm {
 
             // 3. Build the render graph from the per-frame scene data + the
             //    cached input-field bounds. The graph is the single source
-            //    of truth for "what to draw this frame" — `render_graph`
+            //    of truth for "what to draw this frame" â€” `render_graph`
             //    iterates it and dispatches the draw calls.
             let graph = alkalive_render::graph::build_render_graph(
                 text_scene,
@@ -842,8 +842,8 @@ mod wasm {
         ///
         /// # Arguments
         ///
-        /// * `graph` — the render graph to execute.
-        /// * `time` — the animation time (drives text rotation).
+        /// * `graph` â€” the render graph to execute.
+        /// * `time` â€” the animation time (drives text rotation).
         pub fn render_graph(&mut self, graph: &alkalive_render::graph::RenderGraph, time: f32) {
             // 1. Set up the canvas viewport. (The canvas size is set at
             //    init/resize time; we only need to reset the viewport here
@@ -853,7 +853,7 @@ mod wasm {
 
             // 2. Iterate passes in `graph.pass_order` and dispatch each
             //    draw call. The graph is the single source of truth for
-            //    pass order — there is no fallback to the schedule.
+            //    pass order â€” there is no fallback to the schedule.
             for &pass_idx in &graph.pass_order {
                 let pass = match graph.passes.get(pass_idx) {
                     Some(p) => p,
@@ -875,16 +875,16 @@ mod wasm {
         ///
         /// `DrawCallKind::DrawText` carries a `text_ptr`/`text_len` pair
         /// for future SAB/IPC transport (Gap 8). Today the renderer does
-        /// not dereference `text_ptr` — it reads the text from its own
+        /// not dereference `text_ptr` â€” it reads the text from its own
         /// cached shaped-run vertex buffer. The draw call's `id` field
         /// selects which cached run to draw:
-        /// - `id == 3` → title text (vertex range `0..title_vertex_count`).
-        /// - `id == 4` → input text (vertex range
+        /// - `id == 3` â†’ title text (vertex range `0..title_vertex_count`).
+        /// - `id == 4` â†’ input text (vertex range
         ///   `input_vertex_start..input_vertex_start + input_vertex_count`).
         ///
         /// This mapping is a temporary pragmatic bridge until a future
         /// wave adds a `GlyphRunId` field to `DrawCallKind::DrawText`
-        /// (per the rendering spec §1.2 REND-608).
+        /// (per the rendering spec Â§1.2 REND-608).
         fn execute_draw_call(
             &self,
             _graph: &alkalive_render::graph::RenderGraph,
@@ -939,7 +939,7 @@ mod wasm {
                     );
                     self.gl.uniform1i(Some(&self.u_glyph_texture), 0);
 
-                    // Map draw-call id → cached vertex range. See the
+                    // Map draw-call id â†’ cached vertex range. See the
                     // method-level docstring for the rationale.
                     let (start, count) = match dc.id {
                         3 => (0i32, self.title_vertex_count as i32),
@@ -979,7 +979,7 @@ mod wasm {
         /// Render one frame with ADR-025 dirty-pass info.
         ///
         /// This is the incremental-computation variant of [`render_frame`].
-        /// It accepts a list of *dirty pass indices* — passes whose signal
+        /// It accepts a list of *dirty pass indices* â€” passes whose signal
         /// inputs changed since the last frame and therefore need to
         /// re-execute. Passes not in the list are skipped.
         ///
@@ -989,20 +989,20 @@ mod wasm {
         /// current implementation runs *all* passes when `dirty_passes` is
         /// non-empty (skipping only the `Clear` pass would leave ghosts of
         /// the previous frame's stale passes). When `dirty_passes` is
-        /// empty, the renderer is a no-op — the previous frame is
+        /// empty, the renderer is a no-op â€” the previous frame is
         /// preserved.
         ///
         /// The `dirty_passes` parameter is therefore plumbed through but
         /// currently used only for the empty/non-empty decision. A future
         /// wave will use per-pass render targets to truly skip
-        /// non-dirty passes (per ADR-025 §"Consequences").
+        /// non-dirty passes (per ADR-025 Â§"Consequences").
         ///
         /// # Arguments
         ///
-        /// * `text_scene` — the per-frame scene description.
-        /// * `schedule` — the rendering schedule (ADR-024).
-        /// * `time` — the animation time (drives rotation).
-        /// * `dirty_passes` — the indices of passes whose inputs changed
+        /// * `text_scene` â€” the per-frame scene description.
+        /// * `schedule` â€” the rendering schedule (ADR-024).
+        /// * `time` â€” the animation time (drives rotation).
+        /// * `dirty_passes` â€” the indices of passes whose inputs changed
         ///   since the last frame (computed by the runtime's
         ///   `SignalStore::propagate` + `dirty_passes`).
         pub fn render_frame_with_dirty(
@@ -1012,7 +1012,7 @@ mod wasm {
             time: f32,
             dirty_passes: &[usize],
         ) {
-            // If no passes are dirty, skip rendering entirely — the
+            // If no passes are dirty, skip rendering entirely â€” the
             // previous frame is preserved (per ADR-025, "only re-submit
             // draw calls for passes whose inputs were dirty").
             if dirty_passes.is_empty() {
@@ -1098,8 +1098,8 @@ mod wasm {
             // 4. ADR-024: data-driven dispatch over the schedule's passes.
             //    Iterate passes in `schedule.pass_order` order, matching on
             //    `pass.kind` to decide what to draw. This replaces the
-            //    previously hardcoded `clear → input-bg → input-border →
-            //    title-text → input-text` sequence with a single loop whose
+            //    previously hardcoded `clear â†’ input-bg â†’ input-border â†’
+            //    title-text â†’ input-text` sequence with a single loop whose
             //    order is controlled by the ScheduleIR data structure.
             for &pass_idx in &schedule.pass_order {
                 let pass = match schedule.passes.get(pass_idx) {
@@ -1292,7 +1292,7 @@ mod wasm {
         /// 1. Loads the bundled Roboto-Regular font into a HarfRust registry.
         /// 2. Shapes the text via `HarfRustTextShaper`.
         /// 3. Rasterizes each glyph into the `HarfRustGlyphAtlas` (CPU-side
-        ///    512×512 grayscale page).
+        ///    512Ã—512 grayscale page).
         /// 4. Uploads the atlas page to the GPU as an R8 texture.
         /// 5. Builds a canvas-centered vertex buffer (6 verts per glyph).
         /// 6. Uploads the vertex buffer to the VBO.
@@ -1303,7 +1303,7 @@ mod wasm {
             font_size: f32,
         ) -> Result<(), String> {
             use alkalive_text::{
-                FontRegistry, FontRequest, GlyphAtlas, GlyphKey, HarfRustFontRegistry,
+                FontRegistry, FontRequest, HarfRustFontRegistry,
                 HarfRustGlyphAtlas, HarfRustTextShaper, ShapeContext, TextShaper,
             };
 
@@ -1332,7 +1332,7 @@ mod wasm {
             let font_id = self.font_id.unwrap();
             let shaper = self.text_shaper.as_ref().unwrap();
 
-            // 2. Create a fresh atlas (cheap — just allocates an empty 512×512 page).
+            // 2. Create a fresh atlas (cheap â€” just allocates an empty 512Ã—512 page).
             let mut atlas = HarfRustGlyphAtlas::new(registry_arc);
             let title_font_size = font_size;
             let input_font_size = font_size * 0.5;
@@ -1511,7 +1511,7 @@ mod wasm {
 pub use wasm::WgpuRenderer;
 
 // ---------------------------------------------------------------------------
-// WgpuRenderer — native stub (compiles cleanly, returns errors at runtime)
+// WgpuRenderer â€” native stub (compiles cleanly, returns errors at runtime)
 // ---------------------------------------------------------------------------
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1538,7 +1538,7 @@ mod native {
     }
 
     impl WgpuRenderer {
-        /// Always returns an error on native — the WebGL2 backend requires
+        /// Always returns an error on native â€” the WebGL2 backend requires
         /// a browser. The signature accepts a `web_sys::HtmlCanvasElement`
         /// for type-compatibility with the wasm32 build; on native, that
         /// type exists but cannot be instantiated, so this function is
@@ -1549,11 +1549,11 @@ mod native {
             _height: u32,
         ) -> Result<Self, String> {
             Err("alkalive-backend-wgpu: WebGL2 backend only runs on wasm32 \
-                 (this is a native build — the GPU backend is not available)"
+                 (this is a native build â€” the GPU backend is not available)"
                 .to_string())
         }
 
-        /// No-op on native — the renderer was never actually constructed.
+        /// No-op on native â€” the renderer was never actually constructed.
         pub fn render_frame(
             &mut self,
             _text_scene: &TextSceneData,
@@ -1569,7 +1569,7 @@ mod native {
         ///
         /// This is the type-compatible stub for the wasm32
         /// [`render_frame_with_dirty`](super::WgpuRenderer::render_frame_with_dirty)
-        /// method. It accepts the dirty pass indices but does nothing —
+        /// method. It accepts the dirty pass indices but does nothing â€”
         /// the native build never has a real renderer.
         pub fn render_frame_with_dirty(
             &mut self,
@@ -1587,7 +1587,7 @@ mod native {
         /// This is the type-compatible stub for the wasm32
         /// [`render_graph`](super::WgpuRenderer::render_graph) method.
         /// It accepts a [`alkalive_render::graph::RenderGraph`] but does
-        /// nothing — the native build never has a real renderer.
+        /// nothing â€” the native build never has a real renderer.
         pub fn render_graph(&mut self, _graph: &alkalive_render::graph::RenderGraph, _time: f32) {
             // Intentionally empty: the GPU backend only runs on wasm32.
         }
@@ -1609,7 +1609,7 @@ mod native {
 pub use native::WgpuRenderer;
 
 // ---------------------------------------------------------------------------
-// Unit tests (target-agnostic — run on native)
+// Unit tests (target-agnostic â€” run on native)
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -1799,7 +1799,7 @@ mod tests {
 
     /// Verify the `WgpuRenderer` type exists and has the expected public API
     /// (init_from_canvas, render_frame, resize). On native, construction
-    /// fails — but the type itself must compile.
+    /// fails â€” but the type itself must compile.
     ///
     /// ADR-024: `render_frame` now accepts a `&ScheduleIR` argument so the
     /// renderer can do data-driven pass dispatch.
@@ -1807,7 +1807,7 @@ mod tests {
     fn wgpu_renderer_type_compiles() {
         // Just exercise the API surface (type-check).
         fn _assert_api(r: &mut WgpuRenderer) {
-            // Build a default schedule for an empty algorithm — the native
+            // Build a default schedule for an empty algorithm â€” the native
             // stub ignores it, but the type must accept it.
             let algo = alkalive_compiler::AlgorithmIR::new(
                 alkalive_compiler::mint_module_id("Test"),
@@ -1877,7 +1877,7 @@ mod tests {
 
     /// End-to-end: shape "Hello" via alkalive-text, build quads, build
     /// vertex buffer, verify non-empty. This proves the data path from
-    /// text → quads → vertices works without a GPU.
+    /// text â†’ quads â†’ vertices works without a GPU.
     #[test]
     fn end_to_end_text_to_vertex_buffer() {
         use alkalive_text::{
@@ -1950,12 +1950,12 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // Wave 11 (Gap 6) — render-graph-driven rendering tests
+    // Wave 11 (Gap 6) â€” render-graph-driven rendering tests
     // -------------------------------------------------------------------------
 
     /// The renderer's `render_graph` method exists and accepts a
     /// `&alkalive_render::graph::RenderGraph` argument. This is a
-    /// type-level smoke test — on native the renderer is a stub, but the
+    /// type-level smoke test â€” on native the renderer is a stub, but the
     /// signature must compile and the call must not panic.
     #[test]
     fn render_graph_method_accepts_render_graph() {
@@ -1968,7 +1968,7 @@ mod tests {
             );
             r.render_graph(&graph, 0.0);
         }
-        // No construction on native — just exercising the API surface.
+        // No construction on native â€” just exercising the API surface.
         let _ = _assert_api;
     }
 

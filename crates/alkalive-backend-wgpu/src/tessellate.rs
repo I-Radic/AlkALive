@@ -1,4 +1,4 @@
-//! Target-agnostic scene tessellation — text shaping, glyph rasterization,
+﻿//! Target-agnostic scene tessellation â€” text shaping, glyph rasterization,
 //! and vertex generation shared by the GPU backends.
 //!
 //! This module is the GPU-API-free core of the per-frame upload path: it
@@ -6,7 +6,7 @@
 //!
 //! - the combined title + input-field **vertex buffer** (pixel-space quads,
 //!   6 vertices per glyph), and
-//! - the rasterized **glyph atlas page** (512×512 single-channel R8),
+//! - the rasterized **glyph atlas page** (512Ã—512 single-channel R8),
 //! - the computed **input-field bounds** used by hit-testing and by the
 //!   render-graph's rect passes.
 //!
@@ -22,9 +22,9 @@ use alkalive_text::{
     ShapeContext, TextShaper,
 };
 
-/// The fixed glyph-atlas page size (pixels) — must match the renderer's
-/// texture allocation.
-pub const ATLAS_SIZE: u32 = 512;
+/// Re-export of the crate-level glyph-atlas page edge length: the
+/// tessellation output must always match the renderer's texture allocation.
+pub use crate::ATLAS_SIZE;
 
 /// The complete CPU-side result of tessellating one scene frame.
 #[derive(Debug, Clone)]
@@ -64,7 +64,7 @@ impl SceneTessellation {
 ///   otherwise `scene.input_placeholder`; it is shaped at half the title
 ///   font size and centered inside the input-field rectangle.
 /// - The input field is centered horizontally, sized to
-///   `min(width * 0.5, 400) × 40` px, positioned below the vertical center.
+///   `min(width * 0.5, 400) Ã— 40` px, positioned below the vertical center.
 ///
 /// A fresh [`alkalive_text::HarfRustGlyphAtlas`] is allocated per call
 /// (matching current production behavior); the font registry/shaper pair is
@@ -78,7 +78,7 @@ pub fn tessellate_scene(
     let font = bundled_font();
     let font_id = font.font_id;
 
-    // Fresh atlas per call — matches the GLSL backend's current behavior.
+    // Fresh atlas per call â€” matches the GLSL backend's current behavior.
     let mut atlas = HarfRustGlyphAtlas::new(font.registry.clone());
 
     let title_font_size = scene.font_size;
@@ -119,7 +119,7 @@ pub fn tessellate_scene(
         // Only page 0 is uploaded by the renderers; overflow would silently
         // drop glyphs. Surface it loudly (same policy as the GLSL backend).
         return Err(format!(
-            "glyph atlas overflowed to {} pages (capacity is one {}×{} page)",
+            "glyph atlas overflowed to {} pages (capacity is one {}Ã—{} page)",
             atlas.page_count(),
             ATLAS_SIZE,
             ATLAS_SIZE
@@ -243,7 +243,7 @@ mod tests {
         assert_eq!(
             t.atlas_page.len(),
             (ATLAS_SIZE * ATLAS_SIZE) as usize,
-            "atlas page is a full 512×512 R8 page"
+            "atlas page is a full 512Ã—512 R8 page"
         );
         assert!(
             t.atlas_page.iter().any(|&b| b != 0),

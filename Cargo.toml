@@ -1,4 +1,4 @@
-[workspace]
+﻿[workspace]
 resolver = "2"
 members = [
     "crates/alkalive-core",
@@ -29,7 +29,7 @@ edition = "2021"
 license = "Apache-2.0"
 authors = ["I-Radic"]
 repository = "https://github.com/I-Radic/AlkALive"
-description = "AlkALive — a custom WASM+GPU UI language and runtime"
+description = "AlkALive â€” a custom WASM+GPU UI language and runtime"
 
 [workspace.dependencies]
 # Internal crates
@@ -61,4 +61,9 @@ opt-level = "z"
 lto = true
 codegen-units = 1
 panic = "abort"
-strip = true
+# NOTE: `strip` must stay OFF for wasm artifacts consumed by wasm-bindgen.
+# With `strip = true`, freshly built binaries fail at runtime inside
+# wasm-bindgen glue ("Cannot read properties of undefined" when DOM objects
+# cross the boundary) â€” verified by browser E2E bisection (see
+# docs/alkalive-implementation-audit/wave-01-renderer-selection.md).
+# Final size reduction will be handled by the wasm-opt stage of the deploy pipeline (Wave 3).

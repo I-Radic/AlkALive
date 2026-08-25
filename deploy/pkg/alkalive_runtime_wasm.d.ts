@@ -28,17 +28,20 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
-    readonly start: (a: number, b: number, c: number) => void;
-    readonly __wasm_bindgen_func_elem_12179: (a: number, b: number, c: number, d: number) => void;
-    readonly __wasm_bindgen_func_elem_677: (a: number, b: number, c: number) => void;
-    readonly __wasm_bindgen_func_elem_677_2: (a: number, b: number, c: number) => void;
-    readonly __wasm_bindgen_func_elem_677_3: (a: number, b: number, c: number) => void;
-    readonly __wasm_bindgen_func_elem_676: (a: number, b: number) => void;
-    readonly __wbindgen_export: (a: number, b: number) => number;
-    readonly __wbindgen_export2: (a: number, b: number, c: number, d: number) => number;
-    readonly __wbindgen_export3: (a: number) => void;
-    readonly __wbindgen_export4: (a: number, b: number) => void;
-    readonly __wbindgen_add_to_stack_pointer: (a: number) => number;
+    readonly start: (a: any, b: any) => [number, number];
+    readonly wasm_bindgen_4e9dee7ae92caf48___convert__closures_____invoke___wasm_bindgen_4e9dee7ae92caf48___JsValue__core_9b3796e30d99ddb7___result__Result_____wasm_bindgen_4e9dee7ae92caf48___JsError___true_: (a: number, b: number, c: any) => [number, number];
+    readonly wasm_bindgen_4e9dee7ae92caf48___convert__closures_____invoke___web_sys_ca6c43b170524811___features__gen_InputEvent__InputEvent______true_: (a: number, b: number, c: any) => void;
+    readonly wasm_bindgen_4e9dee7ae92caf48___convert__closures_____invoke___web_sys_ca6c43b170524811___features__gen_InputEvent__InputEvent______true__2: (a: number, b: number, c: any) => void;
+    readonly wasm_bindgen_4e9dee7ae92caf48___convert__closures_____invoke___web_sys_ca6c43b170524811___features__gen_InputEvent__InputEvent______true__3: (a: number, b: number, c: any) => void;
+    readonly wasm_bindgen_4e9dee7ae92caf48___convert__closures_____invoke_______true_: (a: number, b: number) => void;
+    readonly __wbindgen_malloc: (a: number, b: number) => number;
+    readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
+    readonly __wbindgen_exn_store: (a: number) => void;
+    readonly __externref_table_alloc: () => number;
+    readonly __wbindgen_externrefs: WebAssembly.Table;
+    readonly __wbindgen_destroy_closure: (a: number, b: number) => void;
+    readonly __externref_table_dealloc: (a: number) => void;
+    readonly __wbindgen_start: () => void;
 }
 
 export type SyncInitInput = BufferSource | WebAssembly.Module;

@@ -225,7 +225,7 @@ impl FrameRenderer for alkalive_backend_wgpu::WgpuRenderer {
         schedule: &alkalive_compiler::ScheduleIR,
         time: f32,
     ) {
-        // The schedule drives data-driven pass dispatch on this backend.
+        // The GLSL backend consumes the ScheduleIR for data-driven pass dispatch.
         alkalive_backend_wgpu::WgpuRenderer::render_frame(self, scene, schedule, time);
     }
 
@@ -428,8 +428,6 @@ pub fn start(
     //    client_width/client_height give us the CSS pixel size; multiplying
     //    by devicePixelRatio gives the physical pixel size for the drawing
     //    buffer.
-    web_sys::console::log_1(&"DBG: before step5".into());
-    let _ = ime_input;
     let dpr = web_sys::window()
         .and_then(|w| Some(w.device_pixel_ratio()))
         .unwrap_or(1.0) as f32;
@@ -584,27 +582,40 @@ async fn select_renderer(
 ) -> Result<ActiveRenderer, JsValue> {
     #[cfg(all(feature = "wgpu-backend", target_arch = "wasm32"))]
     {
-        match alkalive_backend_wgpu::wgpu_renderer::WgpuBackendRenderer::init_from_canvas(
-            canvas.clone(),
-            width,
-            height,
-        )
-        .await
-        {
-            Ok(r) => {
-                web_sys::console::log_1(
-                    &"AlkALive renderer selected: WebGPU (wgpu/WGSL, ADR-001/ADR-006)".into(),
-                );
-                return Ok(ActiveRenderer::Wgpu(r));
-            }
-            Err(reason) => {
-                web_sys::console::warn_1(
-                    &format!(
-                        "AlkALive: wgpu/WGSL renderer unavailable ({reason}) — \
-                         falling back to WebGL2/GLSL"
-                    )
+        // Probe WebGPU availability WITHOUT touching the canvas: a canvas
+        // accepts exactly one context type for its lifetime, so a failed
+        // wgpu attempt must not poison it for the GLSL fallback.
+        let webgpu_available =
+            alkalive_backend_wgpu::wgpu_renderer::WgpuBackendRenderer::is_supported().await;
+        if !webgpu_available {
+            web_sys::console::warn_1(
+                &"AlkALive: WebGPU unavailable (adapter probe returned none) — \
+                 falling back to WebGL2/GLSL"
                     .into(),
-                );
+            );
+        } else {
+            match alkalive_backend_wgpu::wgpu_renderer::WgpuBackendRenderer::init_from_canvas(
+                canvas.clone(),
+                width,
+                height,
+            )
+            .await
+            {
+                Ok(r) => {
+                    web_sys::console::log_1(
+                        &"AlkALive renderer selected: WebGPU (wgpu/WGSL, ADR-001/ADR-006)".into(),
+                    );
+                    return Ok(ActiveRenderer::Wgpu(r));
+                }
+                Err(reason) => {
+                    web_sys::console::warn_1(
+                        &format!(
+                            "AlkALive: wgpu/WGSL renderer unavailable ({reason}) — \
+                             falling back to WebGL2/GLSL"
+                        )
+                        .into(),
+                    );
+                }
             }
         }
     }
@@ -857,8 +868,15 @@ fn setup_click_handler(
 ) -> Result<(), JsValue> {
     let ime_clone = ime_input.clone();
     let on_click = Closure::<dyn FnMut(web_sys::MouseEvent)>::new(move |e: web_sys::MouseEvent| {
-        let x = e.client_x() as f32;
-        let y = e.client_y() as f32;
+        // Event coordinates are CSS pixels; the renderer's field bounds are
+        // in physical pixels (CSS × devicePixelRatio). Convert before the
+        // bounding-box hit test so high-DPI displays hit the right region.
+        let dpr = web_sys::window()
+            .map(|w| w.device_pixel_ratio() as f32)
+            .unwrap_or(1.0)
+            .max(1.0);
+        let x = e.client_x() as f32 * dpr;
+        let y = e.client_y() as f32 * dpr;
         let should_focus = RUNTIME.with(|rt| {
             let borrow = rt.borrow();
             if let Some(runtime) = borrow.as_ref() {

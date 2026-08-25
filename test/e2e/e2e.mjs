@@ -10,10 +10,10 @@
 //
 // Two runs are performed:
 //   1. default flags — WebGPU is attempted first; whichever renderer the
-//      runtime selects must render real pixels. The selection line and the
-//      attempted path are recorded.
-//   2. WebGPU disabled — the runtime MUST select the WebGL2/GLSL fallback
-//      and still render real pixels.
+//      runtime selects must render real pixels. The selection line is
+//      recorded.
+//   2. WebGPU removed from the page before scripts run — the runtime MUST
+//      select the WebGL2/GLSL fallback and still render real pixels.
 //
 // The dev server sets COOP/COEP HTTP response headers (the deployment
 // configuration), so `crossOriginIsolated` is also asserted true.
@@ -49,9 +49,15 @@ function startServer() {
       res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
       res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
       const url = req.url === '/' ? '/index.html' : req.url.split('?')[0];
+      if (url === '/favicon.ico') {
+        res.statusCode = 204;
+        res.end();
+        return;
+      }
       try {
         const data = await readFile(join(DEPLOY_DIR, url));
         res.setHeader('Content-Type', MIME[extname(url)] ?? 'application/octet-stream');
+        res.setHeader('Cache-Control', 'no-store');
         res.end(data);
       } catch {
         res.statusCode = 404;
@@ -83,37 +89,60 @@ function collectLogs(page, sink) {
   page.on('pageerror', (err) => sink.push(`[pageerror] ${err.message}`));
 }
 
-async function runCase(browser, name, flags) {
-  const logs = [];
+/**
+ * Load the app in a fresh context and capture logs/pixels.
+ * @returns {Promise<{logs: string[], isolated: ?boolean, sabOk: ?boolean, pixels: object}>}
+ */
+async function loadAndCapture(browser, name, { hideWebGPU = false } = {}) {
   const context = await browser.newContext({
     viewport: { width: 800, height: 600 },
     deviceScaleFactor: 1,
   });
   const page = await context.newPage();
+  const logs = [];
   collectLogs(page, logs);
+  if (hideWebGPU) {
+    // Force the fallback path deterministically: remove WebGPU before any
+    // page script runs so the runtime's adapter request must fail.
+    // `navigator.gpu` lives on the Navigator prototype as an accessor;
+    // redefine it there and verify from inside the page.
+    await page.addInitScript(() => {
+      const proto = Object.getPrototypeOf(navigator);
+      try {
+        Object.defineProperty(proto, 'gpu', {
+          configurable: true,
+          get: () => undefined,
+        });
+      } catch (e) {
+        console.warn(`[harness] could not hide navigator.gpu: ${e}`);
+      }
+      console.log(`[harness] navigator.gpu = ${typeof navigator.gpu}`);
+    });
+  }
 
   await page.goto(`http://127.0.0.1:${PORT}/index.html`, { waitUntil: 'load' });
-  // Give the runtime time to initialize + render a few frames.
-  await page.waitForSelector('#canvas', { timeout: 10_000 });
   await page.waitForTimeout(4000);
 
-  const isolated = await page.evaluate(() => window.crossOriginIsolated === true);
-  const sabOk = await page.evaluate(() => {
-    try {
-      new SharedArrayBuffer(16);
-      return true;
-    } catch {
-      return false;
-    }
-  });
+  let isolated = null;
+  let sabOk = null;
+  if (!hideWebGPU) {
+    isolated = await page.evaluate(() => window.crossOriginIsolated === true);
+    sabOk = await page.evaluate(() => {
+      try {
+        new SharedArrayBuffer(16);
+        return true;
+      } catch {
+        return false;
+      }
+    });
+  }
 
   const pixels = await analyzeCanvas(page);
   await mkdir(ARTIFACTS_DIR, { recursive: true });
   await writeFile(join(ARTIFACTS_DIR, `${name}.png`), await page.locator('#canvas').screenshot());
   await writeFile(join(ARTIFACTS_DIR, `${name}.log.txt`), logs.join('\n'));
-
   await context.close();
-  return { name, logs, isolated, sabOk, pixels };
+  return { logs, isolated, sabOk, pixels };
 }
 
 function assert(cond, message) {
@@ -124,59 +153,48 @@ async function main() {
   const headed = process.argv.includes('--headed');
   const server = await startServer();
 
-  const executablePath = process.env.CHROME_PATH || undefined;
-  const browser = await chromium.launch({
-    headless: !headed,
-    channel: executablePath ? undefined : 'chrome',
-    executablePath,
-    args: ['--enable-unsafe-webgpu'],
-  });
-  if (!executablePath) {
-    // channel 'chrome' uses an installed Google Chrome; fall back to
-    // Playwright's bundled Chromium if Chrome is not installed.
+  const LAUNCH_ARGS = [
+    // Permit real WebGPU where a hardware adapter exists.
+    // (--enable-unsafe-swiftshader was evaluated and REJECTED: on Chrome 131
+    // headless-shell it disables the automatic software fallback without
+    // providing one, leaving neither WebGPU nor WebGL2 available.)
+    '--enable-unsafe-webgpu',
+  ];
+
+  /**
+   * Fresh browser per case: headless GPU-process state does not survive
+   * context churn reliably, so each case gets an isolated instance plus a
+   * warm-up pass before the real measurement.
+   */
+  async function withBrowser(fn) {
+    const browser = await chromium.launch({ headless: !headed, args: LAUNCH_ARGS });
+    try {
+      const warm = await browser.newContext({ viewport: { width: 320, height: 240 } });
+      const warmPage = await warm.newPage();
+      await warmPage.setContent('<canvas id="c"></canvas>');
+      await warmPage.evaluate(async () => {
+        try {
+          if (navigator.gpu) await navigator.gpu.requestAdapter();
+          document.getElementById('c').getContext('webgl2');
+        } catch {}
+      });
+      await warmPage.waitForTimeout(1500);
+      await warm.close();
+      return await fn(browser);
+    } finally {
+      await browser.close();
+    }
   }
 
-  const results = [];
+  // ---- Run 1: default — attempt WebGPU; either selected path must draw ----
+  const def = await withBrowser((b) => loadAndCapture(b, 'default'));
 
-  try {
-    // ---- Run 1: default — attempt WebGPU, accept either selected path ----
-    results.push(await runCase(browser, 'default', []));
+  // ---- Run 2: WebGPU hidden — fallback MUST engage -------------------------
+  const nowg = await withBrowser((b) => loadAndCapture(b, 'no-webgpu', { hideWebGPU: true }));
 
-    // ---- Run 2: WebGPU disabled — fallback MUST engage -------------------
-    const ctx2 = await browser.newContext({ viewport: { width: 800, height: 600 } });
-    const page2 = await ctx2.newPage();
-    const logs2 = [];
-    collectLogs(page2, logs2);
-    // Re-open with a flag-forced no-WebGPU environment.
-    const browserNoWebGPU = await chromium.launch({
-      headless: !headed,
-      channel: executablePath ? undefined : 'chrome',
-      executablePath,
-      args: ['--disable-features=WebGPU', '--disable-webgpu'],
-    });
-    const ctx = await browserNoWebGPU.newContext({ viewport: { width: 800, height: 600 } });
-    const page = await ctx.newPage();
-    collectLogs(page, logs2);
-    await page.goto(`http://127.0.0.1:${PORT}/index.html`, { waitUntil: 'load' });
-    await page.waitForTimeout(4000);
-    const pixelsFallback = await analyzeCanvas(page);
-    await writeFile(join(ARTIFACTS_DIR, 'no-webgpu.png'), await page.locator('#canvas').screenshot());
-    await writeFile(join(ARTIFACTS_DIR, 'no-webgpu.log.txt'), logs2.join('\n'));
-    await ctx.close();
-    await ctx2.close();
-    await browserNoWebGPU.close();
-    results.push({
-      name: 'no-webgpu',
-      logs: logs2,
-      pixels: pixelsFallback,
-    });
-  } finally {
-    await browser.close();
-    server.close();
-  }
+  server.close();
 
   // ---- Assertions --------------------------------------------------------
-  const def = results[0];
   assert(def.pixels.total > 0, 'canvas screenshot captured');
   assert(
     def.pixels.golden > def.pixels.total * 0.0005,
@@ -186,10 +204,9 @@ async function main() {
     def.logs.some((l) => l.includes('AlkALive renderer selected:')),
     'runtime logged its renderer selection'
   );
-  assert(def.isolated, 'crossOriginIsolated must be true under COOP/COEP response headers');
-  assert(def.sabOk, 'SharedArrayBuffer must be constructible when isolated');
+  assert(def.isolated === true, 'crossOriginIsolated must be true under COOP/COEP response headers');
+  assert(def.sabOk === true, 'SharedArrayBuffer must be constructible when isolated');
 
-  const nowg = results[1];
   assert(
     nowg.logs.some((l) => l.includes('renderer selected: WebGL2')),
     'fallback run must explicitly select the WebGL2/GLSL renderer'
@@ -200,13 +217,14 @@ async function main() {
   );
 
   console.log('\n=== AlkALive E2E: ALL ASSERTIONS PASSED ===\n');
-  for (const r of results) {
-    console.log(
-      `[${r.name}] golden=${r.pixels.golden}/${r.pixels.total}px isolated=${r.isolated ?? 'n/a'}`
-    );
-  }
+  console.log(
+    `[default] golden=${def.pixels.golden}/${def.pixels.total}px isolated=${def.isolated}`
+  );
+  console.log(`[no-webgpu] golden=${nowg.pixels.golden}/${nowg.pixels.total}px`);
   const selectionLine = def.logs.find((l) => l.includes('AlkALive renderer selected:'));
   console.log(`Default-run selection: ${selectionLine}`);
+  const fallbackReason = nowg.logs.find((l) => l.includes('wgpu/WGSL renderer unavailable'));
+  if (fallbackReason) console.log(`Fallback trigger: ${fallbackReason}`);
 }
 
 main().catch((err) => {

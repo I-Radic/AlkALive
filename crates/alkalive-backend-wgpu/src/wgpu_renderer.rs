@@ -1,4 +1,4 @@
-//! wgpu-based GPU renderer using WGSL shaders — the ADR-001/ADR-006
+﻿//! wgpu-based GPU renderer using WGSL shaders — the ADR-001/ADR-006
 //! production rendering backend.
 //!
 //! This renderer is the **primary** production path selected by the runtime
@@ -38,7 +38,8 @@
 use std::num::NonZeroU64;
 use wgpu::util::DeviceExt;
 
-use crate::frame_plan::{collect_frame_plan, PlannedDraw, RectUniformsData, TextUniformsData};
+use alkalive_render::graph::RenderGraph;
+use crate::frame_plan::{collect_frame_plan, FramePlan, PlannedDraw, RectUniformsData, TextUniformsData};
 use crate::tessellate::{tessellate_scene, SceneTessellation};
 use crate::wgsl_shaders;
 use crate::{Vertex, ATLAS_PAGE_BYTES, ATLAS_SIZE};
@@ -61,6 +62,445 @@ const RECT_CORNERS: [[f32; 2]; 6] = [
     [1.0, 1.0],
     [0.0, 1.0],
 ];
+
+/// The GPU objects a frame encode needs, so [`record_frame`] can run against
+/// both the window surface and an offscreen render target.
+pub struct FrameGpuRefs<'a> {
+    /// Text (glyph-quad) render pipeline.
+    pub text_pipeline: &'a wgpu::RenderPipeline,
+    /// Bind group holding the text uniform ring + glyph atlas view/sampler.
+    pub text_bind_group: &'a wgpu::BindGroup,
+    /// Rectangle fill/outline render pipeline.
+    pub rect_pipeline: &'a wgpu::RenderPipeline,
+    /// Bind group holding the rect uniform ring.
+    pub rect_bind_group: &'a wgpu::BindGroup,
+    /// Shared unit-corner quad vertex buffer for all rect draws.
+    pub rect_vertex_buffer: &'a wgpu::Buffer,
+    /// Tessellated glyph vertices; `None` until the first tessellation.
+    pub text_vertex_buffer: Option<&'a wgpu::Buffer>,
+    /// Device-aligned dynamic-offset slot stride in bytes.
+    pub dynamic_stride: u64,
+}
+
+/// Tessellated vertex ranges within the combined text vertex buffer.
+#[derive(Debug, Clone, Copy)]
+pub struct TextRanges {
+    /// Vertex count of the rotated title run (range starts at 0).
+    pub title_count: u32,
+    /// First input-field vertex index.
+    pub input_start: u32,
+    /// Input-field vertex count.
+    pub input_count: u32,
+}
+
+/// Record every pass of the graph into `encoder`, binding per-draw uniforms
+/// through dynamic offsets. Pure encoder work — no queue or surface access —
+/// which is what makes the pipeline testable offscreen on native GPUs.
+pub fn record_frame(
+    encoder: &mut wgpu::CommandEncoder,
+    view: &wgpu::TextureView,
+    clear_color: [f32; 4],
+    graph: &RenderGraph,
+    plan: &FramePlan,
+    gpu: FrameGpuRefs<'_>,
+    ranges: TextRanges,
+) {
+    let clear = wgpu::Color {
+        r: clear_color[0] as f64,
+        g: clear_color[1] as f64,
+        b: clear_color[2] as f64,
+        a: clear_color[3] as f64,
+    };
+
+    let mut planned = plan.draws.iter().copied();
+    let mut is_first_pass = true;
+
+    for &pass_idx in &graph.pass_order {
+        let pass = &graph.passes[pass_idx];
+        let load_op = if is_first_pass {
+            is_first_pass = false;
+            wgpu::LoadOp::Clear(clear)
+        } else {
+            wgpu::LoadOp::Load
+        };
+
+        let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some(&pass.name),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: load_op,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+
+        for _dc in &pass.draw_calls {
+            match planned.next() {
+                Some(PlannedDraw::Clear) => {}
+                Some(PlannedDraw::Rect(slot)) => {
+                    let offset = (slot as u64) * gpu.dynamic_stride;
+                    rpass.set_pipeline(gpu.rect_pipeline);
+                    rpass.set_bind_group(0, gpu.rect_bind_group, &[offset as u32]);
+                    rpass.set_vertex_buffer(0, gpu.rect_vertex_buffer.slice(..));
+                    rpass.draw(0..6, 0..1);
+                }
+                Some(PlannedDraw::Text(slot, is_input)) => {
+                    let (start, count) = if is_input {
+                        (ranges.input_start, ranges.input_count)
+                    } else {
+                        (0, ranges.title_count)
+                    };
+                    if count == 0 {
+                        continue;
+                    }
+                    let Some(vb) = gpu.text_vertex_buffer else {
+                        continue;
+                    };
+                    let offset = (slot as u64) * gpu.dynamic_stride;
+                    rpass.set_pipeline(gpu.text_pipeline);
+                    rpass.set_bind_group(0, gpu.text_bind_group, &[offset as u32]);
+                    rpass.set_vertex_buffer(0, vb.slice(..));
+                    rpass.draw(start..(start + count), 0..1);
+                }
+                None => break,
+            }
+        }
+    }
+}
+
+/// Device-aligned dynamic-offset slot stride for a device.
+pub fn dynamic_slot_stride(device: &wgpu::Device) -> u64 {
+    let align = device.limits().min_uniform_buffer_offset_alignment as u64;
+    ((BASE_SLOT_SIZE + align - 1) / align) * align
+}
+
+/// Create the two per-frame uniform ring buffers (`text`, `rect`).
+pub fn create_uniform_rings(
+    device: &wgpu::Device,
+    stride: u64,
+) -> (wgpu::Buffer, wgpu::Buffer) {
+    let usage = wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST;
+    let size = stride * MAX_DYNAMIC_SLOTS as u64;
+    let text = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("text uniform ring"),
+        size,
+        usage,
+        mapped_at_creation: false,
+    });
+    let rect = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("rect uniform ring"),
+        size,
+        usage,
+        mapped_at_creation: false,
+    });
+    (text, rect)
+}
+
+/// Glyph-atlas GPU resources (512×512 R8 texture + view + filtering sampler).
+pub struct GlyphAtlasResources {
+    pub texture: wgpu::Texture,
+    pub view: wgpu::TextureView,
+    pub sampler: wgpu::Sampler,
+}
+
+/// Create the empty glyph-atlas resources.
+pub fn create_glyph_atlas_resources(device: &wgpu::Device) -> GlyphAtlasResources {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("glyph atlas"),
+        size: wgpu::Extent3d {
+            width: ATLAS_SIZE,
+            height: ATLAS_SIZE,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::R8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("glyph sampler"),
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        ..Default::default()
+    });
+    GlyphAtlasResources {
+        texture,
+        view,
+        sampler,
+    }
+}
+
+/// Compile the WGSL programs and build both render pipelines with **explicit**
+/// layouts (a WGSL binding change fails loudly here instead of silently
+/// re-ordering a shader-derived interface). Returns the pipelines plus the two
+/// bind group layouts they were built from.
+pub fn create_frame_pipelines(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    text_ring: &wgpu::Buffer,
+    rect_ring: &wgpu::Buffer,
+    atlas_view: &wgpu::TextureView,
+    atlas_sampler: &wgpu::Sampler,
+) -> (
+    wgpu::RenderPipeline,
+    wgpu::BindGroup,
+    wgpu::RenderPipeline,
+    wgpu::BindGroup,
+    wgpu::Buffer, // shared unit-corner quad for all rect draws
+) {
+    let make_module = |label: &'static str, src: &'static str| {
+        device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some(label),
+            source: wgpu::ShaderSource::Wgsl(src.into()),
+        })
+    };
+    let text_vs = make_module("text vs (WGSL)", wgsl_shaders::TEXT_VERTEX_WGSL);
+    let text_fs = make_module("text fs (WGSL)", wgsl_shaders::TEXT_FRAGMENT_WGSL);
+    let rect_vs = make_module("rect vs (WGSL)", wgsl_shaders::RECT_VERTEX_WGSL);
+    let rect_fs = make_module("rect fs (WGSL)", wgsl_shaders::RECT_FRAGMENT_WGSL);
+
+    // Text bind group layout + bind group.
+    let text_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("text BGL"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: true,
+                    min_binding_size: NonZeroU64::new(TextUniformsData::WGSL_SIZE),
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    });
+    let text_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("text BG"),
+        layout: &text_bgl,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: text_ring,
+                    offset: 0,
+                    size: NonZeroU64::new(TextUniformsData::WGSL_SIZE),
+                }),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(atlas_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::Sampler(atlas_sampler),
+            },
+        ],
+    });
+
+    // Rect bind group layout + bind group.
+    let rect_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("rect BGL"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: true,
+                min_binding_size: NonZeroU64::new(RectUniformsData::WGSL_SIZE),
+            },
+            count: None,
+        }],
+    });
+    let rect_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("rect BG"),
+        layout: &rect_bgl,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                buffer: rect_ring,
+                offset: 0,
+                size: NonZeroU64::new(RectUniformsData::WGSL_SIZE),
+            }),
+        }],
+    });
+
+    let position_attr = wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x2,
+        offset: 0,
+        shader_location: 0,
+    };
+    let uv_attr = wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x2,
+        offset: 8,
+        shader_location: 1,
+    };
+
+    let text_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("text pipeline layout"),
+        bind_group_layouts: &[&text_bgl],
+        push_constant_ranges: &[],
+    });
+    let text_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("text pipeline (WGSL)"),
+        layout: Some(&text_pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &text_vs,
+            entry_point: Some("vs_main"),
+            compilation_options: Default::default(),
+            buffers: &[wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<Vertex>() as u64,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &[position_attr, uv_attr],
+            }],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &text_fs,
+            entry_point: Some("fs_main"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            ..Default::default()
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    });
+
+    let rect_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("rect pipeline layout"),
+        bind_group_layouts: &[&rect_bgl],
+        push_constant_ranges: &[],
+    });
+    let rect_corner_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("rect corner quad"),
+        contents: bytemuck::cast_slice(&RECT_CORNERS),
+        usage: wgpu::BufferUsages::VERTEX,
+    });
+    let rect_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("rect pipeline (WGSL)"),
+        layout: Some(&rect_pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &rect_vs,
+            entry_point: Some("vs_main"),
+            compilation_options: Default::default(),
+            buffers: &[wgpu::VertexBufferLayout {
+                array_stride: 8,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &[position_attr],
+            }],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &rect_fs,
+            entry_point: Some("fs_main"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            ..Default::default()
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    });
+
+    (
+        text_pipeline,
+        text_bind_group,
+        rect_pipeline,
+        rect_bind_group,
+        rect_corner_buffer,
+    )
+}
+
+/// Upload per-draw-call records into a ring buffer, one aligned slot per
+/// record. Shared by the browser renderer and the offscreen GPU test.
+pub fn upload_ring<T: bytemuck::Pod>(
+    queue: &wgpu::Queue,
+    buffer: &wgpu::Buffer,
+    stride: u64,
+    records: &[T],
+) {
+    let mut ring = vec![0u8; (stride * MAX_DYNAMIC_SLOTS as u64) as usize];
+    for (slot, rec) in records.iter().enumerate() {
+        let bytes = bytemuck::bytes_of(rec);
+        let off = slot * stride as usize;
+        ring[off..off + bytes.len()].copy_from_slice(bytes);
+    }
+    queue.write_buffer(buffer, 0, &ring);
+}
+
+/// Upload one rasterized atlas page into the glyph texture. Shared by the
+/// browser renderer and the offscreen GPU test.
+pub fn upload_atlas_page(
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    page: &[u8],
+) -> Result<(), String> {
+    if page.len() != ATLAS_PAGE_BYTES {
+        return Err(format!(
+            "atlas page has {} bytes, expected {ATLAS_PAGE_BYTES}",
+            page.len()
+        ));
+    }
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        page,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(ATLAS_SIZE),
+            rows_per_image: Some(ATLAS_SIZE),
+        },
+        wgpu::Extent3d {
+            width: ATLAS_SIZE,
+            height: ATLAS_SIZE,
+            depth_or_array_layers: 1,
+        },
+    );
+    Ok(())
+}
 
 /// The wgpu/WGSL production renderer (ADR-006).
 pub struct WgpuBackendRenderer {
@@ -102,12 +542,36 @@ pub struct WgpuBackendRenderer {
 }
 
 impl WgpuBackendRenderer {
+    /// Non-destructive WebGPU capability probe.
+    ///
+    /// Requests an adapter **without touching any canvas**: an HTML canvas
+    /// accepts exactly one context type for its lifetime, so calling
+    /// `getContext('webgpu')` here would permanently poison the canvas for
+    /// the WebGL2/GLSL fallback. The runtime therefore probes first and only
+    /// commits the real canvas to [`Self::init_from_canvas`] when this
+    /// returns `true`.
+    pub async fn is_supported() -> bool {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::all(),
+            ..Default::default()
+        });
+        instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                compatible_surface: None,
+                force_fallback_adapter: false,
+            })
+            .await
+            .is_some()
+    }
+
     /// Initialize the renderer from an HTML canvas element.
     ///
     /// Creates the wgpu instance/surface/adapter/device, compiles the WGSL
     /// programs, creates explicit-layout pipelines, ring buffers, bind
     /// groups, and the empty glyph-atlas texture. Any failure returns a
     /// descriptive `Err` so the runtime can select the fallback renderer.
+    #[cfg(target_arch = "wasm32")]
     pub async fn init_from_canvas(
         canvas: web_sys::HtmlCanvasElement,
         width: u32,
@@ -118,14 +582,14 @@ impl WgpuBackendRenderer {
             ..Default::default()
         });
 
-        let surface = instance
-            .create_surface(wgpu::SurfaceTarget::Canvas(canvas))
-            .map_err(|e| format!("create_surface failed: {e:?}"))?;
-
+        // Request the adapter AND device BEFORE creating the surface: any
+        // failure here must leave the canvas untouched so the runtime can
+        // still fall back to the WebGL2/GLSL renderer on it. (A canvas
+        // accepts exactly one context type for its lifetime.)
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: Some(&surface),
+                compatible_surface: None,
                 force_fallback_adapter: false,
             })
             .await
@@ -144,13 +608,19 @@ impl WgpuBackendRenderer {
             .await
             .map_err(|e| format!("request_device failed: {e:?}"))?;
 
-        // Surface configuration: prefer an sRGB format when offered.
+        let surface = instance
+            .create_surface(wgpu::SurfaceTarget::Canvas(canvas))
+            .map_err(|e| format!("create_surface failed: {e:?}"))?;
+
+        // Surface configuration: prefer a NON-sRGB format so pixel values
+        // match the WebGL2/GLSL fallback exactly (the WebGL canvas has no
+        // implicit sRGB conversion).
         let caps = surface.get_capabilities(&adapter);
         let format = caps
             .formats
             .iter()
             .copied()
-            .find(|f| f.is_srgb())
+            .find(|f| !f.is_srgb())
             .unwrap_or(caps.formats[0]);
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -164,240 +634,20 @@ impl WgpuBackendRenderer {
         };
         surface.configure(&device, &config);
 
-        // Dynamic-offset alignment: slot stride must be a multiple of the
-        // device's minimum uniform buffer offset alignment.
-        let align = device.limits().min_uniform_buffer_offset_alignment as u64;
-        let dynamic_stride = ((BASE_SLOT_SIZE + align - 1) / align) * align;
-        let ring_size = dynamic_stride * MAX_DYNAMIC_SLOTS as u64;
-
-        // --- WGSL programs ---------------------------------------------------
-        let make_module = |label: &'static str, src: &'static str| {
-            device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some(label),
-                source: wgpu::ShaderSource::Wgsl(src.into()),
-            })
-        };
-        let text_vs = make_module("text vs (WGSL)", wgsl_shaders::TEXT_VERTEX_WGSL);
-        let text_fs = make_module("text fs (WGSL)", wgsl_shaders::TEXT_FRAGMENT_WGSL);
-        let rect_vs = make_module("rect vs (WGSL)", wgsl_shaders::RECT_VERTEX_WGSL);
-        let rect_fs = make_module("rect fs (WGSL)", wgsl_shaders::RECT_FRAGMENT_WGSL);
-
-        // --- Ring buffers -----------------------------------------------------
-        let ring_usage = wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST;
-        let text_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("text uniform ring"),
-            size: ring_size,
-            usage: ring_usage,
-            mapped_at_creation: false,
-        });
-        let rect_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("rect uniform ring"),
-            size: ring_size,
-            usage: ring_usage,
-            mapped_at_creation: false,
-        });
-
-        // --- Glyph atlas resources ---------------------------------------------
-        let glyph_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("glyph atlas"),
-            size: wgpu::Extent3d {
-                width: ATLAS_SIZE,
-                height: ATLAS_SIZE,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        let glyph_texture_view = glyph_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let glyph_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("glyph sampler"),
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
-
-        // --- Explicit layouts + bind groups ------------------------------------
-        //
-        // Layouts are explicit (not shader-derived) so a WGSL binding change
-        // fails loudly here rather than silently re-ordering the interface.
-        let text_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("text BGL"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: true,
-                        min_binding_size: NonZeroU64::new(TextUniformsData::WGSL_SIZE),
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
-        let text_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("text BG"),
-            layout: &text_bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: &text_uniform_buffer,
-                        offset: 0,
-                        size: NonZeroU64::new(TextUniformsData::WGSL_SIZE),
-                    }),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&glyph_texture_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&glyph_sampler),
-                },
-            ],
-        });
-
-        let rect_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("rect BGL"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: true,
-                    min_binding_size: NonZeroU64::new(RectUniformsData::WGSL_SIZE),
-                },
-                count: None,
-            }],
-        });
-        let rect_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("rect BG"),
-            layout: &rect_bgl,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                    buffer: &rect_uniform_buffer,
-                    offset: 0,
-                    size: NonZeroU64::new(RectUniformsData::WGSL_SIZE),
-                }),
-            }],
-        });
-
-        // --- Pipelines -----------------------------------------------------------
-        let position_attr = wgpu::VertexAttribute {
-            format: wgpu::VertexFormat::Float32x2,
-            offset: 0,
-            shader_location: 0,
-        };
-        let uv_attr = wgpu::VertexAttribute {
-            format: wgpu::VertexFormat::Float32x2,
-            offset: 8,
-            shader_location: 1,
-        };
-
-        let text_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("text pipeline layout"),
-                bind_group_layouts: &[&text_bgl],
-                push_constant_ranges: &[],
-            });
-        let text_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("text pipeline (WGSL)"),
-            layout: Some(&text_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &text_vs,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<Vertex>() as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[position_attr, uv_attr],
-                }],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &text_fs,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
-
-        let rect_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("rect pipeline layout"),
-                bind_group_layouts: &[&rect_bgl],
-                push_constant_ranges: &[],
-            });
-        let rect_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("rect corner quad"),
-            contents: bytemuck::cast_slice(&RECT_CORNERS),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-        let rect_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("rect pipeline (WGSL)"),
-            layout: Some(&rect_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &rect_vs,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: 8,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[position_attr],
-                }],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &rect_fs,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
+        // Shared GPU resources (same constructors the offscreen GPU test uses,
+        // so the browser path and the tested path cannot drift).
+        let dynamic_stride = dynamic_slot_stride(&device);
+        let (text_uniform_buffer, rect_uniform_buffer) = create_uniform_rings(&device, dynamic_stride);
+        let atlas = create_glyph_atlas_resources(&device);
+        let (text_pipeline, text_bind_group, rect_pipeline, rect_bind_group, rect_vertex_buffer) =
+            create_frame_pipelines(
+                &device,
+                format,
+                &text_uniform_buffer,
+                &rect_uniform_buffer,
+                &atlas.view,
+                &atlas.sampler,
+            );
 
         Ok(Self {
             device,
@@ -411,9 +661,9 @@ impl WgpuBackendRenderer {
             text_uniform_buffer,
             rect_uniform_buffer,
             dynamic_stride,
-            glyph_texture,
-            glyph_texture_view,
-            glyph_sampler,
+            glyph_texture: atlas.texture,
+            glyph_texture_view: atlas.view,
+            glyph_sampler: atlas.sampler,
             rect_vertex_buffer,
             text_vertex_buffer: None,
             tess: None,
@@ -424,6 +674,17 @@ impl WgpuBackendRenderer {
         })
     }
 
+    /// Native stub: the wgpu renderer draws to a browser canvas; on native
+    /// targets only the offscreen test path (which constructs resources
+    /// directly) is supported.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn init_from_canvas(
+        _canvas: web_sys::HtmlCanvasElement,
+        _width: u32,
+        _height: u32,
+    ) -> Result<Self, String> {
+        Err("WgpuBackendRenderer requires a browser canvas (wasm32)".to_string())
+    }
     /// Render one frame from scene data via the render-graph IR.
     ///
     /// Re-tessellates when the glyph-atlas inputs changed (first frame,
@@ -525,72 +786,27 @@ impl WgpuBackendRenderer {
             },
         );
 
-        let clear = wgpu::Color {
-            r: plan.clear_color[0] as f64,
-            g: plan.clear_color[1] as f64,
-            b: plan.clear_color[2] as f64,
-            a: plan.clear_color[3] as f64,
-        };
-
-        let mut planned = plan.draws.iter();
-        let mut is_first_pass = true;
-
-        for &pass_idx in &graph.pass_order {
-            let pass = &graph.passes[pass_idx];
-            let load_op = if is_first_pass {
-                is_first_pass = false;
-                wgpu::LoadOp::Clear(clear)
-            } else {
-                wgpu::LoadOp::Load
-            };
-
-            let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some(&pass.name),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: load_op,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-
-            for _dc in &pass.draw_calls {
-                match planned.next() {
-                    Some(PlannedDraw::Clear) => {}
-                    Some(PlannedDraw::Rect(slot)) => {
-                        let offset = (*slot as u64) * self.dynamic_stride;
-                        rpass.set_pipeline(&self.rect_pipeline);
-                        rpass.set_bind_group(0, &self.rect_bind_group, &[offset as u32]);
-                        rpass.set_vertex_buffer(0, self.rect_vertex_buffer.slice(..));
-                        rpass.draw(0..6, 0..1);
-                    }
-                    Some(PlannedDraw::Text(slot, is_input)) => {
-                        let (start, count) = if *is_input {
-                            (input_vertex_start, input_vertex_count)
-                        } else {
-                            (0, title_vertex_count)
-                        };
-                        if count == 0 {
-                            continue;
-                        }
-                        let Some(vb) = &self.text_vertex_buffer else {
-                            continue;
-                        };
-                        let offset = (*slot as u64) * self.dynamic_stride;
-                        rpass.set_pipeline(&self.text_pipeline);
-                        rpass.set_bind_group(0, &self.text_bind_group, &[offset as u32]);
-                        rpass.set_vertex_buffer(0, vb.slice(..));
-                        rpass.draw(start..(start + count), 0..1);
-                    }
-                    None => break,
-                }
-            }
-        }
+        record_frame(
+            &mut encoder,
+            &view,
+            plan.clear_color,
+            &graph,
+            &plan,
+            FrameGpuRefs {
+                text_pipeline: &self.text_pipeline,
+                text_bind_group: &self.text_bind_group,
+                rect_pipeline: &self.rect_pipeline,
+                rect_bind_group: &self.rect_bind_group,
+                rect_vertex_buffer: &self.rect_vertex_buffer,
+                text_vertex_buffer: self.text_vertex_buffer.as_ref(),
+                dynamic_stride: self.dynamic_stride,
+            },
+            TextRanges {
+                title_count: title_vertex_count,
+                input_start: input_vertex_start,
+                input_count: input_vertex_count,
+            },
+        );
 
         self.queue.submit(std::iter::once(encoder.finish()));
         frame.present();
@@ -599,45 +815,13 @@ impl WgpuBackendRenderer {
     /// Write per-draw-call records into a ring buffer, one aligned slot per
     /// record.
     fn write_ring<T: bytemuck::Pod>(&self, buffer: &wgpu::Buffer, records: &[T]) {
-        let rec_bytes = std::mem::size_of::<T>();
-        let mut ring = vec![0u8; (self.dynamic_stride * MAX_DYNAMIC_SLOTS as u64) as usize];
-        for (slot, rec) in records.iter().enumerate() {
-            let off = slot * self.dynamic_stride as usize;
-            let bytes = bytemuck::bytes_of(rec);
-            debug_assert_eq!(bytes.len(), rec_bytes);
-            ring[off..off + rec_bytes].copy_from_slice(bytes);
-        }
-        self.queue.write_buffer(buffer, 0, &ring);
+        upload_ring(&self.queue, buffer, self.dynamic_stride, records);
     }
 
     /// Upload tessellation output: rebuild the text vertex buffer, upload
     /// the glyph atlas page, cache bounds.
     fn upload_tessellation(&mut self, t: &SceneTessellation) -> Result<(), String> {
-        if t.atlas_page.len() != ATLAS_PAGE_BYTES {
-            return Err(format!(
-                "atlas page has {} bytes, expected {ATLAS_PAGE_BYTES}",
-                t.atlas_page.len()
-            ));
-        }
-        self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.glyph_texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &t.atlas_page,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(ATLAS_SIZE),
-                rows_per_image: Some(ATLAS_SIZE),
-            },
-            wgpu::Extent3d {
-                width: ATLAS_SIZE,
-                height: ATLAS_SIZE,
-                depth_or_array_layers: 1,
-            },
-        );
+        upload_atlas_page(&self.queue, &self.glyph_texture, &t.atlas_page)?;
 
         if !t.vertices.is_empty() {
             let buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {

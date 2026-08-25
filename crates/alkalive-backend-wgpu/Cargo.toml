@@ -55,6 +55,8 @@ wgpu-backend = ["dep:wgpu"]
 # naga is used in unit tests to statically validate the WGSL shader sources
 # (parse + validation + interface checks) without needing a GPU device.
 naga = { version = "24", default-features = false, features = ["wgsl-in"] }
+# pollster blocks on the wgpu futures in the offscreen GPU integration test.
+pollster = "0.4"
 
 [dependencies.wgpu]
 version = "24"
