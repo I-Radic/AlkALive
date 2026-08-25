@@ -79,6 +79,13 @@ cargo build -p alkalive-runtime-wasm --target wasm32-unknown-unknown --release
 # Generate the JS glue + WASM binary in deploy/pkg/
 wasm-bindgen --target web --out-dir deploy/pkg --out-name alkalive_runtime_wasm \
   target/wasm32-unknown-unknown/release/alkalive_runtime_wasm.wasm
+
+# Deterministic optimized deploy build (pinned wasm-bindgen + binaryen wasm-opt -Oz,
+# writes deploy/pkg/build-report.json with measured sizes + SHA-256)
+npm install && node build-deploy.mjs
+
+# CPU-side pipeline benchmark (compile → render graph → frame plan → tessellation)
+cargo run --release -p alkalive-backend-wgpu --example pipeline_bench
 ```
 
 ### Run the demo
