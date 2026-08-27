@@ -52,22 +52,30 @@ async function makeDriver(webGpuEnabled, headed) {
 }
 
 /**
- * Load the app, wait for startup, publish state, capture pixels.
- * @returns {Promise<{state: object|null, pixels: object}>}
+ * Load the app, wait until the runtime publishes its state, capture pixels
+ * and the observed startup latency (page load → renderer live).
+ * @returns {Promise<{state: object|null, pixels: object, startupMs: number}>}
  */
 async function loadAndCapture(driver, name) {
+  const t0 = Date.now();
   await driver.get(`http://127.0.0.1:${PORT}/index.html`);
-  await driver.sleep(4000);
+  await driver.wait(async () => {
+    const present = await driver.executeScript('return !!window.__alkalive');
+    return present === true;
+  }, 20000);
+  const startupMs = Date.now() - t0;
 
   const state = await driver.executeScript(
     'return window.__alkalive ? { renderer: window.__alkalive.renderer, fallbackReason: window.__alkalive.fallbackReason } : null;',
   );
+  // Give the RAF loop a few frames so the golden text has actually been drawn.
+  await driver.sleep(700);
   const pngB64 = await driver.takeScreenshot();
   const buf = Buffer.from(pngB64, 'base64');
 
   await mkdir(ARTIFACTS, { recursive: true });
   await writeFile(join(ARTIFACTS, `firefox-${name}.png`), buf);
-  return { state, pixels: analyzePng(buf) };
+  return { state, pixels: analyzePng(buf), startupMs };
 }
 
 async function main() {
@@ -144,10 +152,10 @@ async function main() {
 
   console.log('\n=== AlkALive Firefox E2E: ALL ASSERTIONS PASSED ===');
   console.log(
-    `[webgpu] renderer=WebGPU golden=${webgpu.pixels.golden}/${webgpu.pixels.total}px ${headedRetryNote}`,
+    `[webgpu] renderer=WebGPU golden=${webgpu.pixels.golden}/${webgpu.pixels.total}px startup=${webgpu.startupMs}ms ${headedRetryNote}`,
   );
   console.log(
-    `[webgl2] renderer=WebGL2 reason="${webgl2.state.fallbackReason}" golden=${webgl2.pixels.golden}/${webgl2.pixels.total}px`,
+    `[webgl2] renderer=WebGL2 reason="${webgl2.state.fallbackReason}" golden=${webgl2.pixels.golden}/${webgl2.pixels.total}px startup=${webgl2.startupMs}ms`,
   );
 }
 
