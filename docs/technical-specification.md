@@ -43,14 +43,14 @@ Out of scope: full ADR-001–028 rationale (see `docs/adr/ADR.md` for ADRs 001�
 
 ### 1.2 Workspace Layout
 
-The AlkALive workspace (`Cargo.toml`) has 18 crates, organized in three tiers:
+The AlkALive workspace (`Cargo.toml`) has 19 crates (17 `alkalive-*` plus 2 vendored), organized in three tiers:
 
 | Tier | Crates | Role |
 |------|--------|------|
 | **Compiler** | `alkalive-compiler` | Lex/parse/lower `.alk` source to `SceneIR`. |
 | **Runtime** | `alkalive-runtime`, `alkalive-runtime-wasm` | Frame loop, input forwarding, WASM entry point. |
 | **Rendering** | `alkalive-render`, `alkalive-backend-wgpu`, `alkalive-text` | Abstract render-graph IR, WebGL2 backend, HarfRust text stack. |
-| **Support** | `alkalive-core`, `alkalive-layout`, `alkalive-style`, `alkalive-input`, `alkalive-dom`, `alkalive-a11y`, `alkalive-ipc`, `alkalive-perf`, `alkalive-error`, `alkalive-test`, `alkalive-app` | Foundational types and (currently) thin stubs. |
+| **Support** | `alkalive-core`, `alkalive-scene-data`, `alkalive-layout`, `alkalive-style`, `alkalive-input`, `alkalive-dom`, `alkalive-a11y`, `alkalive-ipc`, `alkalive-perf`, `alkalive-error`, `alkalive-test` | Foundational/shared types and (currently) thin stubs. `alkalive-scene-data` holds the shared scene-IR data types that break the historical `render` ↔ `backend-wgpu` dependency cycle. |
 | **Vendored** | `vendor/harfrust/harfrust`, `vendor/rasterizer` | In-tree HarfRust text shaping and rasterizer (ADR-022). |
 
 The five enhancements touch primarily the **Compiler** and **Runtime** tiers; the **Rendering** tier sees one consumer-side change (data-driven dispatch in `alkalive-backend-wgpu`).
@@ -193,7 +193,7 @@ The crate has five source modules:
 | `ir` | `src/ir.rs` | ~390 | `SceneIR { module_id, module_name, background, nodes: Vec<NodeIR> }`. `NodeIR::Text { content, color, font_size, rotation_speed, position }`, `NodeIR::InputField { placeholder, position }`. `ColorIR::Solid(r,g,b)` / `ColorIR::Gold`. `PositionIR::Center` / `BelowText` / `Custom(x,y)`. Manual JSON serialiser (`to_json()`) — no `serde` dependency. |
 | `codegen` | `src/codegen.rs` | ~520 | `lower(&ModuleDecl) -> Result<SceneIR, CodegenError>`. Applies defaults, validates (font-size positive, rotation finite, `below text` requires preceding text node). `compile(src)` convenience: tokenize + parse + lower. |
 
-The binary (`src/main.rs`, ~340 LOC) is a CLI: `alkalive-compiler compile <input.alk> -o <output.scene>`. It uses `serde_json` (gated behind the `cli` feature) for pretty-printed JSON output. The library proper has zero external dependencies beyond `alkalive-core`.
+The binary (`src/main.rs`, ~760 LOC) is a CLI: `alkalive-compiler compile <input.alk> -o <output.scene>` with `--lint` and `--scheduled` flags. It uses `serde_json` (gated behind the `cli` feature) for pretty-printed JSON output. The library proper has zero external dependencies beyond `alkalive-core`.
 
 **Key types and their provenance:**
 
