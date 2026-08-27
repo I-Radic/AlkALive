@@ -97,11 +97,11 @@ pub mod incremental;
 pub mod ir;
 pub mod lexer;
 pub mod lints;
+pub mod module_resolver;
 pub mod parser;
 pub mod schedule;
 pub mod seminative;
 pub mod typechecker;
-pub mod module_resolver;
 pub mod wasm_codegen;
 
 // Re-export the primary public surface at the crate root for convenience.
@@ -125,6 +125,7 @@ pub use ir::{mint_module_id, AlgorithmIR, ColorIR, NodeIR, PositionIR, SceneIR};
 pub use ir::{CollectionDeclIR, Monotonicity};
 pub use lexer::{tokenize, LexError, Lexer, Token, TokenKind};
 pub use lints::{run_lints, LintReport, LintSet, LintSeverity};
+pub use module_resolver::{ModuleResolver, ResolveError};
 pub use parser::{parse, ParseError, Parser};
 pub use schedule::{
     schedule_lowering, BatchingStrategy, PassKind, RenderPass, ScheduleIR, ScheduledScene, ShaderId,
@@ -137,7 +138,6 @@ pub use typechecker::{
     check_module, check_module_in, effective_qualifier, param_qualifier, qualifier_is_subtype,
     type_is_subtype, FnSig, FnSigTable, TypeEnv, TypeError, TypeErrorSet,
 };
-pub use module_resolver::{ModuleResolver, ResolveError};
 pub use wasm_codegen::{
     alk_full_type_to_wasm, alk_type_to_wasm, compile_src_to_wasm, compile_src_to_wasm_in,
     compile_to_wasm, compile_to_wasm_in, WasmCodegenError, WasmModule,

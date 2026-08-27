@@ -90,8 +90,7 @@ fn missing_non_std_import_is_a_hard_compile_error() {
     // No mylib/utils.alk written on purpose.
 
     let err = compile_full_in(APP_USING_DOUBLE, &dir)
-        .err()
-        .expect("missing non-std import must fail compilation");
+        .expect_err("missing non-std import must fail compilation");
     let msg = format!("{}", err);
     assert!(
         msg.contains("module resolution error"),
@@ -108,8 +107,7 @@ fn unparseable_imported_module_is_a_hard_compile_error() {
     write_module(&dir, "mylib/utils", "module utils { this is not .alk");
 
     let err = compile_full_in(APP_USING_DOUBLE, &dir)
-        .err()
-        .expect("unparseable imported module must fail compilation");
+        .expect_err("unparseable imported module must fail compilation");
     let msg = format!("{}", err);
     assert!(
         msg.contains("module resolution error") && msg.contains("parse error"),
@@ -136,9 +134,7 @@ fn private_fns_are_not_importable() {
   }
 }
 "#;
-    let err = compile_full_in(src, &dir)
-        .err()
-        .expect("importing a private fn must fail");
+    let err = compile_full_in(src, &dir).expect_err("importing a private fn must fail");
     assert!(
         format!("{}", err).contains("does not export"),
         "error should say the module does not export the name, got: {}",

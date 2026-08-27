@@ -15,9 +15,8 @@
 use alkalive_backend_wgpu::frame_plan::collect_frame_plan;
 use alkalive_backend_wgpu::tessellate::tessellate_scene;
 use alkalive_backend_wgpu::wgpu_renderer::{
-    upload_atlas_page, upload_ring,
     create_frame_pipelines, create_glyph_atlas_resources, create_uniform_rings,
-    dynamic_slot_stride, record_frame, FrameGpuRefs, TextRanges,
+    dynamic_slot_stride, record_frame, upload_atlas_page, upload_ring, FrameGpuRefs, TextRanges,
 };
 use alkalive_scene_data::TextSceneData;
 use wgpu::util::DeviceExt;
@@ -41,7 +40,8 @@ async fn read_texture(
         mapped_at_creation: false,
     });
 
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    let mut encoder =
+        device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
     encoder.copy_texture_to_buffer(
         texture.as_image_copy(),
         wgpu::TexelCopyBufferInfo {

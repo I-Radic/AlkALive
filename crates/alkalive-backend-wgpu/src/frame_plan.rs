@@ -161,7 +161,9 @@ pub fn collect_frame_plan(
                         _pad1: 0.0,
                     });
                 }
-                DrawCallKind::DrawText { color, rotation, .. } => {
+                DrawCallKind::DrawText {
+                    color, rotation, ..
+                } => {
                     let is_input = !text_uniforms.is_empty();
                     draws.push(PlannedDraw::Text(text_uniforms.len(), is_input));
                     text_uniforms.push(TextUniformsData {
@@ -216,8 +218,10 @@ mod tests {
 
     #[test]
     fn plan_extracts_clear_color_from_graph() {
-        let mut scene = TextSceneData::default();
-        scene.background = (10, 20, 30);
+        let scene = TextSceneData {
+            background: (10, 20, 30),
+            ..Default::default()
+        };
         let graph = build_render_graph(&scene, (800, 600), (0.0, 0.0, 0.0, 0.0));
         let plan = collect_frame_plan(&graph, 800.0, 600.0, 0.0);
         let expected = [10.0 / 255.0, 20.0 / 255.0, 30.0 / 255.0, 1.0];
@@ -228,8 +232,10 @@ mod tests {
 
     #[test]
     fn plan_applies_rotation_speed_times_time() {
-        let mut scene = TextSceneData::default();
-        scene.rotation_speed = 0.5;
+        let scene = TextSceneData {
+            rotation_speed: 0.5,
+            ..Default::default()
+        };
         let graph = build_render_graph(&scene, (800, 600), (0.0, 0.0, 0.0, 0.0));
         let plan = collect_frame_plan(&graph, 800.0, 600.0, 4.0);
         // Title is the first text draw.
@@ -240,8 +246,10 @@ mod tests {
 
     #[test]
     fn plan_carries_text_color_from_draw_call() {
-        let mut scene = TextSceneData::default();
-        scene.input_text = "abc".to_string();
+        let scene = TextSceneData {
+            input_text: "abc".to_string(),
+            ..Default::default()
+        };
         let graph = build_render_graph(&scene, (800, 600), (0.0, 0.0, 0.0, 0.0));
         let plan = collect_frame_plan(&graph, 800.0, 600.0, 0.0);
         // Typed input text uses the bright color from the graph builder.

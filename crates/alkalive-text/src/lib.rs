@@ -1867,7 +1867,8 @@ mod tests {
             style: "normal",
         };
         assert_eq!(
-            reg.resolve(&req_a_upper).expect("resolve family A (upper) must be Ok"),
+            reg.resolve(&req_a_upper)
+                .expect("resolve family A (upper) must be Ok"),
             id_a
         );
     }

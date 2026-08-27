@@ -259,8 +259,7 @@ mod tests {
     fn wgsl_uniform_struct_layout_contract() {
         // Parse the text vertex shader and inspect the TextUniforms struct
         // layout produced by naga.
-        let module =
-            naga::front::wgsl::parse_str(TEXT_VERTEX_WGSL).expect("text vertex parses");
+        let module = naga::front::wgsl::parse_str(TEXT_VERTEX_WGSL).expect("text vertex parses");
         let ty_handle = module
             .types
             .iter()

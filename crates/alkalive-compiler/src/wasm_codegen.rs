@@ -451,10 +451,11 @@ fn vtable_slot_public(
             }
         }
     }
-    layout.iter().position(|n| n == method_name).map(|i| i as u32)
+    layout
+        .iter()
+        .position(|n| n == method_name)
+        .map(|i| i as u32)
 }
-
-
 
 /// A compiled instruction sequence — we use our own enum to avoid
 /// `Instruction` not implementing `PartialEq` (needed for the `ends_with`
@@ -538,11 +539,7 @@ impl<'ctx> FnCompiler<'ctx> {
 
     /// Construct a FnCompiler for a class method body (Gap 1).
     /// For instance methods, `self` is implicitly local 0.
-    fn new_for_method(
-        class_name: &str,
-        m: &MethodDecl,
-        ctx: &'ctx CompileContext<'ctx>,
-    ) -> Self {
+    fn new_for_method(class_name: &str, m: &MethodDecl, ctx: &'ctx CompileContext<'ctx>) -> Self {
         let mut locals: Vec<(String, ValType)> = Vec::new();
         let mut local_types: Vec<Option<Type>> = Vec::new();
         if m.is_instance {
@@ -592,17 +589,17 @@ impl<'ctx> FnCompiler<'ctx> {
             Expr::Var(name, _, _) => self.local_type(name).cloned(),
             Expr::Self_(_, _) => {
                 if self.is_instance {
-                    self.enclosing_class
-                        .as_ref()
-                        .map(|c| Type {
-                            qualifier: crate::ast::Qualifier::Unrestricted,
-                            base: BaseType::Named(c.clone()),
-                        })
+                    self.enclosing_class.as_ref().map(|c| Type {
+                        qualifier: crate::ast::Qualifier::Unrestricted,
+                        base: BaseType::Named(c.clone()),
+                    })
                 } else {
                     None
                 }
             }
-            Expr::Field { receiver, field, .. } => {
+            Expr::Field {
+                receiver, field, ..
+            } => {
                 let rt = self.expr_type(receiver)?;
                 if let BaseType::Named(class_name) = &rt.base {
                     // Look up the field in the class chain via the typechecker.
@@ -809,8 +806,7 @@ impl<'ctx> FnCompiler<'ctx> {
                     // Emit: if (cond) { then } else { else }
                     instrs.push(AlkInstr::If);
                     // Compile the then-block.
-                    let (then_instrs, then_locals) =
-                        self.compile_block(then_block, strings, None);
+                    let (then_instrs, then_locals) = self.compile_block(then_block, strings, None);
                     instrs.extend(then_instrs);
                     // Merge then-locals into new_locals.
                     for (ty, count) in then_locals {
@@ -827,8 +823,7 @@ impl<'ctx> FnCompiler<'ctx> {
                     // Handle else branch.
                     if let Some(else_b) = else_block {
                         instrs.push(AlkInstr::Else);
-                        let (else_instrs, else_locals) =
-                            self.compile_block(else_b, strings, None);
+                        let (else_instrs, else_locals) = self.compile_block(else_b, strings, None);
                         instrs.extend(else_instrs);
                         for (ty, count) in else_locals {
                             if let Some(last) = new_locals.last_mut() {
@@ -1009,10 +1004,7 @@ impl<'ctx> FnCompiler<'ctx> {
                 // Determine whether this is a Vec method call (Gap 5) or a
                 // class instance-method call (Gap 1 — virtual dispatch).
                 let recv_ty = self.expr_type(receiver);
-                let is_vec_receiver = recv_ty
-                    .as_ref()
-                    .map(|t| t.is_vec())
-                    .unwrap_or(false);
+                let is_vec_receiver = recv_ty.as_ref().map(|t| t.is_vec()).unwrap_or(false);
                 if is_vec_receiver {
                     // Gap 5: Vec method calls compile to host import calls.
                     self.compile_expr(receiver, instrs, strings);
@@ -1172,19 +1164,15 @@ impl<'ctx> FnCompiler<'ctx> {
             } => {
                 // Resolve `Self` to the enclosing class.
                 let resolved = if class == "Self" {
-                    self.enclosing_class.clone().unwrap_or_else(|| class.clone())
+                    self.enclosing_class
+                        .clone()
+                        .unwrap_or_else(|| class.clone())
                 } else {
                     class.clone()
                 };
                 let sig = self.classes.lookup(&resolved);
-                let field_stride = sig
-                    .map(|s| s.field_stride)
-                    .unwrap_or(4);
-                let vtable_base = self
-                    .vtable_bases
-                    .get(&resolved)
-                    .copied()
-                    .unwrap_or(0);
+                let field_stride = sig.map(|s| s.field_stride).unwrap_or(4);
+                let vtable_base = self.vtable_bases.get(&resolved).copied().unwrap_or(0);
                 // 1. Allocate.
                 instrs.push(AlkInstr::I32Const(field_stride as i32));
                 instrs.push(AlkInstr::Call("__alk_alloc".to_string()));
@@ -1249,7 +1237,9 @@ impl<'ctx> FnCompiler<'ctx> {
             } => {
                 // Resolve `Self` to the enclosing class.
                 let resolved = if class == "Self" {
-                    self.enclosing_class.clone().unwrap_or_else(|| class.clone())
+                    self.enclosing_class
+                        .clone()
+                        .unwrap_or_else(|| class.clone())
                 } else {
                     class.clone()
                 };
@@ -1479,8 +1469,7 @@ pub fn compile_to_wasm_in(
 
     // Compute vtable_bases for each class (cumulative vtable_slot_count of
     // all classes before it in source order).
-    let mut vtable_bases: std::collections::HashMap<String, u32> =
-        std::collections::HashMap::new();
+    let mut vtable_bases: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
     let mut cumulative: u32 = 0;
     for c in &class_decls {
         vtable_bases.insert(c.name.clone(), cumulative);
@@ -2599,26 +2588,23 @@ mod collection_dispatch_tests {
 
     #[test]
     fn wasm_module_has_import_section() {
-        let src = format!(
-            "module M {{ {} fn f() -> i32 {{ return 42; }} }}",
-            SCENE
-        );
+        let src = format!("module M {{ {} fn f() -> i32 {{ return 42; }} }}", SCENE);
         let m = parse_module(&src);
         let wasm = compile_to_wasm(&m).expect("wasm compile");
         assert!(wasm.is_valid_wasm());
         // The binary should contain the "alk" module name for imports.
         let binary_str = String::from_utf8_lossy(&wasm.bytes);
-        assert!(binary_str.contains("alk"), "binary must import from 'alk' module");
+        assert!(
+            binary_str.contains("alk"),
+            "binary must import from 'alk' module"
+        );
     }
 
     #[test]
     fn wasm_module_has_10_host_imports() {
         // After Gap 1, the module has 11 host imports: the 10 `vec_*`
         // collection imports plus `__alk_alloc` for object allocation.
-        let src = format!(
-            "module M {{ {} fn f() -> i32 {{ return 42; }} }}",
-            SCENE
-        );
+        let src = format!("module M {{ {} fn f() -> i32 {{ return 42; }} }}", SCENE);
         let m = parse_module(&src);
         let wasm = compile_to_wasm(&m).expect("wasm compile");
         // Validate with wasmparser and count imports.
@@ -2631,7 +2617,10 @@ mod collection_dispatch_tests {
                 import_count = r.count();
             }
         }
-        assert_eq!(import_count, 11, "must have 11 host imports (10 vec_* + __alk_alloc)");
+        assert_eq!(
+            import_count, 11,
+            "must have 11 host imports (10 vec_* + __alk_alloc)"
+        );
     }
 
     #[test]
@@ -2720,18 +2709,28 @@ mod collection_dispatch_tests {
 
     #[test]
     fn wasm_host_import_names_present() {
-        let src = format!(
-            "module M {{ {} fn f() -> i32 {{ return 42; }} }}",
-            SCENE
-        );
+        let src = format!("module M {{ {} fn f() -> i32 {{ return 42; }} }}", SCENE);
         let m = parse_module(&src);
         let wasm = compile_to_wasm(&m).expect("wasm compile");
         let binary_str = String::from_utf8_lossy(&wasm.bytes);
         // Check that all 10 host import names are present.
-        for name in &["vec_new", "vec_with_capacity", "vec_push", "vec_extend",
-                       "vec_remove", "vec_clear", "vec_len", "vec_is_empty",
-                       "vec_get", "vec_set"] {
-            assert!(binary_str.contains(name), "binary must contain import '{}'", name);
+        for name in &[
+            "vec_new",
+            "vec_with_capacity",
+            "vec_push",
+            "vec_extend",
+            "vec_remove",
+            "vec_clear",
+            "vec_len",
+            "vec_is_empty",
+            "vec_get",
+            "vec_set",
+        ] {
+            assert!(
+                binary_str.contains(name),
+                "binary must contain import '{}'",
+                name
+            );
         }
     }
 

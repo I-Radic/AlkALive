@@ -720,8 +720,8 @@ mod tests {
     fn local_worker_pool_spawn_returns_err_panic() {
         let pool = LocalWorkerPool::new();
         // Annotate the task type so the closure's `Err(...)` arm fixes `T`.
-        let handle: Box<dyn TaskHandle<()>> =
-            pool.spawn(TaskKind::AssetDecode, |_state: SharedState| {
+        let handle: Box<dyn TaskHandle<()>> = pool
+            .spawn(TaskKind::AssetDecode, |_state: SharedState| {
                 Err(TaskError::Panic(Blob::default()))
             });
         match handle.poll(Instant(())) {

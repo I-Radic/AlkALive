@@ -143,7 +143,7 @@ struct Runtime {
 // closure if needed.)
 thread_local! {
     /// The runtime instance. `None` until the renderer finishes initializing.
-    static RUNTIME: RefCell<Option<Runtime>> = RefCell::new(None);
+    static RUNTIME: RefCell<Option<Runtime>> = const { RefCell::new(None) };
 
     /// The `requestAnimationFrame` closure. Stored in thread_local so it
     /// isn't dropped (which would panic when the browser tries to call it).
@@ -156,7 +156,7 @@ thread_local! {
 
     /// The `performance.now()` timestamp (ms) at which the runtime started.
     /// Used to compute frame-rate-independent elapsed time for animation.
-    static START_TIME_MS: RefCell<f64> = RefCell::new(0.0);
+    static START_TIME_MS: RefCell<f64> = const { RefCell::new(0.0) };
 }
 
 /// Returns elapsed time in seconds since the runtime started, using
@@ -236,7 +236,11 @@ impl FrameRenderer for alkalive_backend_wgpu::WgpuRenderer {
         dirty_passes: &[usize],
     ) {
         alkalive_backend_wgpu::WgpuRenderer::render_frame_with_dirty(
-            self, scene, schedule, time, dirty_passes,
+            self,
+            scene,
+            schedule,
+            time,
+            dirty_passes,
         );
     }
 
@@ -283,9 +287,7 @@ impl FrameRenderer for alkalive_backend_wgpu::wgpu_renderer::WgpuBackendRenderer
     }
 
     fn hit_test_input_field(&self, x: f32, y: f32) -> bool {
-        alkalive_backend_wgpu::wgpu_renderer::WgpuBackendRenderer::hit_test_input_field(
-            self, x, y,
-        )
+        alkalive_backend_wgpu::wgpu_renderer::WgpuBackendRenderer::hit_test_input_field(self, x, y)
     }
 }
 
@@ -327,7 +329,9 @@ impl FrameRenderer for ActiveRenderer {
             ActiveRenderer::Wgpu(r) => {
                 r.render_frame_with_dirty(scene, schedule, time, dirty_passes)
             }
-            ActiveRenderer::Glsl(r) => r.render_frame_with_dirty(scene, schedule, time, dirty_passes),
+            ActiveRenderer::Glsl(r) => {
+                r.render_frame_with_dirty(scene, schedule, time, dirty_passes)
+            }
         }
     }
 
@@ -347,7 +351,6 @@ impl FrameRenderer for ActiveRenderer {
         }
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // Public WASM entry point
@@ -392,8 +395,7 @@ pub fn start(
         .unwrap_or(false);
     if cross_origin_isolated {
         web_sys::console::log_1(
-            &"AlkALive: cross-origin isolated (verifying SharedArrayBuffer…)"
-                .into(),
+            &"AlkALive: cross-origin isolated (verifying SharedArrayBuffer…)".into(),
         );
     } else {
         web_sys::console::log_1(
@@ -428,7 +430,7 @@ pub fn start(
     //    by devicePixelRatio gives the physical pixel size for the drawing
     //    buffer.
     let dpr = web_sys::window()
-        .and_then(|w| Some(w.device_pixel_ratio()))
+        .map(|w| w.device_pixel_ratio())
         .unwrap_or(1.0) as f32;
     let css_width = canvas.client_width().max(1) as f32;
     let css_height = canvas.client_height().max(1) as f32;
@@ -492,6 +494,13 @@ pub fn start(
 ///
 /// Acquires the WebGL2 context, stores the runtime in thread-local storage,
 /// sets up input forwarding + resize handling, and starts the frame loop.
+//
+// Eight parameters is deliberate: this is the single internal plumbing point
+// that receives everything `start()` captured from the host page (canvas,
+// IME element, dimensions) plus everything the compiler produced (scene,
+// schedule, dep graph). Splitting it into a struct would obscure the
+// one-to-one mapping with the boot sequence.
+#[allow(clippy::too_many_arguments)]
 async fn init_runtime(
     canvas: web_sys::HtmlCanvasElement,
     ime_input: web_sys::HtmlInputElement,
@@ -599,8 +608,7 @@ async fn select_renderer(
         // wgpu attempt must not poison it for the GLSL fallback.
         use alkalive_backend_wgpu::wgpu_renderer::ProbeOutcome;
 
-        let probe =
-            alkalive_backend_wgpu::wgpu_renderer::WgpuBackendRenderer::is_supported().await;
+        let probe = alkalive_backend_wgpu::wgpu_renderer::WgpuBackendRenderer::is_supported().await;
         if probe != ProbeOutcome::Available {
             // Distinguish "no adapter" from "GPU process stalled" in both
             // the console and the published fallback reason — a stalled
@@ -665,15 +673,14 @@ async fn select_glsl_fallback(
     width: u32,
     height: u32,
 ) -> Result<ActiveRenderer, JsValue> {
-    let glsl = alkalive_backend_wgpu::WgpuRenderer::init_from_canvas(
-        canvas.clone(),
-        width,
-        height,
-    )
-    .await
-    .map_err(|e| {
-        JsValue::from_str(&format!("AlkALive renderer init failed (WebGL2 fallback): {}", e))
-    })?;
+    let glsl = alkalive_backend_wgpu::WgpuRenderer::init_from_canvas(canvas.clone(), width, height)
+        .await
+        .map_err(|e| {
+            JsValue::from_str(&format!(
+                "AlkALive renderer init failed (WebGL2 fallback): {}",
+                e
+            ))
+        })?;
     web_sys::console::log_1(&"AlkALive renderer selected: WebGL2 (GLSL ES 3.00 fallback)".into());
     Ok(ActiveRenderer::Glsl(glsl))
 }

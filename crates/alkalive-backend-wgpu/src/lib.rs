@@ -420,9 +420,9 @@ pub const ATLAS_PAGE_BYTES: usize = (ATLAS_SIZE * ATLAS_SIZE) as usize;
 
 pub mod frame_plan;
 pub mod tessellate;
-pub mod wgsl_shaders;
 #[cfg(feature = "wgpu-backend")]
 pub mod wgpu_renderer;
+pub mod wgsl_shaders;
 
 #[cfg(target_arch = "wasm32")]
 mod wasm {
@@ -1310,8 +1310,8 @@ mod wasm {
             font_size: f32,
         ) -> Result<(), String> {
             use alkalive_text::{
-                FontRegistry, FontRequest, HarfRustFontRegistry,
-                HarfRustGlyphAtlas, HarfRustTextShaper, ShapeContext, TextShaper,
+                FontRegistry, FontRequest, HarfRustFontRegistry, HarfRustGlyphAtlas,
+                HarfRustTextShaper, ShapeContext, TextShaper,
             };
 
             // 1. Initialize or reuse the cached font registry + shaper (M7 fix:

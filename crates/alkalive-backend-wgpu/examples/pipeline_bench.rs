@@ -74,14 +74,15 @@ fn main() {
         "AlkALive pipeline bench — {} iterations ({} warmup), {}x{} canvas",
         ITERATIONS, WARMUP, WIDTH, HEIGHT
     );
-    println!("{:<22} {:>10} {:>10} {:>10}", "stage", "min µs", "median µs", "mean µs");
+    println!(
+        "{:<22} {:>10} {:>10} {:>10}",
+        "stage", "min µs", "median µs", "mean µs"
+    );
 
     // Stage 1: full compiler chain (parse → typecheck → lower → schedule →
     // incremental analysis → e-graph optimization), i.e. ADR-024/025/026.
     // The runtime executes this once at startup.
-    let compile_samples = measure(|| {
-        compile_full(HELLO_ALK).expect("hello.alk must compile")
-    });
+    let compile_samples = measure(|| compile_full(HELLO_ALK).expect("hello.alk must compile"));
     report("compile_full", &compile_samples);
 
     // Build the shared scene/graph inputs once (runtime startup work).
@@ -91,15 +92,15 @@ fn main() {
     let graph = build_render_graph(&scene, (WIDTH, HEIGHT), tess.input_field_bounds);
 
     // Per-frame stages below are executed every RAF tick by the runtime.
-    let graph_samples = measure(|| build_render_graph(&scene, (WIDTH, HEIGHT), (0.0, 0.0, 0.0, 0.0)));
+    let graph_samples =
+        measure(|| build_render_graph(&scene, (WIDTH, HEIGHT), (0.0, 0.0, 0.0, 0.0)));
     report("build_render_graph", &graph_samples);
 
     let plan_samples = measure(|| collect_frame_plan(&graph, WIDTH as f32, HEIGHT as f32, 1.0));
     report("collect_frame_plan", &plan_samples);
 
-    let tess_samples = measure(|| {
-        tessellate_scene(&scene, WIDTH as f32, HEIGHT as f32).expect("tessellate")
-    });
+    let tess_samples =
+        measure(|| tessellate_scene(&scene, WIDTH as f32, HEIGHT as f32).expect("tessellate"));
     report("tessellate_scene", &tess_samples);
 
     // Combined per-frame CPU prep (graph → plan → tessellation): the budget
@@ -107,8 +108,7 @@ fn main() {
     let frame_prep = measure(|| {
         let g = build_render_graph(&scene, (WIDTH, HEIGHT), (0.0, 0.0, 0.0, 0.0));
         let p = collect_frame_plan(&g, WIDTH as f32, HEIGHT as f32, 1.0);
-        let _t =
-            tessellate_scene(&scene, WIDTH as f32, HEIGHT as f32).expect("tessellate");
+        let _t = tessellate_scene(&scene, WIDTH as f32, HEIGHT as f32).expect("tessellate");
         p
     });
     report("frame_prep_total", &frame_prep);

@@ -40,15 +40,17 @@ use wgpu::util::DeviceExt;
 
 // Adapter/device request bounding is browser-only (setTimeout-based).
 #[cfg(target_arch = "wasm32")]
-use std::future::Future;
-#[cfg(target_arch = "wasm32")]
 use futures_util::future::{select, Either};
+#[cfg(target_arch = "wasm32")]
+use std::future::Future;
 
-use alkalive_render::graph::RenderGraph;
-use crate::frame_plan::{collect_frame_plan, FramePlan, PlannedDraw, RectUniformsData, TextUniformsData};
+use crate::frame_plan::{
+    collect_frame_plan, FramePlan, PlannedDraw, RectUniformsData, TextUniformsData,
+};
 use crate::tessellate::{tessellate_scene, SceneTessellation};
 use crate::wgsl_shaders;
 use crate::{Vertex, ATLAS_PAGE_BYTES, ATLAS_SIZE};
+use alkalive_render::graph::RenderGraph;
 
 /// Maximum number of rect-kind and text-kind draw calls schedulable per
 /// frame (the canonical Hello-World graph uses two of each).
@@ -73,13 +75,14 @@ const WEBGPU_REQUEST_TIMEOUT_MS: i32 = 10_000;
 /// timer is simply dropped when the future wins, which is harmless.
 #[cfg(target_arch = "wasm32")]
 async fn with_timeout<F: Future>(fut: F, ms: i32) -> Option<F::Output> {
-    let timer = wasm_bindgen_futures::JsFuture::from(js_sys::Promise::new(&mut |resolve, _reject| {
-        if let Some(win) = web_sys::window() {
-            // No window (non-browser wasm): the timer never fires, making
-            // this a transparent passthrough with no timeout.
-            let _ = win.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms);
-        }
-    }));
+    let timer =
+        wasm_bindgen_futures::JsFuture::from(js_sys::Promise::new(&mut |resolve, _reject| {
+            if let Some(win) = web_sys::window() {
+                // No window (non-browser wasm): the timer never fires, making
+                // this a transparent passthrough with no timeout.
+                let _ = win.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms);
+            }
+        }));
     match select(Box::pin(fut), Box::pin(timer)).await {
         Either::Left((output, _)) => Some(output),
         Either::Right((_, _)) => None,
@@ -214,14 +217,11 @@ pub fn record_frame(
 /// Device-aligned dynamic-offset slot stride for a device.
 pub fn dynamic_slot_stride(device: &wgpu::Device) -> u64 {
     let align = device.limits().min_uniform_buffer_offset_alignment as u64;
-    ((BASE_SLOT_SIZE + align - 1) / align) * align
+    BASE_SLOT_SIZE.div_ceil(align) * align
 }
 
 /// Create the two per-frame uniform ring buffers (`text`, `rect`).
-pub fn create_uniform_rings(
-    device: &wgpu::Device,
-    stride: u64,
-) -> (wgpu::Buffer, wgpu::Buffer) {
+pub fn create_uniform_rings(device: &wgpu::Device, stride: u64) -> (wgpu::Buffer, wgpu::Buffer) {
     let usage = wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST;
     let size = stride * MAX_DYNAMIC_SLOTS as u64;
     let text = device.create_buffer(&wgpu::BufferDescriptor {
@@ -666,51 +666,47 @@ impl WgpuBackendRenderer {
         // are bounded by WEBGPU_REQUEST_TIMEOUT_MS — a stalled GPU process
         // surfaces as a descriptive Err (→ loud fallback) instead of a
         // permanently blank canvas.
-        let adapter =
-            match with_timeout(
-                instance.request_adapter(&wgpu::RequestAdapterOptions {
-                    power_preference: wgpu::PowerPreference::HighPerformance,
-                    compatible_surface: None,
-                    force_fallback_adapter: false,
-                }),
-                WEBGPU_REQUEST_TIMEOUT_MS,
-            )
-            .await
-            {
-                Some(adapter) => {
-                    adapter.ok_or("no compatible GPU adapter (WebGPU unavailable?)")?
-                }
-                None => {
-                    return Err(format!(
-                        "request_adapter did not settle within {WEBGPU_REQUEST_TIMEOUT_MS}ms \
+        let adapter = match with_timeout(
+            instance.request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                compatible_surface: None,
+                force_fallback_adapter: false,
+            }),
+            WEBGPU_REQUEST_TIMEOUT_MS,
+        )
+        .await
+        {
+            Some(adapter) => adapter.ok_or("no compatible GPU adapter (WebGPU unavailable?)")?,
+            None => {
+                return Err(format!(
+                    "request_adapter did not settle within {WEBGPU_REQUEST_TIMEOUT_MS}ms \
                          (GPU process stalled?)"
-                    ))
-                }
-            };
+                ))
+            }
+        };
 
-        let (device, queue) =
-            match with_timeout(
-                adapter.request_device(
-                    &wgpu::DeviceDescriptor {
-                        label: Some("AlkALive GPU Device"),
-                        required_features: wgpu::Features::empty(),
-                        required_limits: wgpu::Limits::downlevel_webgl2_defaults(),
-                        memory_hints: wgpu::MemoryHints::default(),
-                    },
-                    None,
-                ),
-                WEBGPU_REQUEST_TIMEOUT_MS,
-            )
-            .await
-            {
-                Some(result) => result.map_err(|e| format!("request_device failed: {e:?}"))?,
-                None => {
-                    return Err(format!(
-                        "request_device did not settle within {WEBGPU_REQUEST_TIMEOUT_MS}ms \
+        let (device, queue) = match with_timeout(
+            adapter.request_device(
+                &wgpu::DeviceDescriptor {
+                    label: Some("AlkALive GPU Device"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits: wgpu::Limits::downlevel_webgl2_defaults(),
+                    memory_hints: wgpu::MemoryHints::default(),
+                },
+                None,
+            ),
+            WEBGPU_REQUEST_TIMEOUT_MS,
+        )
+        .await
+        {
+            Some(result) => result.map_err(|e| format!("request_device failed: {e:?}"))?,
+            None => {
+                return Err(format!(
+                    "request_device did not settle within {WEBGPU_REQUEST_TIMEOUT_MS}ms \
                          (GPU process stalled?)"
-                    ))
-                }
-            };
+                ))
+            }
+        };
 
         let surface = instance
             .create_surface(wgpu::SurfaceTarget::Canvas(canvas))
@@ -741,7 +737,8 @@ impl WgpuBackendRenderer {
         // Shared GPU resources (same constructors the offscreen GPU test uses,
         // so the browser path and the tested path cannot drift).
         let dynamic_stride = dynamic_slot_stride(&device);
-        let (text_uniform_buffer, rect_uniform_buffer) = create_uniform_rings(&device, dynamic_stride);
+        let (text_uniform_buffer, rect_uniform_buffer) =
+            create_uniform_rings(&device, dynamic_stride);
         let atlas = create_glyph_atlas_resources(&device);
         let (text_pipeline, text_bind_group, rect_pipeline, rect_bind_group, rect_vertex_buffer) =
             create_frame_pipelines(
@@ -831,9 +828,9 @@ impl WgpuBackendRenderer {
         let (input_vertex_start, title_vertex_count, input_vertex_count, field_bounds) =
             match &self.tess {
                 Some(t) => (
-                    t.input_vertex_start as u32,
-                    t.title_vertex_count as u32,
-                    t.input_vertex_count as u32,
+                    t.input_vertex_start,
+                    t.title_vertex_count,
+                    t.input_vertex_count,
                     t.input_field_bounds,
                 ),
                 None => return,
@@ -884,11 +881,11 @@ impl WgpuBackendRenderer {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
-        let mut encoder = self.device.create_command_encoder(
-            &wgpu::CommandEncoderDescriptor {
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("AlkALive frame encoder"),
-            },
-        );
+            });
 
         record_frame(
             &mut encoder,
@@ -928,11 +925,13 @@ impl WgpuBackendRenderer {
         upload_atlas_page(&self.queue, &self.glyph_texture, &t.atlas_page)?;
 
         if !t.vertices.is_empty() {
-            let buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("text vertices"),
-                contents: bytemuck::cast_slice(&t.vertices),
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            });
+            let buf = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("text vertices"),
+                    contents: bytemuck::cast_slice(&t.vertices),
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                });
             self.text_vertex_buffer = Some(buf);
         }
 

@@ -808,7 +808,9 @@ impl LayoutSolver for CassowarySolver {
         // are considered, so out-of-scope modules are neither solved nor
         // rejected.
         for (idx, slot) in self.constraints.iter().enumerate() {
-            let Some(c) = slot else { continue; };
+            let Some(c) = slot else {
+                continue;
+            };
             if !in_scope(c.module) {
                 continue;
             }

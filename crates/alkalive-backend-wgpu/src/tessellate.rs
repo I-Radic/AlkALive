@@ -233,7 +233,10 @@ mod tests {
     fn tessellates_nonempty_geometry_for_hello_world() {
         let t = tessellate_scene(&hello_scene(), 800.0, 600.0).expect("tessellate ok");
         assert!(t.title_vertex_count > 0, "title must produce vertices");
-        assert!(t.input_vertex_count > 0, "placeholder must produce vertices");
+        assert!(
+            t.input_vertex_count > 0,
+            "placeholder must produce vertices"
+        );
         assert_eq!(
             t.total_vertex_count() as usize,
             t.vertices.len(),

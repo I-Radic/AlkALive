@@ -169,8 +169,9 @@ impl Parser {
             match self.peek().kind {
                 TokenKind::RBrace => {
                     if !attrs.is_empty() || visibility != Visibility::Priv {
-                        return Err(self
-                            .unexpected_msg("trailing attributes / visibility with no following declaration"));
+                        return Err(self.unexpected_msg(
+                            "trailing attributes / visibility with no following declaration",
+                        ));
                     }
                     self.advance();
                     break;
@@ -214,7 +215,9 @@ impl Parser {
                     return Err(self.unexpected("closing `}`"));
                 }
                 _ => {
-                    return Err(self.unexpected("`scene`, `fn`, `let`, `class`, `import`, or closing `}`"));
+                    return Err(
+                        self.unexpected("`scene`, `fn`, `let`, `class`, `import`, or closing `}`")
+                    );
                 }
             }
         }
@@ -247,7 +250,8 @@ impl Parser {
             let name = name_tok.value.clone();
             self.skip_newlines();
             // Check for 'as Alias'
-            let alias = if matches!(self.peek().kind, TokenKind::Ident) && self.peek().value == "as" {
+            let alias = if matches!(self.peek().kind, TokenKind::Ident) && self.peek().value == "as"
+            {
                 self.advance();
                 self.skip_newlines();
                 let alias_tok = self.expect_any_ident()?;
@@ -593,8 +597,7 @@ impl Parser {
         // unrestricted, apply the leading qualifier. (If both are present,
         // the explicit type qualifier wins — this matches the
         // attribute-vs-qualifier precedence in `effective_qualifier`.)
-        if leading_qualifier != Qualifier::Unrestricted && ty.qualifier == Qualifier::Unrestricted
-        {
+        if leading_qualifier != Qualifier::Unrestricted && ty.qualifier == Qualifier::Unrestricted {
             ty.qualifier = leading_qualifier;
         }
         self.expect(TokenKind::Semi)?;
@@ -929,9 +932,9 @@ impl Parser {
                         col: tok.col,
                     }
                 } else {
-                    return Err(self.unexpected(
-                        "`::` (static call) or `{` (object literal) after `Self`",
-                    ));
+                    return Err(
+                        self.unexpected("`::` (static call) or `{` (object literal) after `Self`")
+                    );
                 }
             }
             TokenKind::Ident | TokenKind::Vec => {
@@ -1023,9 +1026,7 @@ impl Parser {
     /// Parse `{ f1: e1, f2: e2, ... }` (the body of an object literal).
     /// The leading `{` must be the current token. Returns the field-init
     /// tuples in source order.
-    fn parse_object_literal_body(
-        &mut self,
-    ) -> Result<Vec<(String, Expr, u32, u32)>, ParseError> {
+    fn parse_object_literal_body(&mut self) -> Result<Vec<(String, Expr, u32, u32)>, ParseError> {
         self.expect(TokenKind::LBrace)?;
         self.skip_newlines();
         let mut fields = Vec::new();

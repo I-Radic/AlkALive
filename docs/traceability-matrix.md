@@ -9,7 +9,7 @@
 
 | Metric | Value |
 |--------|-------|
-| Total tests | 1,053 (up from 820 baseline) |
+| Total tests | 1,104 (1053 at matrix creation; 1104 after wave-1..5 CI fixes: resize-clamp regression tests included) |
 | New tests added | 233 |
 | New modules created | 5 (`schedule.rs`, `incremental.rs`, `egraph.rs`, `lints/mod.rs`, `lints/monotonicity.rs`) |
 | New runtime modules | 1 (`signal_store.rs`) |
@@ -141,7 +141,7 @@
 - **Native build:** ✅ `cargo check --workspace` — clean
 - **WASM32 build:** ✅ `cargo check -p alkalive-runtime-wasm --target wasm32-unknown-unknown` — clean
 - **wasm-pack build:** ✅ `wasm-pack build --target web --release` — successful
-- **Test suite:** ✅ 1,053 tests pass, 0 failures
+- **Test suite:** ✅ 1,053 tests pass, 0 failures (at matrix creation 2026-08-12; current HEAD: 1,104 pass, 0 failures — re-verified during the 2026-08-27 conformance audit)
 - **Existing functionality:** ✅ No regressions (820 baseline → 1,053 total)
 - **`#![forbid(unsafe_code)]`:** ✅ Preserved in compiler crate
 - **ADR-018 compliance:** ✅ No new external dependencies

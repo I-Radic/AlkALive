@@ -133,12 +133,8 @@ impl ModuleResolver {
             if path.starts_with("std/") {
                 // Insert an empty resolved module so we don't keep trying.
                 let empty_sigs = FnSigTable::new();
-                self.cache.insert(
-                    path.to_string(),
-                    ResolvedModule {
-                        sigs: empty_sigs,
-                    },
-                );
+                self.cache
+                    .insert(path.to_string(), ResolvedModule { sigs: empty_sigs });
                 return Ok(self.cache.get(path).unwrap());
             }
             return Err(ResolveError {
@@ -188,12 +184,7 @@ impl ModuleResolver {
         let _ = nested_resolver.resolve_imports(&decl, &mut sigs);
         self.cache = std::mem::take(&mut nested_resolver.cache);
 
-        self.cache.insert(
-            path.to_string(),
-            ResolvedModule {
-                sigs,
-            },
-        );
+        self.cache.insert(path.to_string(), ResolvedModule { sigs });
         Ok(self.cache.get(path).unwrap())
     }
 }

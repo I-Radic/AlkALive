@@ -394,9 +394,10 @@ fn lerp_color(a: Color, b: Color, t: f32) -> Color {
 #[inline]
 fn interpolate_linear(a: &StyleProperty, b: &StyleProperty, t: f32) -> StyleProperty {
     match (a, b) {
-        (StyleProperty::Scalar(ScalarValue::Color(ca)), StyleProperty::Scalar(ScalarValue::Color(cb))) => {
-            StyleProperty::Scalar(ScalarValue::Color(lerp_color(*ca, *cb, t)))
-        }
+        (
+            StyleProperty::Scalar(ScalarValue::Color(ca)),
+            StyleProperty::Scalar(ScalarValue::Color(cb)),
+        ) => StyleProperty::Scalar(ScalarValue::Color(lerp_color(*ca, *cb, t))),
         (
             StyleProperty::Scalar(ScalarValue::Opacity(oa)),
             StyleProperty::Scalar(ScalarValue::Opacity(ob)),
@@ -404,9 +405,7 @@ fn interpolate_linear(a: &StyleProperty, b: &StyleProperty, t: f32) -> StyleProp
         (
             StyleProperty::Scalar(ScalarValue::LineWidth(la)),
             StyleProperty::Scalar(ScalarValue::LineWidth(lb)),
-        ) => StyleProperty::Scalar(ScalarValue::LineWidth(LineWidth(lerp_f32(
-            la.0, lb.0, t,
-        )))),
+        ) => StyleProperty::Scalar(ScalarValue::LineWidth(LineWidth(lerp_f32(la.0, lb.0, t)))),
         (StyleProperty::Transform(ma), StyleProperty::Transform(mb)) => {
             let mut out = [0.0f32; 16];
             for (out_slot, (a_elem, b_elem)) in out.iter_mut().zip(ma.0.iter().zip(mb.0.iter())) {
@@ -825,7 +824,11 @@ mod tests {
         let mut anim = make_animation(Duration::from_millis(100));
         anim.state = AnimationState::Idle;
         anim.tick(Duration::from_millis(50)).unwrap();
-        assert_eq!(anim.elapsed, Duration::ZERO, "Idle must not advance the clock");
+        assert_eq!(
+            anim.elapsed,
+            Duration::ZERO,
+            "Idle must not advance the clock"
+        );
         assert_eq!(anim.state, AnimationState::Idle, "Idle must remain Idle");
     }
 
@@ -925,11 +928,8 @@ mod tests {
     /// still be black (Gap #6).
     #[test]
     fn animation_tick_step_interpolation_holds_first_keyframe() {
-        let mut anim = make_color_animation(
-            Color(0x0000_0000),
-            Color(0xFFFF_FFFF),
-            Interpolation::Step,
-        );
+        let mut anim =
+            make_color_animation(Color(0x0000_0000), Color(0xFFFF_FFFF), Interpolation::Step);
         // Tick to the midpoint (50ms of a 100ms duration → t = 0.5). Under
         // Step interpolation, `kf_a.value` (black) must be held — the
         // second keyframe is only reached at t == 1.0.
@@ -937,7 +937,9 @@ mod tests {
         assert_eq!(anim.state, AnimationState::Running);
         assert_eq!(
             anim.current_value,
-            Some(StyleProperty::Scalar(ScalarValue::Color(Color(0x0000_0000)))),
+            Some(StyleProperty::Scalar(ScalarValue::Color(Color(
+                0x0000_0000
+            )))),
             "Step interpolation must hold kf_a.value until the next keyframe"
         );
     }

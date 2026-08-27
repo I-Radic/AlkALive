@@ -21,7 +21,7 @@
 pub use alkalive_core::ModuleId;
 
 use core::sync::atomic::{AtomicU64, Ordering};
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 
 // ============================================================================
 // Sub-enums (§13.1 / §13.2)
@@ -667,9 +667,7 @@ pub struct FullReloadRecovery;
 
 impl RecoveryStrategy for FullReloadRecovery {
     fn category(&self) -> AlkALiveError {
-        AlkALiveError::ModuleLifecycle(LifecycleError::RehydrateSchemaMismatch(
-            String::new(),
-        ))
+        AlkALiveError::ModuleLifecycle(LifecycleError::RehydrateSchemaMismatch(String::new()))
     }
 
     fn recover(&mut self, _ctx: RecoveryContext) -> RecoveryOutcome {
@@ -795,8 +793,7 @@ mod tests {
         // slot id and the default rect / span sentinels.
         let mut boundary = TrappingBoundary;
         let slot = SlotId(3);
-        let result: Result<i32, Failure> =
-            boundary.trap(|| panic!("boom"), slot);
+        let result: Result<i32, Failure> = boundary.trap(|| panic!("boom"), slot);
         let failure = result.unwrap_err();
         assert_eq!(failure.slot, slot);
         assert_eq!(failure.rect, DirtyRect::default());
@@ -976,9 +973,7 @@ mod tests {
             AlkALiveError::ModuleLifecycle(LifecycleError::RehydrateSchemaMismatch(detail)) => {
                 assert!(detail.is_empty(), "expected empty detail, got {detail:?}");
             }
-            other => panic!(
-                "expected ModuleLifecycle(RehydrateSchemaMismatch(_)), got {other:?}"
-            ),
+            other => panic!("expected ModuleLifecycle(RehydrateSchemaMismatch(_)), got {other:?}"),
         }
     }
 

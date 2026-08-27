@@ -1211,7 +1211,7 @@ mod tests {
         let _ = pool.reserve(128).unwrap();
         let _ = pool.reserve(128).unwrap();
         let _ = pool.reserve(128).unwrap(); // 512 used
-        // Request 384 bytes freed: needs 3 × 128-byte entries.
+                                            // Request 384 bytes freed: needs 3 × 128-byte entries.
         let stats = pool.evict_lru(384);
         assert_eq!(stats.evicted_bytes, 384);
         assert_eq!(stats.evicted_entries, 3);
@@ -1240,7 +1240,9 @@ mod tests {
         let stats = pool.evict_lru(512);
         assert_eq!(stats.evicted_bytes, 512);
         assert_eq!(stats.evicted_entries, 1);
-        let r = pool.reserve(512).expect("reserve should succeed after eviction");
+        let r = pool
+            .reserve(512)
+            .expect("reserve should succeed after eviction");
         assert_eq!(r.len, 512);
         assert_eq!(pool.used_bytes(), 1024);
     }
@@ -1302,11 +1304,16 @@ mod tests {
         let _ = pool.reserve(512).unwrap();
         let _ = pool.reserve(512).unwrap();
         assert_eq!(pool.used_bytes(), 1024);
-        assert_eq!(pool.reserve(1).unwrap_err(), BudgetBreach::PipelineCacheFull);
+        assert_eq!(
+            pool.reserve(1).unwrap_err(),
+            BudgetBreach::PipelineCacheFull
+        );
         let stats = pool.evict_lru(512);
         assert_eq!(stats.evicted_bytes, 512);
         assert_eq!(stats.evicted_entries, 1);
-        let _ = pool.reserve(512).expect("reserve should succeed after eviction");
+        let _ = pool
+            .reserve(512)
+            .expect("reserve should succeed after eviction");
     }
 
     // ---- AttachmentPool: rejects at cap (Reject → AttachmentPoolEmpty) --

@@ -169,14 +169,9 @@ fn collect_signatures(module: &ModuleDecl, table: &mut FnSigTable) {
 /// Collect all class signatures into the `ClassTable` (Gap 1 — pass 1.5).
 /// Detects cycles, computes `field_stride` and `vtable_slot_count`, and
 /// verifies that base classes exist.
-fn collect_classes(
-    module: &ModuleDecl,
-    classes: &mut ClassTable,
-    errors: &mut TypeErrorSet,
-) {
+fn collect_classes(module: &ModuleDecl, classes: &mut ClassTable, errors: &mut TypeErrorSet) {
     // Pass 1: insert all class signatures (without computing strides yet).
-    let mut seen_names: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
+    let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
     for item in &module.items {
         if let ItemDecl::Class(c) = item {
             if !seen_names.insert(c.name.clone()) {
@@ -225,10 +220,7 @@ fn collect_classes(
                     })
                     .unwrap_or((line, col));
                 errors.push(TypeError {
-                    message: format!(
-                        "cyclic inheritance: {}",
-                        cycle.join(" : ")
-                    ),
+                    message: format!("cyclic inheritance: {}", cycle.join(" : ")),
                     line,
                     col,
                 });
@@ -247,7 +239,10 @@ fn collect_classes(
                         })
                         .unwrap_or((0, 0));
                     errors.push(TypeError {
-                        message: format!("unknown class `{}` (referenced as base of `{}`)", base, name),
+                        message: format!(
+                            "unknown class `{}` (referenced as base of `{}`)",
+                            base, name
+                        ),
                         line,
                         col,
                     });
@@ -283,15 +278,11 @@ fn check_class(
     errors: &mut TypeErrorSet,
 ) {
     // 1. Duplicate field check.
-    let mut seen_fields: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
+    let mut seen_fields: std::collections::HashSet<String> = std::collections::HashSet::new();
     for f in &c.fields {
         if !seen_fields.insert(f.name.clone()) {
             errors.push(TypeError {
-                message: format!(
-                    "field `{}` already declared in class `{}`",
-                    f.name, c.name
-                ),
+                message: format!("field `{}` already declared in class `{}`", f.name, c.name),
                 line: f.line,
                 col: f.col,
             });
@@ -303,10 +294,7 @@ fn check_class(
     for m in &c.methods {
         if let Some(_existing) = method_names.get(&m.name) {
             errors.push(TypeError {
-                message: format!(
-                    "method `{}` already declared in class `{}`",
-                    m.name, c.name
-                ),
+                message: format!("method `{}` already declared in class `{}`", m.name, c.name),
                 line: m.line,
                 col: m.col,
             });
@@ -359,10 +347,7 @@ fn check_class(
             };
             if !ok {
                 errors.push(TypeError {
-                    message: format!(
-                        "constructor `new` in `{}` must return `Self`",
-                        c.name
-                    ),
+                    message: format!("constructor `new` in `{}` must return `Self`", c.name),
                     line: m.line,
                     col: m.col,
                 });
@@ -392,7 +377,14 @@ fn check_class(
         for p in &m.params {
             env.insert(p.name.clone(), p.ty.clone());
         }
-        check_block(&m.body, &mut env, m.return_type.as_ref(), sigs, classes, errors);
+        check_block(
+            &m.body,
+            &mut env,
+            m.return_type.as_ref(),
+            sigs,
+            classes,
+            errors,
+        );
     }
 }
 
@@ -582,15 +574,10 @@ fn find_field_in_chain<'a>(
     None
 }
 
-
 /// Returns `true` iff `sub <: super_` for full types, consulting the
 /// `ClassTable` for class subtyping (a derived class is a subtype of any of
 /// its ancestors).
-pub fn type_is_subtype_with_classes(
-    sub: &Type,
-    super_: &Type,
-    classes: &ClassTable,
-) -> bool {
+pub fn type_is_subtype_with_classes(sub: &Type, super_: &Type, classes: &ClassTable) -> bool {
     match (&sub.base, &super_.base) {
         (BaseType::I32, BaseType::I32)
         | (BaseType::F32, BaseType::F32)
@@ -889,7 +876,14 @@ fn check_fn(
     for p in &f.params {
         env.insert(p.name.clone(), p.ty.clone());
     }
-    check_block(&f.body, &mut env, f.return_type.as_ref(), sigs, classes, errors);
+    check_block(
+        &f.body,
+        &mut env,
+        f.return_type.as_ref(),
+        sigs,
+        classes,
+        errors,
+    );
 }
 
 /// Type-check a block of statements. The environment is extended with local
@@ -993,9 +987,8 @@ fn check_block(
                     } => (receiver.as_ref(), field, *line, *col),
                     _ => {
                         errors.push(TypeError {
-                            message:
-                                "assignment target must be a field access (`obj.field`)"
-                                    .to_string(),
+                            message: "assignment target must be a field access (`obj.field`)"
+                                .to_string(),
                             line: *line,
                             col: *col,
                         });
@@ -1170,15 +1163,7 @@ fn check_expr(
                 }) => {
                     // Class method dispatch (Gap 1). Walk the base chain
                     // looking for `Class::method` in `sigs`.
-                    class_method_return_type(
-                        class_name,
-                        method,
-                        *line,
-                        *col,
-                        sigs,
-                        classes,
-                        errors,
-                    )
+                    class_method_return_type(class_name, method, *line, *col, sigs, classes, errors)
                 }
                 Some(other) => {
                     errors.push(TypeError {
@@ -1293,10 +1278,7 @@ fn check_expr(
                     Some((field_decl, _defining_class)) => Some(field_decl.ty.clone()),
                     None => {
                         errors.push(TypeError {
-                            message: format!(
-                                "class `{}` has no field `{}`",
-                                class_name, field
-                            ),
+                            message: format!("class `{}` has no field `{}`", class_name, field),
                             line: *line,
                             col: *col,
                         });
@@ -1482,10 +1464,7 @@ fn check_expr(
                 }
                 None => {
                     errors.push(TypeError {
-                        message: format!(
-                            "unknown static method `{}::{}`",
-                            resolved_class, method
-                        ),
+                        message: format!("unknown static method `{}::{}`", resolved_class, method),
                         line: *line,
                         col: *col,
                     });
@@ -1520,15 +1499,9 @@ fn class_method_return_type(
     // Walk the base chain.
     if let Some(class_sig) = classes.lookup(class_name) {
         if let Some(base) = &class_sig.base {
-            if let Some(rt) = class_method_return_type(
-                base,
-                method,
-                line,
-                col,
-                sigs,
-                classes,
-                errors,
-            ) {
+            if let Some(rt) =
+                class_method_return_type(base, method, line, col, sigs, classes, errors)
+            {
                 // Self-substitution: if the inherited method's return type
                 // is `Named(base)`, rewrite to `Named(class_name)` so the
                 // caller perceives the returned object as its own class.
@@ -2114,7 +2087,7 @@ mod type_inference_tests {
             SCENE
         );
         let errors = check(&src);
-        assert!(errors.len() >= 1);
+        assert!(!errors.is_empty());
         assert!(errors.errors[0]
             .message
             .contains("argument 1 to `id` has type `bool` but parameter has type `i32`"));
@@ -2279,12 +2252,9 @@ mod oo_tests {
     // LANG-1T-08: cyclic inheritance detected.
     #[test]
     fn lang_1t_08_cyclic_inheritance_errors() {
-        let src = format!(
-            "module M {{ {} class A : B {{}} class B : A {{}} }}",
-            SCENE
-        );
+        let src = format!("module M {{ {} class A : B {{}} class B : A {{}} }}", SCENE);
         let errors = check(&src);
-        assert!(errors.len() >= 1, "should report cycle: {}", errors);
+        assert!(!errors.is_empty(), "should report cycle: {}", errors);
         assert!(
             errors.errors[0].message.contains("cyclic inheritance"),
             "got: {}",
@@ -2295,10 +2265,7 @@ mod oo_tests {
     // LANG-1T-09: `Self` outside a class body errors.
     #[test]
     fn lang_1t_09_self_outside_class_errors() {
-        let src = format!(
-            "module M {{ {} fn f() {{ let x: Self = 0; }} }}",
-            SCENE
-        );
+        let src = format!("module M {{ {} fn f() {{ let x: Self = 0; }} }}", SCENE);
         // Note: `Self` as a type in a non-class function should error.
         // We accept it parses, but typechecking should catch misuse.
         // Since `Self` resolves to `Named("Self")`, and there's no class
@@ -2311,12 +2278,13 @@ mod oo_tests {
     // LANG-1T-10: `self` outside an instance method errors.
     #[test]
     fn lang_1t_10_self_outside_method_errors() {
-        let src = format!(
-            "module M {{ {} fn f() {{ let x: i32 = self; }} }}",
-            SCENE
-        );
+        let src = format!("module M {{ {} fn f() {{ let x: i32 = self; }} }}", SCENE);
         let errors = check(&src);
-        assert!(errors.len() >= 1, "should report `self` outside method: {}", errors);
+        assert!(
+            !errors.is_empty(),
+            "should report `self` outside method: {}",
+            errors
+        );
         assert!(
             errors.errors[0].message.contains("`self` is not available"),
             "got: {}",
@@ -2332,9 +2300,14 @@ mod oo_tests {
             SCENE
         );
         let errors = check(&src);
-        assert!(errors.len() >= 1, "should report monotone assignment: {}", errors);
         assert!(
-            errors.errors[0].message.contains("monotone") && errors.errors[0].message.contains("forbidden"),
+            !errors.is_empty(),
+            "should report monotone assignment: {}",
+            errors
+        );
+        assert!(
+            errors.errors[0].message.contains("monotone")
+                && errors.errors[0].message.contains("forbidden"),
             "got: {}",
             errors.errors[0].message
         );
@@ -2383,7 +2356,7 @@ mod oo_tests {
             SCENE
         );
         let errors = check(&src);
-        assert!(errors.len() >= 1, "downcast should error: {}", errors);
+        assert!(!errors.is_empty(), "downcast should error: {}", errors);
     }
 
     // LANG-1T-19: `new` returning non-Self errors.
@@ -2394,7 +2367,7 @@ mod oo_tests {
             SCENE
         );
         let errors = check(&src);
-        assert!(errors.len() >= 1, "got: {}", errors);
+        assert!(!errors.is_empty(), "got: {}", errors);
         assert!(
             errors.errors[0].message.contains("must return `Self`"),
             "got: {}",
@@ -2410,7 +2383,7 @@ mod oo_tests {
             SCENE
         );
         let errors = check(&src);
-        assert!(errors.len() >= 1, "got: {}", errors);
+        assert!(!errors.is_empty(), "got: {}", errors);
         assert!(
             errors.errors[0].message.contains("must be a static method"),
             "got: {}",
@@ -2437,7 +2410,7 @@ mod oo_tests {
             SCENE
         );
         let errors = check(&src);
-        assert!(errors.len() >= 1, "got: {}", errors);
+        assert!(!errors.is_empty(), "got: {}", errors);
         assert!(
             errors.errors[0].message.contains("cannot override"),
             "got: {}",
@@ -2453,7 +2426,7 @@ mod oo_tests {
             SCENE
         );
         let errors = check(&src);
-        assert!(errors.len() >= 1, "got: {}", errors);
+        assert!(!errors.is_empty(), "got: {}", errors);
         assert!(
             errors.errors[0].message.contains("already declared"),
             "got: {}",
@@ -2464,12 +2437,9 @@ mod oo_tests {
     // Unknown class referenced as base errors.
     #[test]
     fn oo_unknown_base_class_errors() {
-        let src = format!(
-            "module M {{ {} class C : Nonexistent {{}} }}",
-            SCENE
-        );
+        let src = format!("module M {{ {} class C : Nonexistent {{}} }}", SCENE);
         let errors = check(&src);
-        assert!(errors.len() >= 1, "got: {}", errors);
+        assert!(!errors.is_empty(), "got: {}", errors);
     }
 
     // Field access type-checks.
@@ -2521,8 +2491,15 @@ mod module_system_tests {
         // The imported function should resolve (no "unknown function" error).
         // It may have a return type mismatch (None vs i32) but that's acceptable
         // because we don't know the imported function's return type.
-        let has_unknown = errors.errors.iter().any(|e| e.message.contains("call to unknown function"));
-        assert!(!has_unknown, "imported function should resolve, got: {}", errors);
+        let has_unknown = errors
+            .errors
+            .iter()
+            .any(|e| e.message.contains("call to unknown function"));
+        assert!(
+            !has_unknown,
+            "imported function should resolve, got: {}",
+            errors
+        );
     }
 
     #[test]
@@ -2536,8 +2513,15 @@ mod module_system_tests {
             SCENE
         );
         let errors = check(&src);
-        let has_unknown = errors.errors.iter().any(|e| e.message.contains("call to unknown function"));
-        assert!(!has_unknown, "aliased import should resolve, got: {}", errors);
+        let has_unknown = errors
+            .errors
+            .iter()
+            .any(|e| e.message.contains("call to unknown function"));
+        assert!(
+            !has_unknown,
+            "aliased import should resolve, got: {}",
+            errors
+        );
     }
 
     #[test]
@@ -2551,8 +2535,15 @@ mod module_system_tests {
             SCENE
         );
         let errors = check(&src);
-        let has_unknown = errors.errors.iter().any(|e| e.message.contains("call to unknown function"));
-        assert!(!has_unknown, "both imported names should resolve, got: {}", errors);
+        let has_unknown = errors
+            .errors
+            .iter()
+            .any(|e| e.message.contains("call to unknown function"));
+        assert!(
+            !has_unknown,
+            "both imported names should resolve, got: {}",
+            errors
+        );
     }
 
     #[test]
@@ -2569,7 +2560,11 @@ mod module_system_tests {
             SCENE
         );
         let errors = check(&src);
-        assert!(errors.is_empty(), "local functions should still work, got: {}", errors);
+        assert!(
+            errors.is_empty(),
+            "local functions should still work, got: {}",
+            errors
+        );
     }
 
     #[test]

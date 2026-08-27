@@ -625,7 +625,6 @@ impl fmt::Display for Type {
     }
 }
 
-
 /// A module import declaration (Gap 2 — Module System).
 ///
 /// ```text
