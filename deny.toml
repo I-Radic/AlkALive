@@ -1,16 +1,32 @@
 # cargo-deny configuration — enforces ADR 018 (capability-scoped imports)
-# No external registry deps by default: the 13 workspace crates are
+# No external registry deps by default: the internal workspace crates are
 # auto-allowed, every other crate is denied unless explicitly allowlisted.
 #
 # Validated against cargo-deny 0.20.2 (the `version` keys under `[bans]` and
 # `[sources]` were removed in this release, so they are omitted here).
+#
+# Policy interpretation (ADR-018 "5-crate external dependency policy"):
+# the DIRECT external dependencies of AlkALive's own crates are the
+# policy surface; each direct dep drags its own sanctioned transitive
+# closure behind it. The direct set is:
+#   wgpu, wasm-bindgen(+futures), js-sys, web-sys, bytemuck, futures-util,
+#   wasm-encoder, read-fonts (grandfathered per ADR-022), serde_json
+#   (CLI binary only, gated behind the `cli` feature — never in the WASM
+#   runtime path), plus dev-only wasmparser/naga/pollster.
+# Every other entry below is a transitive of that sanctioned set.
 
 [advisories]
 version = 2
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
-ignore = []
+ignore = [
+    # `paste` is unmaintained (RUSTSEC-2024-0436). It is a transitive of
+    # objc via wgpu-hal's Apple backend (macOS targets only; never compiled
+    # into the Linux/CI or wasm32 builds). No soundness issues are known;
+    # re-evaluate on the next wgpu upgrade.
+    "RUSTSEC-2024-0436",
+]
 
 [licenses]
 version = 2
@@ -18,28 +34,41 @@ allow = [
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
     "MIT",
-    "MIT-0",
-    "BSD-2-Clause",
-    "BSD-3-Clause",
     "ISC",
-    "Unicode-DFS-2016",
     "Zlib",
+    # CC0-1.0 — hexf-parse (naga transitive, wgpu stack)
+    "CC0-1.0",
+    # Unicode-3.0 — unicode-ident >= 1.0.24 (proc-macro2 transitive)
+    "Unicode-3.0",
 ]
 confidence-threshold = 0.8
 
 [bans]
 # ADR 018: no external registry deps by default.
 #
-# `allow-workspace = true` auto-allows the 13 internal workspace crates.
+# `allow-workspace = true` auto-allows the 17 internal alkalive-* crates
+# plus the 2 vendored workspace members (harfrust, rasterizer).
 # cargo-deny 0.20.2 activates the deny-by-default whitelist only when the
 # `allow` list is non-empty, so a single internal entry (`alkalive-core`)
 # is listed purely to activate whitelist mode — it permits no external
 # dependency. Every external crate is therefore denied unless explicitly
 # listed in `allow`.
 #
-# When an external dep becomes genuinely required (e.g. the WebGPU binding
-# `wgpu`/`web-sys` in W5-T5), add it AND its transitive deps to `allow`.
+# Adding a NEW external crate (direct or transitive) requires updating
+# this list — that review step is the ADR-018 amendment gate.
 multiple-versions = "deny"
+# Known duplicate versions, all forced by the wgpu 24 stack's own pinned
+# requirements (naga/gpu-alloc still require bitflags 1.x; wgpu-core pulls
+# thiserror 1.x; bytemuck_derive uses syn 3 while others use syn 2; the
+# android backend spans jni-sys 0.3/0.4; indexmap/gpu-descriptor span
+# hashbrown 0.15/0.17). Upgrading wgpu is the lever that removes these.
+skip = [
+    { name = "bitflags", version = "1.3.2" },      # naga 24 / gpu-alloc (vs 2.13.1)
+    { name = "hashbrown", version = "0.15.5" },    # indexmap (vs 0.17.1 via gpu-descriptor)
+    { name = "syn", version = "2.0.119" },         # most proc-macros (vs 3.0.4 via bytemuck_derive)
+    { name = "thiserror", version = "1.0.69" },    # wgpu-core/hal (vs 2.0.20 via naga)
+    { name = "thiserror-impl", version = "1.0.69" },
+]
 # `wildcards = "deny"` is the intended setting (ADR 018), but cargo-deny
 # 0.20.2 flags the workspace's internal `workspace = true` / `path`
 # dependencies as wildcard dependencies, and `allow-wildcard-paths` cannot
@@ -52,24 +81,156 @@ allow-wildcard-paths = true
 allow-workspace = true
 allow = [
     { name = "alkalive-core" },  # internal; activates whitelist mode
-    # HarfRust (vendored under vendor/harfrust/) transitive dependencies.
-    # These are the sole external registry deps allowed, required by the
-    # vendored HarfRust text shaping library (ADR 022).
-    { name = "harfrust" },           # vendored (workspace member)
-    { name = "read-fonts" },         # harfrust dep: OpenType font reading
-    { name = "font-types" },         # read-fonts dep: font type definitions
-    { name = "bitflags" },           # harfrust dep: bitflag macros
-    { name = "bytemuck" },           # harfrust dep: byte casting
-    { name = "bytemuck_derive" },    # bytemuck proc-macro
-    { name = "smallvec" },           # harfrust dep: small vector optimization
-    { name = "core_maths" },         # harfrust optional dep: libm for no_std
-    { name = "icu_properties" },     # harfrust optional dep: ICU properties
-    { name = "icu_normalizer" },     # harfrust optional dep: ICU normalizer
+
+    # ---- Direct, policy-sanctioned external dependencies ----------------
+    { name = "wgpu" },               # WebGPU/WebGL2 backend (ADR-001)
+    { name = "wasm-bindgen" },       # browser bindings
+    { name = "wasm-bindgen-futures" },# async bridge for wgpu
+    { name = "js-sys" },             # JS interop types
+    { name = "web-sys" },            # DOM/canvas/GPU API bindings
+    { name = "bytemuck" },           # POD casting for GPU buffers
+    { name = "futures-util" },       # async select for the WebGPU probe timeout
+    { name = "wasm-encoder" },       # ADR-008 WASM codegen backend
+    { name = "read-fonts" },         # harfrust dep, grandfathered per ADR-022
+    { name = "serde_json" },         # CLI binary only (`cli` feature; host-side)
+    # dev-only: compiler tests (wasmparser), backend tests (naga, pollster)
+    { name = "wasmparser" },
+    { name = "naga" },
+    { name = "pollster" },
+
+    # ---- wasm-bindgen toolchain ------------------------------------------
+    { name = "wasm-bindgen-macro" },
+    { name = "wasm-bindgen-macro-support" },
+    { name = "wasm-bindgen-shared" },
+    { name = "bumpalo" },            # wasm-bindgen arena
+    { name = "leb128fmt" },          # wasm-encoder dep
+    { name = "cfg-if" },             # common cfg dispatch util
+
+    # ---- wgpu core family (cross-platform) -------------------------------
+    { name = "wgpu-core" },
+    { name = "wgpu-hal" },
+    { name = "wgpu-types" },
+    { name = "arrayvec" },           # wgpu-hal
+    { name = "bitflags" },           # wgpu-types/harfrust
+    { name = "codespan-reporting" }, # naga
+    { name = "document-features" },  # wgpu
+    { name = "equivalent" },         # indexmap/hashbrown
+    { name = "foldhash" },           # hashbrown 0.17
+    { name = "gpu-descriptor" },     # wgpu-core
+    { name = "gpu-descriptor-types" },
+    { name = "hashbrown" },          # indexmap/gpu-descriptor
+    { name = "hexf-parse" },         # naga float parsing
+    { name = "indexmap" },           # wgpu-core
+    { name = "lock_api" },           # parking_lot
+    { name = "log" },                # wgpu logging facade
+    { name = "num-traits" },         # ordered-float
+    { name = "ordered-float" },      # naga
+    { name = "parking_lot" },        # wgpu-core
+    { name = "parking_lot_core" },
+    { name = "profiling" },          # wgpu profiling facade
+    { name = "range-alloc" },        # wgpu-core
+    { name = "raw-window-handle" },  # wgpu surface abstraction
+    { name = "rustc-hash" },         # wgpu-core
+    { name = "scopeguard" },         # parking_lot
+    { name = "slab" },               # wgpu-core
+    { name = "slotmap" },            # naga
+    { name = "spirv" },              # naga SPIR-V support
+    { name = "static_assertions" },  # naga
+    { name = "strum" },              # naga
+    { name = "strum_macros" },       # naga
+    { name = "termcolor" },          # codespan-reporting
+    { name = "unicode-width" },      # codespan-reporting
+    { name = "bit-set" },            # naga
+    { name = "bit-vec" },            # naga
+
+    # ---- wgpu-hal platform backends (non-Linux targets; lock-resident) ---
+    { name = "ash" },                # Vulkan
+    { name = "metal" },              # Metal
+    { name = "objc" },               # Objective-C runtime (metal)
+    { name = "malloc_buf" },         # objc
+    { name = "block" },              # objc blocks
+    { name = "core-foundation" },    # Apple
+    { name = "core-foundation-sys" },
+    { name = "core-graphics-types" },
+    { name = "foreign-types" },      # core-foundation glue
+    { name = "foreign-types-macros" },
+    { name = "foreign-types-shared" },
+    { name = "gl_generator" },       # OpenGL
+    { name = "glow" },               # OpenGL
+    { name = "glutin_wgl_sys" },     # WGL
+    { name = "khronos-egl" },        # EGL
+    { name = "khronos_api" },
+    { name = "gpu-alloc" },          # Vulkan/GL allocators
+    { name = "gpu-alloc-types" },
+    { name = "gpu-allocator" },
+    { name = "presser" },            # gpu-allocator
+    { name = "renderdoc-sys" },      # renderdoc integration
+    { name = "libc" },               # libc platform glue
+    { name = "libloading" },         # ash/renderdoc loader
+    { name = "redox_syscall" },      # parking_lot (redox target)
+    { name = "android_system_properties" }, # android
+    { name = "ndk-sys" },            # android
+    { name = "jni-sys" },            # android
+    { name = "jni-sys-macros" },
+    { name = "pkg-config" },         # build script helper
+    { name = "cfg_aliases" },        # wgpu-hal build script
+    { name = "autocfg" },            # build script helper
+    { name = "paste" },              # objc macro helper (see advisories ignore)
+    # windows family (wgpu-hal DX12 backend)
+    { name = "windows" },
+    { name = "windows-core" },
+    { name = "windows-implement" },
+    { name = "windows-interface" },
+    { name = "windows-link" },
+    { name = "windows-result" },
+    { name = "windows-strings" },
+    { name = "windows-sys" },
+    { name = "windows-targets" },
+    { name = "windows_aarch64_gnullvm" },
+    { name = "windows_aarch64_msvc" },
+    { name = "windows_i686_gnu" },
+    { name = "windows_i686_gnullvm" },
+    { name = "windows_i686_msvc" },
+    { name = "windows_x86_64_gnu" },
+    { name = "windows_x86_64_gnullvm" },
+    { name = "windows_x86_64_msvc" },
+    { name = "winapi-util" },
+    { name = "xml-rs" },             # khronos/android xml parsing
+
+    # ---- futures family (futures-util) -----------------------------------
+    { name = "futures-core" },
+    { name = "futures-macro" },
+    { name = "futures-task" },
+    { name = "pin-project-lite" },
+
+    # ---- proc-macro / serde toolchain ------------------------------------
     { name = "proc-macro2" },        # bytemuck_derive dep
     { name = "quote" },              # bytemuck_derive dep
     { name = "syn" },                # bytemuck_derive dep
     { name = "unicode-ident" },      # proc-macro2 dep
+    { name = "unicode-xid" },        # proc-macro util
+    { name = "heck" },               # strum_macros
+    { name = "litrs" },              # strum_macros
+    { name = "rustversion" },        # strum_macros
+    { name = "zmij" },               # proc-macro helper (syn 3 family)
+    { name = "semver" },             # wasm-bindgen-shared
+    { name = "serde" },              # thiserror/bitflags/wgpu transitives
+    { name = "serde_core" },
+    { name = "itoa" },               # serde_json
+    { name = "memchr" },             # common util
+    { name = "thiserror" },          # wgpu-core/hal
+    { name = "thiserror-impl" },
+    { name = "version_check" },      # common util
+
+    # ---- HarfRust (vendored under vendor/harfrust/) transitive deps ------
+    { name = "harfrust" },           # vendored (workspace member)
+    { name = "font-types" },         # read-fonts dep: font type definitions
+    { name = "smallvec" },           # harfrust dep: small vector optimization
     { name = "once_cell" },          # read-fonts dep
+    { name = "core_maths" },         # harfrust optional dep: libm for no_std
+    { name = "icu_properties" },     # harfrust optional dep (features disabled)
+    { name = "icu_normalizer" },     # harfrust optional dep (features disabled)
+    { name = "bytemuck_derive" },    # bytemuck proc-macro
 ]
 # Broad deny of known transitive trust hazards (TLS stacks, HTTP clients).
 deny = [

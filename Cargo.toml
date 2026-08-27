@@ -45,7 +45,7 @@ alkalive-ipc    = { path = "crates/alkalive-ipc" }
 alkalive-perf   = { path = "crates/alkalive-perf" }
 alkalive-error  = { path = "crates/alkalive-error" }
 alkalive-test   = { path = "crates/alkalive-test" }
-alkalive-compiler = { path = "crates/alkalive-compiler" }
+alkalive-compiler = { path = "crates/alkalive-compiler", default-features = false }
 alkalive-runtime = { path = "crates/alkalive-runtime" }
 alkalive-backend-wgpu = { path = "crates/alkalive-backend-wgpu" }
 alkalive-runtime-wasm = { path = "crates/alkalive-runtime-wasm" }
