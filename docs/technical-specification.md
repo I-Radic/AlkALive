@@ -748,6 +748,8 @@ The runtime gains a `SignalStore` and a dirty-propagation engine. The frame loop
 
 The backend's `render_frame()` signature changes to accept `ScheduledScene` + `SignalStore` (or a dirty-passes slice). The hardcoded pass order becomes data-driven from `ScheduleIR`. The `upload_text_atlas()` method is refactored to use long-lived text-stack instances and to skip re-upload when no relevant signal is dirty.
 
+> **Wave-11 amendment (2026-08, see `docs/alkalive-wave-11-render-graph.md`):** after the render-graph IR extraction (Gap 6), `render_frame()` re-routes through `alkalive_render::graph::build_render_graph`/`render_graph`; the `&ScheduleIR` argument is retained for API compatibility but is not consumed by `render_frame` (the graph carries the pass order). The schedule-driven `PassKind` dispatch survives in `render_frame_internal`, reachable via `render_frame_with_dirty` — the ADR-025 incremental path.
+
 The `.alk` grammar is unchanged (Phase 1 lint uses attributes, not keywords). Existing `.alk` source compiles unchanged.
 
 ### 9.3 Target State (After ADR-027 Phase 2)

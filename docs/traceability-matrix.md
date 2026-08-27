@@ -56,7 +56,7 @@
 | Frame loop uses dirty propagation | `runtime-wasm/src/lib.rs` | WASM build passes | ✅ |
 | `render_frame_with_dirty()` method | `backend-wgpu/src/lib.rs` | WASM build passes | ✅ |
 | Small-scene fallback (N=50) | `signal_store.rs`, `runtime-wasm/src/lib.rs` | 38 unit tests | ✅ |
-| `SMALL_SCENE_THRESHOLD = 50` constant | `signal_store.rs` | Tested | ✅ |
+| `SMALL_SCENE_THRESHOLD = 50` constant | `runtime-wasm/src/lib.rs` (`pub const`; a test-local copy sits in `signal_store.rs` under `#[cfg(test)]`) | Tested | ✅ |
 
 ### ADR-026: E-Graph Optimization (§4.3)
 
