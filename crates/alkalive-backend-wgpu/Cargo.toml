@@ -20,6 +20,14 @@ alkalive-scene-data = { workspace = true }
 # bytemuck for typed byte reinterpretation of vertex/uniform buffers.
 bytemuck = { version = "1", features = ["derive"] }
 
+# futures-util: `future::select` to bound WebGPU adapter/device requests
+# with a timeout (already in the tree via wgpu — no new code compiled in).
+futures-util = "0.3"
+
+# wasm-bindgen-futures: JsFuture for the setTimeout-based request timeout
+# (used only on wasm32; compiles cleanly on native targets too).
+wasm-bindgen-futures = "0.4"
+
 # wasm-bindgen + web-sys for browser DOM/Canvas/WebGL2 bindings.
 # These compile on native too (the types are referenced) but the GPU
 # runtime calls are only meaningful on wasm32.

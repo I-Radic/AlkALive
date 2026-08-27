@@ -114,6 +114,14 @@ async function main() {
       '--enable-unsafe-webgpu',
       '--enable-unsafe-swiftshader',
       '--use-angle=swiftshader',
+      // On GPU-less Linux (CI runners), Chromium's default Dawn backend
+      // presents only the clear color — draw calls never become visible
+      // and neither page screenshots nor toDataURL capture text. Forcing
+      // Dawn's Vulkan backend onto SwiftShader makes the WGSL pipelines
+      // render and composite for real (verified: golden text appears in
+      // both toDataURL readback and element screenshots).
+      '--enable-features=Vulkan',
+      '--use-vulkan=swiftshader',
     ],
     ...(channel ? { channel } : {}),
   };

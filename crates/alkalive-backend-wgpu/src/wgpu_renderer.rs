@@ -38,6 +38,12 @@
 use std::num::NonZeroU64;
 use wgpu::util::DeviceExt;
 
+// Adapter/device request bounding is browser-only (setTimeout-based).
+#[cfg(target_arch = "wasm32")]
+use std::future::Future;
+#[cfg(target_arch = "wasm32")]
+use futures_util::future::{select, Either};
+
 use alkalive_render::graph::RenderGraph;
 use crate::frame_plan::{collect_frame_plan, FramePlan, PlannedDraw, RectUniformsData, TextUniformsData};
 use crate::tessellate::{tessellate_scene, SceneTessellation};
@@ -47,6 +53,38 @@ use crate::{Vertex, ATLAS_PAGE_BYTES, ATLAS_SIZE};
 /// Maximum number of rect-kind and text-kind draw calls schedulable per
 /// frame (the canonical Hello-World graph uses two of each).
 pub const MAX_DYNAMIC_SLOTS: usize = 16;
+
+/// Wall-clock budget for a single WebGPU adapter/device request.
+///
+/// Healthy environments settle these requests in well under a second
+/// (measured ~0.5 s warm, a few seconds cold on software adapters), but a
+/// stalled GPU process never settles at all — observed on Firefox in a
+/// GPU-less CI VM, where `navigator.gpu.requestAdapter()` hangs forever
+/// and, without this bound, the runtime would show a blank canvas instead
+/// of falling back to WebGL2. 10 s is comfortably above every healthy
+/// software-adapter measurement while keeping the fallback prompt.
+#[cfg(target_arch = "wasm32")]
+const WEBGPU_REQUEST_TIMEOUT_MS: i32 = 10_000;
+
+/// Race a future against a `setTimeout` deadline (browser-only).
+///
+/// Returns `None` when the deadline elapsed first — i.e. the underlying
+/// request is stalled and must not be waited on any longer. The pending
+/// timer is simply dropped when the future wins, which is harmless.
+#[cfg(target_arch = "wasm32")]
+async fn with_timeout<F: Future>(fut: F, ms: i32) -> Option<F::Output> {
+    let timer = wasm_bindgen_futures::JsFuture::from(js_sys::Promise::new(&mut |resolve, _reject| {
+        if let Some(win) = web_sys::window() {
+            // No window (non-browser wasm): the timer never fires, making
+            // this a transparent passthrough with no timeout.
+            let _ = win.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms);
+        }
+    }));
+    match select(Box::pin(fut), Box::pin(timer)).await {
+        Either::Left((output, _)) => Some(output),
+        Either::Right((_, _)) => None,
+    }
+}
 
 /// Minimum byte size of one dynamic-offset slot before device alignment.
 const BASE_SLOT_SIZE: u64 = 256;
@@ -544,6 +582,22 @@ pub struct WgpuBackendRenderer {
     height: u32,
 }
 
+/// Outcome of the non-destructive WebGPU capability probe.
+///
+/// Distinguishes "no adapter" (the browser answered) from "the GPU
+/// process is stalled" (no answer within [`WEBGPU_REQUEST_TIMEOUT_MS`]) so
+/// the runtime can publish an accurate fallback reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbeOutcome {
+    /// An adapter was obtained — WebGPU is usable in this environment.
+    Available,
+    /// The probe settled — this environment exposes no WebGPU adapter.
+    Unavailable,
+    /// The probe did not settle within the timeout (e.g. Firefox on a
+    /// GPU-less VM whose GPU process never finishes adapter creation).
+    TimedOut,
+}
+
 impl WgpuBackendRenderer {
     /// Non-destructive WebGPU capability probe.
     ///
@@ -552,20 +606,40 @@ impl WgpuBackendRenderer {
     /// `getContext('webgpu')` here would permanently poison the canvas for
     /// the WebGL2/GLSL fallback. The runtime therefore probes first and only
     /// commits the real canvas to [`Self::init_from_canvas`] when this
-    /// returns `true`.
-    pub async fn is_supported() -> bool {
+    /// returns [`ProbeOutcome::Available`].
+    pub async fn is_supported() -> ProbeOutcome {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             ..Default::default()
         });
-        instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: None,
-                force_fallback_adapter: false,
-            })
-            .await
-            .is_some()
+        let request = instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+        });
+        #[cfg(target_arch = "wasm32")]
+        {
+            // Bound the request: a stalled GPU process must be reported as
+            // `TimedOut`, never awaited indefinitely.
+            match with_timeout(request, WEBGPU_REQUEST_TIMEOUT_MS).await {
+                Some(adapter) => {
+                    if adapter.is_some() {
+                        ProbeOutcome::Available
+                    } else {
+                        ProbeOutcome::Unavailable
+                    }
+                }
+                None => ProbeOutcome::TimedOut,
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if request.await.is_some() {
+                ProbeOutcome::Available
+            } else {
+                ProbeOutcome::Unavailable
+            }
+        }
     }
 
     /// Initialize the renderer from an HTML canvas element.
@@ -588,28 +662,55 @@ impl WgpuBackendRenderer {
         // Request the adapter AND device BEFORE creating the surface: any
         // failure here must leave the canvas untouched so the runtime can
         // still fall back to the WebGL2/GLSL renderer on it. (A canvas
-        // accepts exactly one context type for its lifetime.)
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: None,
-                force_fallback_adapter: false,
-            })
-            .await
-            .ok_or("no compatible GPU adapter (WebGPU unavailable?)")?;
-
-        let (device, queue) = adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    label: Some("AlkALive GPU Device"),
-                    required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::downlevel_webgl2_defaults(),
-                    memory_hints: wgpu::MemoryHints::default(),
-                },
-                None,
+        // accepts exactly one context type for its lifetime.) Both requests
+        // are bounded by WEBGPU_REQUEST_TIMEOUT_MS — a stalled GPU process
+        // surfaces as a descriptive Err (→ loud fallback) instead of a
+        // permanently blank canvas.
+        let adapter =
+            match with_timeout(
+                instance.request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::HighPerformance,
+                    compatible_surface: None,
+                    force_fallback_adapter: false,
+                }),
+                WEBGPU_REQUEST_TIMEOUT_MS,
             )
             .await
-            .map_err(|e| format!("request_device failed: {e:?}"))?;
+            {
+                Some(adapter) => {
+                    adapter.ok_or("no compatible GPU adapter (WebGPU unavailable?)")?
+                }
+                None => {
+                    return Err(format!(
+                        "request_adapter did not settle within {WEBGPU_REQUEST_TIMEOUT_MS}ms \
+                         (GPU process stalled?)"
+                    ))
+                }
+            };
+
+        let (device, queue) =
+            match with_timeout(
+                adapter.request_device(
+                    &wgpu::DeviceDescriptor {
+                        label: Some("AlkALive GPU Device"),
+                        required_features: wgpu::Features::empty(),
+                        required_limits: wgpu::Limits::downlevel_webgl2_defaults(),
+                        memory_hints: wgpu::MemoryHints::default(),
+                    },
+                    None,
+                ),
+                WEBGPU_REQUEST_TIMEOUT_MS,
+            )
+            .await
+            {
+                Some(result) => result.map_err(|e| format!("request_device failed: {e:?}"))?,
+                None => {
+                    return Err(format!(
+                        "request_device did not settle within {WEBGPU_REQUEST_TIMEOUT_MS}ms \
+                         (GPU process stalled?)"
+                    ))
+                }
+            };
 
         let surface = instance
             .create_surface(wgpu::SurfaceTarget::Canvas(canvas))

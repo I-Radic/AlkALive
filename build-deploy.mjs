@@ -16,22 +16,52 @@
 
 import { spawnSync } from 'node:child_process';
 import { readFile, writeFile, stat, rm } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
-const CARGO = process.env.CARGO ?? join(process.env.USERPROFILE ?? '', '.cargo', 'bin', 'cargo.exe');
-const WASM_BINDGEN =
-  process.env.WASM_BINDGEN ??
-  join(process.env.USERPROFILE ?? '', '.cargo', 'bin', 'wasm-bindgen.exe');
+
+// Resolve a cargo-installed binary cross-platform.
+// The original Windows-only fallback (USERPROFILE + '.exe') broke Linux CI
+// runners: USERPROFILE is undefined there, producing a non-existent relative
+// path '.cargo/bin/cargo.exe' (spawn ENOENT). Resolution order:
+//   1. explicit env override (CARGO / WASM_BINDGEN)
+//   2. $CARGO_HOME/bin/<name>   (set by GitHub Actions runners and rustup)
+//   3. ~/.cargo/bin/<name>      (USERPROFILE on Windows, HOME elsewhere)
+//   4. bare <name>              (defer to the OS PATH lookup)
+// The '.exe' suffix is appended only on Windows, where it is required.
+function resolveCargoBin(name, override) {
+  if (override) return override;
+  const exe = process.platform === 'win32' ? '.exe' : '';
+  const candidates = [];
+  if (process.env.CARGO_HOME) {
+    candidates.push(join(process.env.CARGO_HOME, 'bin', name + exe));
+  }
+  const userHome = process.env.USERPROFILE ?? process.env.HOME;
+  if (userHome) {
+    candidates.push(join(userHome, '.cargo', 'bin', name + exe));
+  }
+  candidates.push(name);
+  for (const candidate of candidates) {
+    if (candidate === name || existsSync(candidate)) return candidate;
+  }
+  return name; // not found anywhere: let spawnSync report a clear ENOENT
+}
+
+const CARGO = resolveCargoBin('cargo', process.env.CARGO);
+const WASM_BINDGEN = resolveCargoBin('wasm-bindgen', process.env.WASM_BINDGEN);
 const WASM_BINDGEN_VERSION = '0.2.127'; // must match Cargo.lock's wasm-bindgen
 
 function run(cmd, args, opts = {}) {
   const res = spawnSync(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8', ...opts });
   if (res.status !== 0) {
-    console.error(`\nFAILED: ${cmd} ${args.join(' ')}\n${res.stderr || res.stdout}`);
+    // res.error is set when the process could not be spawned at all
+    // (e.g. ENOENT); surface it instead of printing 'undefined'.
+    const detail = res.error ? `${res.error.message}` : res.stderr || res.stdout || '(no output)';
+    console.error(`\nFAILED: ${cmd} ${args.join(' ')}\n${detail}`);
     process.exit(1);
   }
   return res.stdout;

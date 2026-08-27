@@ -597,16 +597,30 @@ async fn select_renderer(
         // Probe WebGPU availability WITHOUT touching the canvas: a canvas
         // accepts exactly one context type for its lifetime, so a failed
         // wgpu attempt must not poison it for the GLSL fallback.
-        let webgpu_available =
+        use alkalive_backend_wgpu::wgpu_renderer::ProbeOutcome;
+
+        let probe =
             alkalive_backend_wgpu::wgpu_renderer::WgpuBackendRenderer::is_supported().await;
-        if !webgpu_available {
-            web_sys::console::warn_1(
-                &"AlkALive: WebGPU unavailable (adapter probe returned none) — \
-                 falling back to WebGL2/GLSL"
-                    .into(),
-            );
+        if probe != ProbeOutcome::Available {
+            // Distinguish "no adapter" from "GPU process stalled" in both
+            // the console and the published fallback reason — a stalled
+            // requestAdapter (e.g. Firefox on a GPU-less VM) otherwise
+            // hangs selection forever with a permanently blank canvas.
+            let (warn_msg, reason) = match probe {
+                ProbeOutcome::TimedOut => (
+                    "AlkALive: WebGPU adapter probe timed out (GPU process \
+                     stalled?) — falling back to WebGL2/GLSL",
+                    "WebGPU adapter probe timed out (GPU process stalled)",
+                ),
+                _ => (
+                    "AlkALive: WebGPU unavailable (adapter probe returned none) — \
+                     falling back to WebGL2/GLSL",
+                    "WebGPU adapter probe returned none",
+                ),
+            };
+            web_sys::console::warn_1(&warn_msg.into());
             let glsl = select_glsl_fallback(canvas, width, height).await?;
-            publish_renderer_state("WebGL2", Some("WebGPU adapter probe returned none"));
+            publish_renderer_state("WebGL2", Some(reason));
             return Ok(glsl);
         }
         match alkalive_backend_wgpu::wgpu_renderer::WgpuBackendRenderer::init_from_canvas(
