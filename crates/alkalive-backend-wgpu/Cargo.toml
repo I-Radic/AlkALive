@@ -1,4 +1,4 @@
-﻿[package]
+[package]
 name = "alkalive-backend-wgpu"
 version.workspace = true
 edition.workspace = true

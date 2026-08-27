@@ -117,7 +117,7 @@ jobs:
           node e2e.mjs
       - name: Upload E2E artifacts
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: chromium-e2e-artifacts
           path: test/e2e/artifacts/
@@ -155,7 +155,7 @@ jobs:
           node firefox-e2e.mjs --headed
       - name: Upload E2E artifacts
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: firefox-e2e-artifacts
           path: test/e2e/artifacts/

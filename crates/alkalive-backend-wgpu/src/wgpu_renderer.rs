@@ -1,4 +1,4 @@
-﻿//! wgpu-based GPU renderer using WGSL shaders — the ADR-001/ADR-006
+//! wgpu-based GPU renderer using WGSL shaders — the ADR-001/ADR-006
 //! production rendering backend.
 //!
 //! This renderer is the **primary** production path selected by the runtime

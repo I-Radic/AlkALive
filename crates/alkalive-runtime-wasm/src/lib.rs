@@ -1,4 +1,4 @@
-﻿//! AlkALive pure runtime — WASM entry point with GPU rendering.
+//! AlkALive pure runtime — WASM entry point with GPU rendering.
 //!
 //! This crate is the **single entry point** for the pure AlkALive pipeline.
 //! It compiles to a `cdylib` (WASM) that owns the entire rendering pipeline:
