@@ -52,9 +52,31 @@ AlkALive is a custom, module- and object-oriented language that compiles to WebA
 
 The Hello World demo is a **genuine end-to-end AlkALive application**:
 - `examples/hello.alk` source is embedded in the WASM binary
-- Compiled at startup by the real AlkALive compiler
-- Rendered via WebGL2 by the real AlkALive runtime through the render graph
+- Compiled at startup by the real AlkALive compiler (`compile_full`: schedule → dep-graph → e-graph)
+- Rendered by the selected renderer — wgpu/WGSL when WebGPU is available, WebGL2/GLSL otherwise — through the render graph
 - Zero application JavaScript, zero CSS for UI, zero DOM UI elements
+- The live renderer is observable at `window.__alkalive = { renderer, fallbackReason }` and in the startup console logs
+
+### Supported rendering matrix
+
+| Environment | Primary path | Verified by |
+|---|---|---|
+| Chrome/Edge ≥113 with WebGPU adapter | wgpu/WGSL | `e2e.mjs` selection contract; `firefox-e2e.mjs` proves the WGSL path in-browser |
+| Firefox ≥141 (Windows/macOS) | **wgpu/WGSL — proven in-browser** | `firefox-e2e.mjs` (`renderer=WebGPU`, golden pixels, ~0.5 s to first live frame) |
+| Any browser without WebGPU | automatic WebGL2/GLSL fallback (reason published) | `e2e.mjs` forced-fallback case + `firefox-e2e.mjs` pref-off case |
+| Native GPU (CI/local) | wgpu/WGSL offscreen | `tests/offscreen_wgpu.rs` pixel assertions |
+
+## CI
+
+GitHub Actions (`.github/workflows/ci.yml`) rebuilds everything from a clean
+checkout on every push/PR:
+
+1. `native-tests` — full workspace suite + zero-warning gate
+2. `deploy-pipeline` — wasm32 release → version-gated bindgen → pinned
+   binaryen `-Oz` → validation gates (≥40% shrink floor; artifact SHA must
+   equal the recorded build-report SHA)
+3. `e2e-chromium` — browser E2E against the freshly built artifacts
+4. `e2e-firefox-webgpu` — real in-browser WebGPU rendering proof
 
 ## Build & run
 
