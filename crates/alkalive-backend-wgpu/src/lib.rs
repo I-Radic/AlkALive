@@ -1242,7 +1242,12 @@ mod wasm {
         }
 
         /// Resize the canvas + WebGL viewport.
+        /// Zero-sized requests are clamped to 1x1, mirroring
+        /// [`WgpuBackendRenderer::resize`] — a 0-sized canvas/viewport is
+        /// a degenerate edge case (e.g. a display:none parent) and must not
+        /// produce an invalid GL viewport call.
         pub fn resize(&mut self, width: u32, height: u32) {
+            let (width, height) = (width.max(1), height.max(1));
             self.width = width;
             self.height = height;
             self.canvas.set_width(width);
