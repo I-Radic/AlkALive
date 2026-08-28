@@ -24,7 +24,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use alkalive_compiler::ir::{ColorIR, NodeIR, PositionIR};
-use alkalive_compiler::schedule::{BatchingStrategy, PassKind, RenderPass, ShaderId};
+use alkalive_compiler::schedule::{
+    BatchingStrategy, PassKind, RenderPass, ShaderId, ThreadAffinity,
+};
 use alkalive_compiler::{
     compile, compile_scheduled, compile_with_lints, AlgorithmIR, CompileError, SceneIR,
 };
@@ -328,6 +330,10 @@ fn render_pass_to_json(pass: &RenderPass) -> serde_json::Value {
         "kind".into(),
         Value::String(pass_kind_to_string(pass.kind).to_string()),
     );
+    m.insert(
+        "affinity".into(),
+        Value::String(thread_affinity_to_string(pass.affinity).to_string()),
+    );
     Value::Object(m)
 }
 
@@ -352,6 +358,13 @@ fn pass_kind_to_string(k: PassKind) -> &'static str {
         PassKind::InputFieldBorder => "input_field_border",
         PassKind::TitleText => "title_text",
         PassKind::InputText => "input_text",
+    }
+}
+
+fn thread_affinity_to_string(a: ThreadAffinity) -> &'static str {
+    match a {
+        ThreadAffinity::MainThread => "main_thread",
+        ThreadAffinity::Worker => "worker",
     }
 }
 
@@ -677,6 +690,7 @@ mod tests {
             batching: BatchingStrategy::ByFontSize,
             rotation: true,
             kind: PassKind::TitleText,
+            affinity: ThreadAffinity::MainThread,
         };
         let v = render_pass_to_json(&pass);
         let s = serde_json::to_string(&v).unwrap();
@@ -686,6 +700,7 @@ mod tests {
         assert!(s.contains("\"batching\":\"by_font_size\""), "got: {}", s);
         assert!(s.contains("\"rotation\":true"), "got: {}", s);
         assert!(s.contains("\"kind\":\"title_text\""), "got: {}", s);
+        assert!(s.contains("\"affinity\":\"main_thread\""), "got: {}", s);
     }
 
     #[test]
@@ -723,6 +738,17 @@ mod tests {
         // Schedule sub-keys.
         assert!(json.contains("passes"), "got: {}", json);
         assert!(json.contains("pass_order"), "got: {}", json);
+        // Every pass carries its thread affinity (C10: main_thread today).
+        assert!(
+            json.contains("\"affinity\""),
+            "affinity key missing: {}",
+            json
+        );
+        assert!(
+            json.matches("\"main_thread\"").count() >= 5,
+            "all five passes should be main_thread: {}",
+            json
+        );
         // The five pass kinds appear in the JSON.
         assert!(json.contains("\"clear\""), "got: {}", json);
         assert!(json.contains("\"input_field_background\""), "got: {}", json);

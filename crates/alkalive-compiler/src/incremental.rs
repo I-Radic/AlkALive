@@ -277,6 +277,7 @@ mod tests {
     use crate::ir::{mint_module_id, ColorIR, NodeIR, PositionIR, SceneIR};
     use crate::schedule::{
         schedule_lowering, BatchingStrategy, PassKind, RenderPass, ScheduledScene, ShaderId,
+        ThreadAffinity,
     };
 
     /// Build an `AlgorithmIR` with the given nodes (helper for tests).
@@ -715,6 +716,7 @@ module HelloWorld {
             batching: BatchingStrategy::ByFontSize,
             rotation: true,
             kind: PassKind::TitleText,
+            affinity: ThreadAffinity::MainThread,
         };
         let cloned = pass.clone();
         assert_eq!(pass.kind, cloned.kind);

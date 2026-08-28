@@ -129,6 +129,7 @@ pub use module_resolver::{ModuleResolver, ResolveError};
 pub use parser::{parse, ParseError, Parser};
 pub use schedule::{
     schedule_lowering, BatchingStrategy, PassKind, RenderPass, ScheduleIR, ScheduledScene, ShaderId,
+    ThreadAffinity,
 };
 pub use seminative::{
     collection_strategies, collection_strategy, has_seminive_collections, seminive_eligible_count,

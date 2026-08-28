@@ -29,17 +29,19 @@
 //!
 //! The [`schedule_lowering`] pass applies the following default rules:
 //!
-//! | Pass # | Kind                   | Shader       | Batching    | Rotation |
-//! |--------|------------------------|--------------|-------------|----------|
-//! | 0      | [`Clear`]              | SolidColor   | None        | false    |
-//! | 1      | [`InputFieldBackground`]| SolidColor  | None        | false    |
-//! | 2      | [`InputFieldBorder`]   | SolidColor   | None        | false    |
-//! | 3      | [`TitleText`]          | TextQuad     | ByFontSize  | true     |
-//! | 4      | [`InputText`]          | TextQuad     | None        | false    |
+//! | Pass # | Kind                   | Shader       | Batching    | Rotation | Affinity   |
+//! |--------|------------------------|--------------|-------------|----------|------------|
+//! | 0      | [`Clear`]              | SolidColor   | None        | false    | MainThread |
+//! | 1      | [`InputFieldBackground`]| SolidColor  | None        | false    | MainThread |
+//! | 2      | [`InputFieldBorder`]   | SolidColor   | None        | false    | MainThread |
+//! | 3      | [`TitleText`]          | TextQuad     | ByFontSize  | true     | MainThread |
+//! | 4      | [`InputText`]          | TextQuad     | None        | false    | MainThread |
 //!
 //! Passes whose required nodes are absent are *omitted* from the schedule
 //! (e.g., a scene with no input field produces only the Clear and TitleText
-//! passes). Pass 0 (Clear) is always present.
+//! passes). Pass 0 (Clear) is always present. Every pass carries
+//! [`ThreadAffinity::MainThread`] while ADR-021's on-demand workers remain
+//! deferred (constraint C10).
 //!
 //! [`Clear`]: PassKind::Clear
 //! [`InputFieldBackground`]: PassKind::InputFieldBackground
@@ -65,6 +67,10 @@ pub struct RenderPass {
     pub rotation: bool,
     /// Pass kind (text, solid color, etc.).
     pub kind: PassKind,
+    /// Which execution context runs this pass (C10: always
+    /// [`ThreadAffinity::MainThread`] while ADR-021 workers remain
+    /// deferred).
+    pub affinity: ThreadAffinity,
 }
 
 /// Shader identifier.
@@ -83,6 +89,28 @@ pub enum BatchingStrategy {
     None,
     /// Batch by font size.
     ByFontSize,
+}
+
+/// Thread affinity for a pass — which execution context runs it.
+///
+/// Per constraint C10 (single-threaded WASM: no `SharedArrayBuffer`, no
+/// workers in the current phase) and ADR-021 (on-demand WASM workers
+/// deferred to first consumer), every pass produced by
+/// [`schedule_lowering`] executes on the main thread today. The enum
+/// exists so the `ScheduleIR` data model can *express* worker placement
+/// when ADR-021 lands, without a further breaking change to the schedule
+/// types — the affinity is data carried alongside the pass, not a
+/// property baked into the runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ThreadAffinity {
+    /// Execute on the main thread (the only execution context today;
+    /// the default for every pass lowered by [`schedule_lowering`]).
+    #[default]
+    MainThread,
+    /// Execute on a Web Worker. Reserved for ADR-021's on-demand WASM
+    /// workers; no lowering rule produces this variant in the current
+    /// phase.
+    Worker,
 }
 
 /// Pass kind.
@@ -165,6 +193,7 @@ pub fn schedule_lowering(algorithm: &AlgorithmIR) -> ScheduleIR {
         batching: BatchingStrategy::None,
         rotation: false,
         kind: PassKind::Clear,
+        affinity: ThreadAffinity::MainThread,
     });
 
     // Pass 1: Input field background.
@@ -175,6 +204,7 @@ pub fn schedule_lowering(algorithm: &AlgorithmIR) -> ScheduleIR {
             batching: BatchingStrategy::None,
             rotation: false,
             kind: PassKind::InputFieldBackground,
+            affinity: ThreadAffinity::MainThread,
         });
     }
 
@@ -186,6 +216,7 @@ pub fn schedule_lowering(algorithm: &AlgorithmIR) -> ScheduleIR {
             batching: BatchingStrategy::None,
             rotation: false,
             kind: PassKind::InputFieldBorder,
+            affinity: ThreadAffinity::MainThread,
         });
     }
 
@@ -197,6 +228,7 @@ pub fn schedule_lowering(algorithm: &AlgorithmIR) -> ScheduleIR {
             batching: BatchingStrategy::ByFontSize,
             rotation: true,
             kind: PassKind::TitleText,
+            affinity: ThreadAffinity::MainThread,
         });
     }
 
@@ -208,6 +240,7 @@ pub fn schedule_lowering(algorithm: &AlgorithmIR) -> ScheduleIR {
             batching: BatchingStrategy::None,
             rotation: false,
             kind: PassKind::InputText,
+            affinity: ThreadAffinity::MainThread,
         });
     }
 
@@ -397,11 +430,54 @@ mod tests {
             batching: BatchingStrategy::ByFontSize,
             rotation: true,
             kind: PassKind::TitleText,
+            affinity: ThreadAffinity::MainThread,
         };
         let cloned = pass.clone();
         assert_eq!(pass, cloned);
         // Debug formatting should include the kind.
         let s = format!("{:?}", pass);
         assert!(s.contains("TitleText"));
+    }
+
+    #[test]
+    fn thread_affinity_defaults_to_main_thread() {
+        // C10: the schedule data model defaults to the single-threaded
+        // execution context.
+        assert_eq!(ThreadAffinity::default(), ThreadAffinity::MainThread);
+        assert_ne!(ThreadAffinity::MainThread, ThreadAffinity::Worker);
+    }
+
+    #[test]
+    fn lowered_passes_all_run_on_main_thread() {
+        // Every pass produced by schedule_lowering must carry MainThread
+        // affinity while ADR-021 workers remain deferred (C10).
+        let algo = algo_with_nodes(vec![sample_text_node(), sample_input_field()]);
+        let sched = schedule_lowering(&algo);
+        assert_eq!(sched.passes.len(), 5);
+        for p in &sched.passes {
+            assert_eq!(
+                p.affinity,
+                ThreadAffinity::MainThread,
+                "pass {:?} must be MainThread",
+                p.kind
+            );
+        }
+    }
+
+    #[test]
+    fn thread_affinity_is_part_of_pass_equality() {
+        // The affinity field participates in structural equality — a
+        // hypothetical Worker-planned pass differs from the lowered one.
+        let base = || RenderPass {
+            node_indices: vec![0],
+            shader: ShaderId::TextQuad,
+            batching: BatchingStrategy::None,
+            rotation: false,
+            kind: PassKind::InputText,
+            affinity: ThreadAffinity::MainThread,
+        };
+        let mut worker_pass = base();
+        worker_pass.affinity = ThreadAffinity::Worker;
+        assert_ne!(base(), worker_pass);
     }
 }
