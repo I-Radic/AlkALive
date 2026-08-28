@@ -117,8 +117,9 @@ pub use codegen::{
 };
 pub use egraph::{
     apply_dead_store_elimination, apply_read_merge, apply_state_store_load_forward,
-    build_from_dep_graph, egraph_optimization, evaluation_reorder, extract, op_cost, EClass,
-    EClassData, EClassId, EGraph, ENode, EOp, EOpKind,
+    build_from_dep_graph, egraph_optimization, evaluation_reorder, extract, op_cost,
+    DeadStoreElimination, EClass, EClassData, EClassId, EGraph, ENode, EOp, EOpKind, ReadMerge,
+    RewriteRule, RULES, StateStoreLoadForward,
 };
 pub use incremental::{
     incremental_analysis, ComputationId, DepNode, DepNodeId, DependencyGraph, SignalId,

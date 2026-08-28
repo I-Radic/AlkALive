@@ -374,27 +374,34 @@ impl EGraph {
         }
     }
 
-    /// Union-find `find` with path compression (mutating variant).
+    /// Union-find `find` with path halving (mutating variant).
     ///
-    /// Like [`EGraph::find`], but applies *path compression*: each
-    /// intermediate e-class's `parent` is updated to point directly to
-    /// the root. This flattens the union-find tree, making subsequent
-    /// `find` calls O(1).
+    /// Like [`EGraph::find`], but applies *path halving* (the variant
+    /// named by spec §4.3): each e-class on the walk is re-pointed to
+    /// its grandparent, halving the path length per call. Subsequent
+    /// `find`/`find_mut` calls walk progressively shorter paths, keeping
+    /// amortized near-constant behaviour without the extra root-tracking
+    /// walk of full path compression.
     ///
     /// # Panics
     ///
     /// Panics if `id` is out of bounds (i.e., `>= classes.len()`).
     pub fn find_mut(&mut self, id: EClassId) -> EClassId {
-        let root = self.find(id);
-        // Path compression: walk from `id` to `root`, updating each
-        // intermediate e-class's `parent` to point directly to `root`.
+        // Path halving: point each visited e-class at its grandparent.
         let mut cur = id;
-        while self.classes[cur as usize].parent != cur {
-            let next = self.classes[cur as usize].parent;
-            self.classes[cur as usize].parent = root;
-            cur = next;
+        loop {
+            let parent = self.classes[cur as usize].parent;
+            if parent == cur {
+                return cur;
+            }
+            let grandparent = self.classes[parent as usize].parent;
+            if grandparent == parent {
+                // `parent` is the root.
+                return parent;
+            }
+            self.classes[cur as usize].parent = grandparent;
+            cur = grandparent;
         }
-        root
     }
 
     /// Add an e-node to the e-graph.
@@ -843,6 +850,70 @@ pub fn class_cost(eg: &EGraph, id: EClassId) -> u32 {
 // =============================================================================
 // Rewrite rules
 // =============================================================================
+
+/// A rewrite rule over the e-graph (spec §4.3: "Rewrite rules:
+/// `RewriteRule` trait, `state_store_load_forward`,
+/// `dead_store_elimination`, `read_merge`, `evaluation_reorder`").
+///
+/// The three e-graph-rewriting rules implement this trait and are
+/// applied to a fixpoint by [`egraph_optimization`] via the
+/// [`RULES`] registry. The fourth rule, [`evaluation_reorder`], is a
+/// *scheduling* rule: it topologically orders the extracted node list
+/// inside [`extract`] — the point where a node order first exists — so
+/// it remains a free function rather than a trait impl (its input is
+/// `&mut Vec<DepNode>`, not the e-graph).
+pub trait RewriteRule {
+    /// Stable, human-readable rule name (diagnostics + tests).
+    fn name(&self) -> &'static str;
+    /// Apply the rule to the e-graph. Returns `true` iff the e-graph
+    /// changed (at least one e-class merge was performed).
+    fn apply(&self, eg: &mut EGraph) -> bool;
+}
+
+/// Rule 1: `state_store_load_forward` (see
+/// [`apply_state_store_load_forward`]).
+pub struct StateStoreLoadForward;
+
+impl RewriteRule for StateStoreLoadForward {
+    fn name(&self) -> &'static str {
+        "state_store_load_forward"
+    }
+    fn apply(&self, eg: &mut EGraph) -> bool {
+        apply_state_store_load_forward(eg)
+    }
+}
+
+/// Rule 2: `dead_store_elimination` (see
+/// [`apply_dead_store_elimination`]).
+pub struct DeadStoreElimination;
+
+impl RewriteRule for DeadStoreElimination {
+    fn name(&self) -> &'static str {
+        "dead_store_elimination"
+    }
+    fn apply(&self, eg: &mut EGraph) -> bool {
+        apply_dead_store_elimination(eg)
+    }
+}
+
+/// Rule 3: `read_merge` (see [`apply_read_merge`]).
+pub struct ReadMerge;
+
+impl RewriteRule for ReadMerge {
+    fn name(&self) -> &'static str {
+        "read_merge"
+    }
+    fn apply(&self, eg: &mut EGraph) -> bool {
+        apply_read_merge(eg)
+    }
+}
+
+/// The fixpoint rule registry: every e-graph rewrite rule, in
+/// application order (rules 1–3; rule 4, [`evaluation_reorder`], runs
+/// at extraction). [`egraph_optimization`] iterates this registry
+/// until no rule reports a change.
+pub const RULES: &[&dyn RewriteRule] =
+    &[&StateStoreLoadForward, &DeadStoreElimination, &ReadMerge];
 
 /// Rewrite rule 1: `state_store_load_forward`.
 ///
@@ -1379,10 +1450,10 @@ pub fn extract(graph: &EGraph, original: &DependencyGraph) -> DependencyGraph {
 ///
 /// 1. **Build** the e-graph from the dependency graph (see
 ///    [`build_from_dep_graph`]).
-/// 2. **Apply rewrite rules to a fixpoint**: repeatedly call
-///    [`apply_state_store_load_forward`],
-///    [`apply_dead_store_elimination`], and [`apply_read_merge`] until
-///    none of them report a change. (`evaluation_reorder` is applied
+/// 2. **Apply rewrite rules to a fixpoint**: iterate the [`RULES`]
+///    registry (rules 1–3: [`StateStoreLoadForward`],
+///    [`DeadStoreElimination`], [`ReadMerge`]) until none of them
+///    report a change. (`evaluation_reorder`, rule 4, is applied
 ///    during extraction, not as a merge.)
 /// 3. **Extract** the optimized dependency graph via [`extract`].
 ///
@@ -1421,15 +1492,15 @@ pub fn egraph_optimization(dep_graph: &DependencyGraph) -> DependencyGraph {
     // 1. Build: add all nodes from dep_graph.
     build_from_dep_graph(&mut eg, dep_graph);
 
-    // 2. Apply rewrite rules to fixpoint.
+    // 2. Apply rewrite rules to fixpoint via the RULES registry.
     let mut changed = true;
     let mut iterations = 0u32;
     const MAX_ITERATIONS: u32 = 1024; // safety bound; the rules should converge in <<1024 iterations.
     while changed && iterations < MAX_ITERATIONS {
         changed = false;
-        changed |= apply_state_store_load_forward(&mut eg);
-        changed |= apply_dead_store_elimination(&mut eg);
-        changed |= apply_read_merge(&mut eg);
+        for rule in RULES {
+            changed |= rule.apply(&mut eg);
+        }
         iterations += 1;
     }
 
@@ -1698,7 +1769,7 @@ mod tests {
     }
 
     #[test]
-    fn find_mut_applies_path_compression() {
+    fn find_mut_applies_path_halving() {
         let mut eg = EGraph::new();
         // Build a chain: a → b → c (where → means "merged into").
         let a = eg.add(ENode {
@@ -1717,11 +1788,39 @@ mod tests {
         // for c is c → b → a.
         eg.merge(b, c);
         eg.merge(a, b);
-        // find_mut(c) should compress the path: c's parent should now
-        // point directly to a.
+        // find_mut(c) must return the root a, and path halving
+        // re-points c at its grandparent (here: directly to a).
         let root = eg.find_mut(c);
         assert_eq!(root, a);
         assert_eq!(eg.classes[c as usize].parent, a);
+    }
+
+    #[test]
+    fn find_mut_path_halving_shortens_long_chains() {
+        // A 4-node chain d → c → b → a: path halving re-points d and
+        // c toward their grandparents; every node still finds a.
+        let mut eg = EGraph::new();
+        let ids: Vec<EClassId> = (0..4)
+            .map(|i| {
+                eg.add(ENode {
+                    op: EOp::Const(i),
+                    children: vec![],
+                })
+            })
+            .collect();
+        let [a, b, c, d] = [ids[0], ids[1], ids[2], ids[3]];
+        // Build chain d→c→b→a via merges (each merged into the earlier).
+        eg.merge(c, d);
+        eg.merge(b, c);
+        eg.merge(a, b);
+        for &id in &[b, c, d] {
+            assert_eq!(eg.find_mut(id), a, "every node must find root a");
+        }
+        // After halving, repeated find_mut calls stay correct and the
+        // tree only gets flatter.
+        assert_eq!(eg.find(d), a);
+        assert_eq!(eg.find(c), a);
+        assert_eq!(eg.find(b), a);
     }
 
     #[test]
@@ -2103,6 +2202,84 @@ mod tests {
         let changed = apply_read_merge(&mut eg);
         assert!(changed);
         assert_eq!(eg.find(r1), eg.find(other));
+    }
+
+    // =========================
+    // RewriteRule trait + RULES registry
+    // =========================
+
+    #[test]
+    fn rules_registry_lists_exactly_the_three_fixpoint_rules() {
+        // Spec §4.3 names exactly four rewrite rules; three run in the
+        // fixpoint loop (rule 4, evaluation_reorder, runs at extraction
+        // and is covered by its own tests below).
+        assert_eq!(RULES.len(), 3);
+        assert_eq!(RULES[0].name(), "state_store_load_forward");
+        assert_eq!(RULES[1].name(), "dead_store_elimination");
+        assert_eq!(RULES[2].name(), "read_merge");
+    }
+
+    #[test]
+    fn rewrite_rule_trait_delegates_to_free_functions() {
+        // The trait impls must be exact delegations: applying the rule
+        // object to a fresh e-graph yields the same `changed` result as
+        // calling the free function directly.
+        let dep = graph_with_write_then_read();
+        let mut eg_trait = EGraph::new();
+        build_from_dep_graph(&mut eg_trait, &dep);
+        let mut eg_free = EGraph::new();
+        build_from_dep_graph(&mut eg_free, &dep);
+
+        let via_trait = StateStoreLoadForward.apply(&mut eg_trait);
+        let via_free = apply_state_store_load_forward(&mut eg_free);
+        assert_eq!(via_trait, via_free);
+        // Both e-graphs must agree on every e-class root afterwards.
+        for id in 0..eg_trait.classes.len() as EClassId {
+            assert_eq!(eg_trait.find(id), eg_free.find(id));
+        }
+    }
+
+    #[test]
+    fn all_rules_report_noop_on_hello_world_graph() {
+        // For the canonical Hello World dep graph (no SignalWrite
+        // nodes), every fixpoint rule is a no-op.
+        let dep = graph_with_two_reads();
+        for rule in RULES {
+            let mut eg = EGraph::new();
+            build_from_dep_graph(&mut eg, &dep);
+            assert!(!rule.apply(&mut eg), "rule {} must be a no-op", rule.name());
+        }
+    }
+
+    #[test]
+    fn fixpoint_via_registry_matches_direct_application() {
+        // Driving the loop through the RULES registry must produce the
+        // same optimized graph as the direct free-function loop (the
+        // pre-trait implementation) for a graph where rules fire.
+        let dep = graph_with_write_then_read();
+
+        // Registry-driven (the production path).
+        let via_registry = egraph_optimization(&dep);
+
+        // Direct loop (reference).
+        let mut eg = EGraph::new();
+        build_from_dep_graph(&mut eg, &dep);
+        let mut changed = true;
+        let mut iters = 0;
+        while changed && iters < 1024 {
+            changed = false;
+            changed |= apply_state_store_load_forward(&mut eg);
+            changed |= apply_dead_store_elimination(&mut eg);
+            changed |= apply_read_merge(&mut eg);
+            iters += 1;
+        }
+        let via_direct = extract(&eg, &dep);
+
+        assert_eq!(via_registry.nodes.len(), via_direct.nodes.len());
+        for (a, b) in via_registry.nodes.iter().zip(via_direct.nodes.iter()) {
+            assert_eq!(a.id, b.id);
+            assert_eq!(a.pass_index, b.pass_index);
+        }
     }
 
     // =========================
