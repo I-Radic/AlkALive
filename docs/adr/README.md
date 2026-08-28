@@ -27,7 +27,7 @@ This directory records the architectural decisions for the AlkALive system (a cu
 
 ## Decision summary
 
-All 28 ADRs are **Proposed** (awaiting ratification). ADRs 001–018 were the original set; ADRs 019–022 are the four project-owner resolutions; ADR 023 resolves the IME composition-event acquisition; ADRs 024–026 are VUMA-inspired compiler enhancements; ADR 027 resolves Monotonicity Types (phased adoption); ADR 028 defers PMT Verification. All Decision Alternative files are now resolved.
+All 28 ADRs carry the formal status **Proposed** (awaiting ratification) unless their own file says otherwise — ADR.md's status convention keeps ratification separate from implementation, which is tracked in the per-ADR audit subsections, `docs/technical-specification.md`, and `docs/master-backlog.md`. Exceptions as of 2026-08-27: ADR-008 and ADR-009 are **amended by ADR-027 Phase 2**; ADR-026 is **accepted and implemented** (Wave 5 audit); ADR-027 has **Phase 1 and Phase 2 implemented**; ADR-028 is **deferred**. ADRs 001–018 were the original set; ADRs 019–022 are the four project-owner resolutions; ADR 023 resolves the IME composition-event acquisition; ADRs 024–026 are VUMA-inspired compiler enhancements; ADR 027 resolves Monotonicity Types (phased adoption); ADR 028 defers PMT Verification. All Decision Alternative files are now resolved.
 
 | ID | Decision | Confidence | Status |
 |----|----------|------------|--------|
@@ -38,8 +38,8 @@ All 28 ADRs are **Proposed** (awaiting ratification). ADRs 001–018 were the or
 | ADR 005 | Object-Owned Per-Instance Styling | High | Proposed |
 | ADR 006 | WGSL Shaders as First-Class Styling Primitives | High | Proposed |
 | ADR 007 | Single Owned Render-Object Tree (Component = Subtree) | High | Proposed |
-| ADR 008 | Statically-Typed Module+OO Language Compiling to WASM | High | Proposed |
-| ADR 009 | Two-Level Type Verification | Medium | Proposed |
+| ADR 008 | Statically-Typed Module+OO Language Compiling to WASM | High | Amended by ADR-027 Phase 2 |
+| ADR 009 | Two-Level Type Verification | Medium | Amended by ADR-027 Phase 2 |
 | ADR 010 | CPU Bounding-Volume Hit-Testing + First-Class Device-Event Input | High | Proposed |
 | ADR 011 | Unified Virtual Focus/Accessibility Annotation Layer | High | Proposed |
 | ADR 012 | Navigation/URL Contract and Explicit SEO Scope | High | Proposed |
@@ -56,8 +56,8 @@ All 28 ADRs are **Proposed** (awaiting ratification). ADRs 001–018 were the or
 | ADR 023 | IME Composition via Hidden Input Exception (Approach B) | High | Proposed |
 | ADR 024 | Algorithm/Schedule Separation for SceneIR | High | Proposed |
 | ADR 025 | Incremental Computation (Salsa/Adapton-Style) | Medium | Proposed |
-| ADR 026 | E-Graph Optimization for Signal Read/Write Patterns | High | Proposed |
-| ADR 027 | Monotonicity Types — Phased Adoption | Medium-High / Medium | Proposed |
+| ADR 026 | E-Graph Optimization for Signal Read/Write Patterns | High | Accepted & implemented (Wave 5 audit) |
+| ADR 027 | Monotonicity Types — Phased Adoption | Medium-High / Medium | Phase 1 & 2 implemented |
 | ADR 028 | PMT Verification — Deferred (Approach C) | High | Proposed (Deferred) |
 
 ## Resolved Decision Alternatives

@@ -38,7 +38,7 @@ Upgrade `monotone` and `antitone` from attributes to first-class type qualifiers
 - Enables ADR-025's incremental computation to process only new elements (seminaïve evaluation)
 
 **Scope:** Full type system integration, function-boundary enforcement, IR metadata, runtime seminaïve hook.
-**Confidence:** High — implemented and tested. 1096 workspace tests pass.
+**Confidence:** High — implemented and tested. 1,151 workspace tests pass (2026-08-27; the count grows with the suite — see `docs/traceability-matrix.md`).
 
 See the **Phase 2 Implementation** section below for the as-built specification.
 
@@ -61,7 +61,7 @@ All four prerequisites are now satisfied. See the **Prerequisite Satisfaction** 
 
 **Phase 1: Implemented. Phase 2: Implemented.**
 
-Both phases are operational and pass the full workspace test suite (1096 tests). ADR-008 and ADR-009 have been amended in parallel with the Phase 2 implementation (see the cross-referenced subsections in [`ADR.md`](ADR.md)).
+Both phases are operational and pass the full workspace test suite (1,151 tests at 2026-08-27). ADR-008 and ADR-009 have been amended in parallel with the Phase 2 implementation (see the cross-referenced subsections in [`ADR.md`](ADR.md)).
 
 ## Phase 2 Implementation
 
@@ -231,7 +231,7 @@ All four Phase 2 prerequisites are now satisfied:
 ## Confidence
 
 - **Phase 1:** High — implemented and tested (`lints/monotonicity.rs` + `tests/lint_tests.rs`).
-- **Phase 2:** High — implemented (`typechecker.rs`, `seminative.rs`, IR/codegen/runtime integration) and tested (34 type-checker unit tests + workspace-wide 1096 passing tests). The original "Medium" confidence was contingent on Phase 1 validation and type-checker design review; both prerequisites are now satisfied and the implementation is operational.
+- **Phase 2:** High — implemented (`typechecker.rs`, `seminative.rs`, IR/codegen/runtime integration) and tested (34 primary type-checker unit tests + workspace-wide 1,151 passing tests at 2026-08-27). The original "Medium" confidence was contingent on Phase 1 validation and type-checker design review; both prerequisites are now satisfied and the implementation is operational.
 
 ## See also
 

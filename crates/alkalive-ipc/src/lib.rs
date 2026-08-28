@@ -5,9 +5,11 @@
 //! worker threads, socket IPC over `SharedArrayBuffer`) and ADR 003
 //! (main-thread canonical `GPUDevice` ownership).
 //!
-//! Wave 3 skeleton: signatures only; every body is `todo!()`.
-//! No cross-crate dependencies; all referenced host types are local
-//! placeholders pending the IPC shim (ADR 021).
+//! The traits below are the stable surface; the concrete implementations
+//! are in-process channels (the current phase is single-threaded per
+//! constraint C10 — worker transport lands with ADR 021's first
+//! consumer). No cross-crate dependencies; all referenced host types are
+//! local placeholders pending the IPC shim (ADR 021).
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
