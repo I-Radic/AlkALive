@@ -510,6 +510,12 @@ mod wasm {
         font_id: Option<alkalive_text::FontId>,
         /// Cached text shaper (avoids re-creating on every frame).
         text_shaper: Option<alkalive_text::HarfRustTextShaper>,
+        /// Persistent glyph atlas (TD1 fix): created once alongside the
+        /// registry/shaper and reused across re-uploads. Unchanged glyphs
+        /// (e.g. the title) are cache hits on every input change; only
+        /// newly typed glyphs rasterize. On page overflow the atlas is
+        /// reset and the current text re-rasterized (graceful recovery).
+        glyph_atlas: Option<alkalive_text::HarfRustGlyphAtlas>,
     }
 
     impl WgpuRenderer {
@@ -768,6 +774,7 @@ mod wasm {
                 font_registry: None,
                 font_id: None,
                 text_shaper: None,
+                glyph_atlas: None,
             })
         }
 
@@ -1314,8 +1321,10 @@ mod wasm {
                 HarfRustTextShaper, ShapeContext, TextShaper,
             };
 
-            // 1. Initialize or reuse the cached font registry + shaper (M7 fix:
-            //    avoids re-parsing the 170 KB TTF on every keystroke).
+            // 1. Initialize or reuse the cached font registry + shaper +
+            //    persistent glyph atlas (M7 fix + TD1 fix: avoids re-parsing
+            //    the 170 KB TTF and re-rasterizing unchanged glyphs on
+            //    every keystroke).
             if self.font_registry.is_none() {
                 let font_bytes: &[u8] = include_bytes!("../assets/Roboto-Regular.ttf");
                 let mut registry = HarfRustFontRegistry::new();
@@ -1330,21 +1339,21 @@ mod wasm {
                 let font_id = registry.resolve(&req).unwrap_or(loaded_id);
                 let registry_arc = Arc::new(registry);
                 let shaper = HarfRustTextShaper::new(Arc::clone(&registry_arc));
+                let atlas = HarfRustGlyphAtlas::new(Arc::clone(&registry_arc));
                 self.font_registry = Some(registry_arc);
                 self.font_id = Some(font_id);
                 self.text_shaper = Some(shaper);
+                self.glyph_atlas = Some(atlas);
             }
 
-            let registry_arc = self.font_registry.as_ref().unwrap().clone();
             let font_id = self.font_id.unwrap();
             let shaper = self.text_shaper.as_ref().unwrap();
-
-            // 2. Create a fresh atlas (cheap — just allocates an empty 512×512 page).
-            let mut atlas = HarfRustGlyphAtlas::new(registry_arc);
+            let atlas = self.glyph_atlas.as_mut().unwrap();
             let title_font_size = font_size;
             let input_font_size = font_size * 0.5;
 
-            // 3. Shape the title + input text.
+            // 2. Shape the title + input text. (Shaping is independent of
+            //    the atlas, so the runs survive an atlas reset below.)
             let ctx_title = ShapeContext {
                 font: font_id,
                 size_px: title_font_size,
@@ -1363,26 +1372,34 @@ mod wasm {
                 .shape(input_text, &ctx_input)
                 .map_err(|e| format!("shape input: {:?}", e))?;
 
-            // 4. Rasterize glyphs into the atlas and build quads.
-            let title_quads = build_text_quads(&title_run, &mut atlas, title_font_size);
-            let input_quads = build_text_quads(&input_run, &mut atlas, input_font_size);
+            // 3. Rasterize glyphs into the persistent atlas and build
+            //    quads. Unchanged glyphs (notably the title) are cache
+            //    hits; only new glyphs rasterize.
+            let mut title_quads = build_text_quads(&title_run, atlas, title_font_size);
+            let mut input_quads = build_text_quads(&input_run, atlas, input_font_size);
 
-            // 5. Multi-page atlas detection (C1 fix): if the atlas overflowed
-            //    to a second page, glyphs on page 1+ will render as blank
-            //    because we only upload page 0. Log a warning so the failure
-            //    is visible rather than silent.
+            // 4. Persistent-atlas overflow recovery: a long typing session
+            //    can accumulate more distinct glyphs than fit one 512×512
+            //    page. When that happens, reset the atlas and re-rasterize
+            //    just the current text — all glyphs then land on page 0
+            //    (the only page uploaded), matching the pre-persistence
+            //    single-shot behavior instead of silently dropping glyphs.
             if atlas.page_count() > 1 {
                 web_sys::console::warn_1(
                     &format!(
-                        "AlkALive: glyph atlas overflowed to {} pages (only page 0 is uploaded). \
-                     Some glyphs may not render. Consider reducing font size or text length.",
-                        atlas.page_count()
+                        "AlkALive: persistent glyph atlas overflowed to {} pages; resetting and \
+                         re-rasterizing the current text (cache had {} glyphs).",
+                        atlas.page_count(),
+                        atlas.len(),
                     )
                     .into(),
                 );
+                atlas.reset();
+                title_quads = build_text_quads(&title_run, atlas, title_font_size);
+                input_quads = build_text_quads(&input_run, atlas, input_font_size);
             }
 
-            // 6. Upload atlas page 0 to GPU.
+            // 5. Upload atlas page 0 to GPU.
             let page_data = atlas
                 .page_data(0)
                 .ok_or_else(|| "atlas page 0 missing".to_string())?;

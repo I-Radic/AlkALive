@@ -1115,6 +1115,21 @@ impl HarfRustGlyphAtlas {
         self.cache.is_empty()
     }
 
+    /// Clear every cached glyph slot and reset the shelf packer to a
+    /// single fresh page.
+    ///
+    /// This is the atlas-clear mechanism the persistent (long-lived)
+    /// renderer atlas uses as its safety valve: when a long typing
+    /// session accumulates more distinct glyphs than fit one page — or on
+    /// a scene transition — the caller resets the atlas and re-rasterizes
+    /// only the glyphs the current frame needs. Semantically identical to
+    /// [`GlyphAtlas::invalidate`] (which delegates here), but callable
+    /// without constructing a [`ModuleId`] / [`DirtyRect`] pair.
+    pub fn reset(&mut self) {
+        self.cache.clear();
+        self.reset_pages();
+    }
+
     /// Shelf-pack a `(w x h)` rectangle into the current atlas page,
     /// allocating a new page if necessary. Returns `(page, x, y)`.
     fn pack(&mut self, w: usize, h: usize) -> (u16, usize, usize) {
@@ -1290,8 +1305,7 @@ impl GlyphAtlas for HarfRustGlyphAtlas {
     fn invalidate(&mut self, _module_id: ModuleId, _rect: DirtyRect) {
         // Wave 2: simplified — clear the entire cache and reset the packer.
         // Per-module dirty-rect locality lands in a later wave.
-        self.cache.clear();
-        self.reset_pages();
+        self.reset();
     }
 
     fn evict_lru(&mut self, _keep: &PinSet) -> EvictionStats {
@@ -2126,6 +2140,106 @@ mod tests {
         );
         assert_eq!(slot1, slot2, "second ensure should return the cached slot");
         assert_eq!(atlas.slot(key), Some(slot1), "slot lookup should hit");
+    }
+
+    #[test]
+    fn harfrust_glyph_atlas_reset_clears_cache_and_pages() {
+        // TD1 safety valve: reset() must return the atlas to a pristine
+        // single-page state with an empty cache, so a persistent
+        // (long-lived) renderer atlas can gracefully recover from page
+        // overflow by re-rasterizing only the current frame's glyphs.
+        let (registry, font_id) = registry_with_test_font();
+        let mut atlas = HarfRustGlyphAtlas::new(Arc::clone(&registry));
+
+        // Fill with a couple of small glyphs.
+        for gid in [TEST_GLYPH_WITH_OUTLINE, TEST_GLYPH_WITH_OUTLINE + 1] {
+            atlas.ensure(GlyphKey {
+                font_id,
+                glyph_id: gid,
+                phase: 0,
+                size_px: 16,
+            });
+        }
+        assert!(!atlas.is_empty());
+        assert_eq!(atlas.page_count(), 1);
+
+        atlas.reset();
+
+        assert!(atlas.is_empty(), "reset must clear the cache");
+        assert_eq!(atlas.len(), 0);
+        assert_eq!(
+            atlas.page_count(),
+            1,
+            "reset must collapse back to a single fresh page"
+        );
+        // The fresh page must be all zeros.
+        let page = atlas.page_data(0).expect("page 0 must exist");
+        assert!(page.iter().all(|&a| a == 0), "reset page must be zeroed");
+        // Re-ensuring the same glyph re-rasterizes onto the fresh page.
+        let slot = atlas.ensure(GlyphKey {
+            font_id,
+            glyph_id: TEST_GLYPH_WITH_OUTLINE,
+            phase: 0,
+            size_px: 16,
+        });
+        assert_eq!(atlas.len(), 1);
+        assert_eq!(slot.page, 0);
+    }
+
+    #[test]
+    fn harfrust_glyph_atlas_overflow_allocates_pages_then_reset_recovers() {
+        // The test font has a single outlined glyph, so overflow is forced
+        // via the SAME glyph at many distinct sizes (each size is a
+        // distinct GlyphKey → a distinct packed slot). Large sizes fill
+        // the 512×512 page and force a second; reset() must recover to
+        // one page.
+        let (registry, font_id) = registry_with_test_font();
+        let mut atlas = HarfRustGlyphAtlas::new(Arc::clone(&registry));
+
+        let mut size: u16 = 64;
+        let mut tried = 0;
+        while atlas.page_count() == 1 && tried < 400 {
+            atlas.ensure(GlyphKey {
+                font_id,
+                glyph_id: TEST_GLYPH_WITH_OUTLINE,
+                phase: 0,
+                size_px: size,
+            });
+            size = size.saturating_add(2);
+            tried += 1;
+        }
+        assert!(
+            atlas.page_count() > 1,
+            "distinct large sizes must eventually overflow the 512×512 page (tried {})",
+            tried
+        );
+        assert!(tried > 1, "overflow must come from many distinct keys");
+
+        atlas.reset();
+        assert_eq!(atlas.page_count(), 1);
+        assert!(atlas.is_empty());
+    }
+
+    #[test]
+    fn harfrust_glyph_atlas_reset_matches_invalidate_semantics() {
+        // GlyphAtlas::invalidate delegates to reset() — both must produce
+        // the same pristine state.
+        let (registry, font_id) = registry_with_test_font();
+        let mut a = HarfRustGlyphAtlas::new(Arc::clone(&registry));
+        let mut b = HarfRustGlyphAtlas::new(Arc::clone(&registry));
+        for atlas in [&mut a, &mut b] {
+            atlas.ensure(GlyphKey {
+                font_id,
+                glyph_id: TEST_GLYPH_WITH_OUTLINE,
+                phase: 0,
+                size_px: 16,
+            });
+        }
+        a.invalidate(alkalive_core::ModuleId(1), DirtyRect::default());
+        b.reset();
+        assert_eq!(a.len(), b.len());
+        assert_eq!(a.page_count(), b.page_count());
+        assert!(a.is_empty() && b.is_empty());
     }
 
     #[test]

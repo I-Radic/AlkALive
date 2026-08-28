@@ -66,20 +66,53 @@ impl SceneTessellation {
 /// - The input field is centered horizontally, sized to
 ///   `min(width * 0.5, 400) × 40` px, positioned below the vertical center.
 ///
-/// A fresh [`alkalive_text::HarfRustGlyphAtlas`] is allocated per call
-/// (matching current production behavior); the font registry/shaper pair is
-/// cached process-wide behind an [`std::sync::OnceLock`] so the bundled TTF
-/// is parsed exactly once per process instead of once per keystroke.
+/// The glyph atlas is **persistent** (TD1 fix): this wrapper locks a
+/// process-wide [`HarfRustGlyphAtlas`] created alongside the cached font
+/// registry/shaper pair, so unchanged glyphs (notably the title) are cache
+/// hits across re-tessellations and only newly typed glyphs rasterize. On
+/// page overflow the atlas resets and the current text re-rasterizes (see
+/// [`tessellate_scene_with_atlas`]). Use the `_with_atlas` variant to
+/// supply an atlas with a different lifetime (e.g. a renderer-owned one).
 pub fn tessellate_scene(
     scene: &TextSceneData,
     width: f32,
     height: f32,
 ) -> Result<SceneTessellation, String> {
+    let mut guard = persistent_atlas()
+        .lock()
+        .map_err(|_| "persistent glyph atlas mutex poisoned".to_string())?;
+    tessellate_scene_with_atlas(scene, width, height, &mut guard)
+}
+
+/// The process-wide persistent glyph atlas (TD1 fix): created lazily on
+/// first use from the same bundled-font registry as the shaper, and
+/// reused for the lifetime of the process.
+fn persistent_atlas() -> &'static std::sync::Mutex<HarfRustGlyphAtlas> {
+    static ATLAS: std::sync::OnceLock<std::sync::Mutex<HarfRustGlyphAtlas>> =
+        std::sync::OnceLock::new();
+    ATLAS.get_or_init(|| {
+        std::sync::Mutex::new(HarfRustGlyphAtlas::new(bundled_font().registry.clone()))
+    })
+}
+
+/// [`tessellate_scene`] with an explicit caller-owned atlas.
+///
+/// All glyph rasterization flows through `atlas`
+/// ([`alkalive_text::GlyphAtlas::ensure`] semantics): glyphs already
+/// cached from previous calls are cache hits, so a long-lived atlas avoids
+/// re-rasterizing unchanged text. If the current text's glyphs overflow
+/// the 512×512 page 0 (the only page the renderers upload), the atlas is
+/// **reset and the current text re-rasterized** — a graceful recovery that
+/// keeps every glyph on page 0 instead of erroring or silently dropping
+/// glyphs.
+pub fn tessellate_scene_with_atlas(
+    scene: &TextSceneData,
+    width: f32,
+    height: f32,
+    atlas: &mut HarfRustGlyphAtlas,
+) -> Result<SceneTessellation, String> {
     let font = bundled_font();
     let font_id = font.font_id;
-
-    // Fresh atlas per call — matches the GLSL backend's current behavior.
-    let mut atlas = HarfRustGlyphAtlas::new(font.registry.clone());
 
     let title_font_size = scene.font_size;
     let input_font_size = scene.font_size * 0.5;
@@ -112,18 +145,19 @@ pub fn tessellate_scene(
         .map_err(|e| format!("shape input: {:?}", e))?;
 
     // Rasterize glyphs into the atlas and build baseline-relative quads.
-    let title_quads = build_text_quads(&title_run, &mut atlas, title_font_size);
-    let input_quads = build_text_quads(&input_run, &mut atlas, input_font_size);
+    // Unchanged glyphs (notably the title) are cache hits in a persistent
+    // atlas; only new glyphs rasterize.
+    let mut title_quads = build_text_quads(&title_run, atlas, title_font_size);
+    let mut input_quads = build_text_quads(&input_run, atlas, input_font_size);
 
     if atlas.page_count() > 1 {
-        // Only page 0 is uploaded by the renderers; overflow would silently
-        // drop glyphs. Surface it loudly (same policy as the GLSL backend).
-        return Err(format!(
-            "glyph atlas overflowed to {} pages (capacity is one {}×{} page)",
-            atlas.page_count(),
-            ATLAS_SIZE,
-            ATLAS_SIZE
-        ));
+        // Only page 0 is uploaded by the renderers. A persistent atlas can
+        // overflow after enough distinct input strings; reset and
+        // re-rasterize just the current text so every glyph lands on
+        // page 0 (graceful recovery — same policy as the GLSL backend).
+        atlas.reset();
+        title_quads = build_text_quads(&title_run, atlas, title_font_size);
+        input_quads = build_text_quads(&input_run, atlas, input_font_size);
     }
 
     let atlas_page = atlas
@@ -227,6 +261,101 @@ mod tests {
             text: "Hello World!".to_string(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn persistent_atlas_reuses_cached_glyphs_across_tessellations() {
+        // TD1: with an explicit long-lived atlas, the second tessellation
+        // of the same scene must not rasterize any NEW glyph (cache hit
+        // for every glyph) and must produce an identical atlas page.
+        let mut atlas = HarfRustGlyphAtlas::new(bundled_font().registry.clone());
+        let t1 = tessellate_scene_with_atlas(&hello_scene(), 800.0, 600.0, &mut atlas)
+            .expect("first tessellate ok");
+        assert!(!atlas.is_empty());
+        let cached = atlas.len();
+
+        let t2 = tessellate_scene_with_atlas(&hello_scene(), 800.0, 600.0, &mut atlas)
+            .expect("second tessellate ok");
+        assert_eq!(
+            atlas.len(),
+            cached,
+            "same scene must be a full cache hit (no new glyphs)"
+        );
+        assert_eq!(
+            t1.atlas_page, t2.atlas_page,
+            "identical scenes must produce identical atlas pages"
+        );
+        assert_eq!(t1.vertices, t2.vertices);
+    }
+
+    #[test]
+    fn persistent_atlas_overflows_then_recovers_via_reset() {
+        // Force the caller-owned atlas past one page (many distinct glyph
+        // sizes of a real outlined glyph), then tessellate: the
+        // overflow-recovery path must reset and re-rasterize the current
+        // text so every glyph lands on page 0 and the call still succeeds.
+        use alkalive_text::{GlyphAtlas, GlyphKey};
+        let font = bundled_font();
+        let mut atlas = HarfRustGlyphAtlas::new(font.registry.clone());
+
+        // Shape a real letter to obtain a glyph id with a non-empty
+        // outline (Roboto's glyph 1 is `.null` — empty).
+        let run = font
+            .shaper
+            .shape(
+                "A",
+                &ShapeContext {
+                    font: font.font_id,
+                    size_px: 64.0,
+                    direction: None,
+                },
+            )
+            .expect("shape 'A'");
+        let outlined_gid = run.glyph_ids[0];
+
+        let mut size: u16 = 200;
+        let mut tried = 0;
+        while atlas.page_count() == 1 && tried < 300 {
+            atlas.ensure(GlyphKey {
+                font_id: font.font_id,
+                glyph_id: outlined_gid,
+                phase: 0,
+                size_px: size,
+            });
+            size = size.saturating_add(2);
+            tried += 1;
+        }
+        assert!(
+            atlas.page_count() > 1,
+            "precondition: atlas must overflow before tessellating (tried {} sizes)",
+            tried
+        );
+
+        let t = tessellate_scene_with_atlas(&hello_scene(), 800.0, 600.0, &mut atlas)
+            .expect("overflow recovery must succeed, not error");
+        assert!(t.title_vertex_count > 0);
+        assert!(t.input_vertex_count > 0);
+        assert!(
+            t.atlas_page.iter().any(|&b| b != 0),
+            "re-rasterized glyphs must mark non-zero coverage"
+        );
+    }
+
+    #[test]
+    fn tessellation_output_is_cache_state_independent() {
+        // The SceneTessellation produced for a given scene must not depend
+        // on whether the atlas was cold or warm — cache hits return the
+        // same slots, so vertices and pages are identical either way.
+        let mut cold = HarfRustGlyphAtlas::new(bundled_font().registry.clone());
+        let mut warm = HarfRustGlyphAtlas::new(bundled_font().registry.clone());
+        // Warm the second atlas with the same scene first.
+        let _ = tessellate_scene_with_atlas(&hello_scene(), 800.0, 600.0, &mut warm).unwrap();
+
+        let a = tessellate_scene_with_atlas(&hello_scene(), 800.0, 600.0, &mut cold).unwrap();
+        let b = tessellate_scene_with_atlas(&hello_scene(), 800.0, 600.0, &mut warm).unwrap();
+        assert_eq!(a.vertices, b.vertices);
+        assert_eq!(a.atlas_page, b.atlas_page);
+        assert_eq!(a.input_field_bounds, b.input_field_bounds);
     }
 
     #[test]
