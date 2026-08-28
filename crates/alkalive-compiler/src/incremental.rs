@@ -168,6 +168,71 @@ impl DependencyGraph {
     pub fn node_for_pass(&self, pass_index: usize) -> Option<&DepNode> {
         self.nodes.iter().find(|n| n.pass_index == pass_index)
     }
+
+    /// Serialise the graph to a compact JSON string (spec §4.2:
+    /// "DependencyGraph serialization for WASM embedding").
+    ///
+    /// Follows the crate's manual-JSON convention (constraint C9 — no
+    /// `serde` in library mode; the same style as
+    /// [`AlgorithmIR::to_json`](crate::ir::AlgorithmIR::to_json)). The
+    /// runtime embeds the graph in memory via [`incremental_analysis`] at
+    /// WASM start-up; this serialiser exposes the identical structure for
+    /// diagnostics, the CLI's `--scheduled` output, and any future
+    /// transport that ships the graph to another context.
+    ///
+    /// Shape:
+    ///
+    /// ```json
+    /// {"nodes":[{"id":0,"inputs":[4,5],"outputs":[],"pass_index":0,"description":"Clear"}]}
+    /// ```
+    pub fn to_json(&self) -> String {
+        let mut out = String::new();
+        out.push_str("{\"nodes\":[");
+        for (i, node) in self.nodes.iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            out.push_str("{\"id\":");
+            out.push_str(&node.id.0.to_string());
+            out.push_str(",\"inputs\":[");
+            for (j, sig) in node.inputs.iter().enumerate() {
+                if j > 0 {
+                    out.push(',');
+                }
+                out.push_str(&sig.0.to_string());
+            }
+            out.push_str("],\"outputs\":[");
+            for (j, sig) in node.outputs.iter().enumerate() {
+                if j > 0 {
+                    out.push(',');
+                }
+                out.push_str(&sig.0.to_string());
+            }
+            out.push_str("],\"pass_index\":");
+            out.push_str(&node.pass_index.to_string());
+            out.push_str(",\"description\":\"");
+            push_json_escaped(&mut out, &node.description);
+            out.push_str("\"}");
+        }
+        out.push_str("]}");
+        out
+    }
+}
+
+/// Escape a string for embedding in a JSON string literal (C9 pattern,
+/// identical to the helper in `ir.rs`).
+fn push_json_escaped(out: &mut String, s: &str) {
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
 }
 
 /// Well-known signal IDs for the Hello World scene.
@@ -744,6 +809,107 @@ module HelloWorld {
         assert_eq!(c, d);
         assert_eq!(graph_node_id_roundtrip(c), 3);
     }
+
+    #[test]
+    fn dependency_graph_to_json_empty_graph() {
+        let graph = DependencyGraph::default();
+        assert_eq!(graph.to_json(), "{\"nodes\":[]}");
+    }
+
+    #[test]
+    fn dependency_graph_to_json_hello_world_shape() {
+        // The canonical Hello World scene: 5 passes -> 5 nodes.
+        let scheduled = compile_scheduled(HELLO_WORLD_SRC).expect("compile");
+        let graph = incremental_analysis(&scheduled);
+        let json = graph.to_json();
+
+        // Five nodes with sequential ids and pass indices.
+        for i in 0..5 {
+            assert!(
+                json.contains(&format!("\"id\":{}", i)),
+                "node id {} missing: {}",
+                i,
+                json
+            );
+            assert!(
+                json.contains(&format!("\"pass_index\":{}", i)),
+                "pass_index {} missing: {}",
+                i,
+                json
+            );
+        }
+        // Clear node (pass 0) reads CANVAS_WIDTH(4) + CANVAS_HEIGHT(5).
+        assert!(
+            json.contains("\"inputs\":[4,5]"),
+            "Clear node inputs wrong: {}",
+            json
+        );
+        // TitleText node reads INPUT_TEXT(0), TIME(1), FONT_SIZE(2),
+        // ROTATION_SPEED(3), CANVAS_WIDTH(4), CANVAS_HEIGHT(5).
+        assert!(
+            json.contains("\"inputs\":[0,1,2,3,4,5]"),
+            "TitleText node inputs wrong: {}",
+            json
+        );
+        // InputText node reads INPUT_TEXT(0), CANVAS_WIDTH(4),
+        // CANVAS_HEIGHT(5).
+        assert!(
+            json.contains("\"inputs\":[0,4,5]"),
+            "InputText node inputs wrong: {}",
+            json
+        );
+        // Every node has empty outputs and a description.
+        assert!(json.contains("\"outputs\":[]"), "got: {}", json);
+        for kind in ["Clear", "InputFieldBackground", "InputFieldBorder", "TitleText", "InputText"]
+        {
+            assert!(
+                json.contains(&format!("\"description\":\"{}\"", kind)),
+                "description {} missing: {}",
+                kind,
+                json
+            );
+        }
+        // No trailing comma before the closing bracket.
+        assert!(!json.contains(",]}"), "got: {}", json);
+    }
+
+    #[test]
+    fn dependency_graph_to_json_escapes_descriptions() {
+        // Descriptions come from PassKind Debug formatting (safe ASCII),
+        // but the serialiser must still escape correctly if a future
+        // description contains quotes/backslashes.
+        let mut graph = DependencyGraph::default();
+        graph.nodes.push(DepNode {
+            id: DepNodeId(0),
+            inputs: vec![SignalId(0)],
+            outputs: vec![],
+            pass_index: 0,
+            description: "quote\"back\\slash".to_string(),
+        });
+        let json = graph.to_json();
+        assert!(
+            json.contains("\\\"") && json.contains("\\\\"),
+            "escaped description wrong: {}",
+            json
+        );
+    }
+
+    /// Canonical Hello World .alk source shared by serialisation tests.
+    const HELLO_WORLD_SRC: &str = r#"module HelloWorld {
+        scene {
+          background: #000000
+          text "Hello World!" {
+            color: gold
+            font-size: 64
+            rotation: y-axis 0.5
+            position: center
+          }
+          input-field {
+            placeholder: "Type here..."
+            position: below text
+          }
+        }
+      }"#;
 
     fn graph_node_id_roundtrip(id: ComputationId) -> u32 {
         // A ComputationId flows into any DepNodeId-taking API unchanged.
