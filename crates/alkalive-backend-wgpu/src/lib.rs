@@ -307,6 +307,17 @@ pub fn build_vertex_buffer(quads: &[GlyphQuad]) -> Vec<Vertex> {
     verts
 }
 
+/// Clamp requested canvas dimensions to the minimum valid 1×1.
+///
+/// Zero-sized canvases occur in degenerate cases (a `display:none`
+/// parent, a collapsed layout) and must not reach the GPU layer: a
+/// 0-sized WebGL viewport call is invalid, and wgpu surface
+/// configurations reject zero extents. Both backends' `resize`
+/// route their arguments through this helper.
+pub fn clamp_dimensions(width: u32, height: u32) -> (u32, u32) {
+    (width.max(1), height.max(1))
+}
+
 /// Build baseline-relative glyph quads from a shaped run.
 pub(crate) fn build_text_quads(
     run: &alkalive_text::ShapedRun,
@@ -1254,7 +1265,7 @@ mod wasm {
         /// a degenerate edge case (e.g. a display:none parent) and must not
         /// produce an invalid GL viewport call.
         pub fn resize(&mut self, width: u32, height: u32) {
-            let (width, height) = (width.max(1), height.max(1));
+            let (width, height) = clamp_dimensions(width, height);
             self.width = width;
             self.height = height;
             self.canvas.set_width(width);
@@ -1688,6 +1699,22 @@ mod tests {
     fn build_vertex_buffer_empty_input() {
         let verts = build_vertex_buffer(&[]);
         assert!(verts.is_empty());
+    }
+
+    #[test]
+    fn clamp_dimensions_rejects_zero_canvas() {
+        // A collapsed/hidden canvas requests 0×0 — both backends must
+        // clamp to the minimum valid 1×1 before touching the GPU layer.
+        assert_eq!(clamp_dimensions(0, 0), (1, 1));
+        assert_eq!(clamp_dimensions(0, 600), (1, 600));
+        assert_eq!(clamp_dimensions(800, 0), (800, 1));
+    }
+
+    #[test]
+    fn clamp_dimensions_passes_valid_sizes_through() {
+        assert_eq!(clamp_dimensions(1, 1), (1, 1));
+        assert_eq!(clamp_dimensions(800, 600), (800, 600));
+        assert_eq!(clamp_dimensions(u32::MAX, u32::MAX), (u32::MAX, u32::MAX));
     }
 
     #[test]

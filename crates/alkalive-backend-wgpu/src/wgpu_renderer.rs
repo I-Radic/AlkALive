@@ -65,7 +65,7 @@ pub const MAX_DYNAMIC_SLOTS: usize = 16;
 /// and, without this bound, the runtime would show a blank canvas instead
 /// of falling back to WebGL2. 10 s is comfortably above every healthy
 /// software-adapter measurement while keeping the fallback prompt.
-#[cfg(target_arch = "wasm32")]
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 const WEBGPU_REQUEST_TIMEOUT_MS: i32 = 10_000;
 
 /// Race a future against a `setTimeout` deadline (browser-only).
@@ -598,6 +598,24 @@ pub enum ProbeOutcome {
     TimedOut,
 }
 
+/// Map the outcome of a *bounded* adapter request to a [`ProbeOutcome`].
+///
+/// `Some(output)` — the request settled within the bound:
+/// `Some(adapter)` → [`ProbeOutcome::Available`], `None` →
+/// [`ProbeOutcome::Unavailable`]. `None` — the bound expired before the
+/// request settled (stalled GPU process) → [`ProbeOutcome::TimedOut`].
+///
+/// Kept as a pure function so the decision table is unit-testable on
+/// native targets (the bounded request itself is wasm32-only; its
+/// end-to-end behaviour is exercised by the firefox e2e suite).
+fn probe_outcome<T>(bounded: Option<Option<T>>) -> ProbeOutcome {
+    match bounded {
+        Some(Some(_)) => ProbeOutcome::Available,
+        Some(None) => ProbeOutcome::Unavailable,
+        None => ProbeOutcome::TimedOut,
+    }
+}
+
 impl WgpuBackendRenderer {
     /// Non-destructive WebGPU capability probe.
     ///
@@ -621,24 +639,14 @@ impl WgpuBackendRenderer {
         {
             // Bound the request: a stalled GPU process must be reported as
             // `TimedOut`, never awaited indefinitely.
-            match with_timeout(request, WEBGPU_REQUEST_TIMEOUT_MS).await {
-                Some(adapter) => {
-                    if adapter.is_some() {
-                        ProbeOutcome::Available
-                    } else {
-                        ProbeOutcome::Unavailable
-                    }
-                }
-                None => ProbeOutcome::TimedOut,
-            }
+            let bounded = with_timeout(request, WEBGPU_REQUEST_TIMEOUT_MS)
+                .await
+                .map(|adapter| adapter);
+            probe_outcome(bounded)
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
-            if request.await.is_some() {
-                ProbeOutcome::Available
-            } else {
-                ProbeOutcome::Unavailable
-            }
+            probe_outcome(Some(request.await))
         }
     }
 
@@ -942,7 +950,7 @@ impl WgpuBackendRenderer {
     /// Resize the surface. The next frame re-tessellates so geometry tracks
     /// the new dimensions.
     pub fn resize(&mut self, width: u32, height: u32) {
-        let (width, height) = (width.max(1), height.max(1));
+        let (width, height) = crate::clamp_dimensions(width, height);
         if width == self.width && height == self.height {
             return;
         }
@@ -972,5 +980,34 @@ impl WgpuBackendRenderer {
     /// Canvas height in physical pixels.
     pub fn height(&self) -> u32 {
         self.height
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn probe_outcome_distinguishes_all_three_outcomes() {
+        // The decision table of the bounded adapter request: settled with
+        // an adapter / settled without / never settled within the bound.
+        assert_eq!(probe_outcome(Some(Some(()))), ProbeOutcome::Available);
+        assert_eq!(
+            probe_outcome::<()>(Some(None)),
+            ProbeOutcome::Unavailable
+        );
+        assert_eq!(probe_outcome::<()>(None), ProbeOutcome::TimedOut);
+        // All three are pairwise distinct (the runtime publishes distinct
+        // fallback reasons per variant).
+        assert_ne!(ProbeOutcome::Available, ProbeOutcome::Unavailable);
+        assert_ne!(ProbeOutcome::Available, ProbeOutcome::TimedOut);
+        assert_ne!(ProbeOutcome::Unavailable, ProbeOutcome::TimedOut);
+    }
+
+    #[test]
+    fn webgpu_probe_timeout_is_ten_seconds() {
+        // The spec'd bound: a stalled GPU process must be reported after
+        // 10 s, never awaited indefinitely.
+        assert_eq!(WEBGPU_REQUEST_TIMEOUT_MS, 10_000);
     }
 }

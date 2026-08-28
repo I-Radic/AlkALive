@@ -1325,6 +1325,44 @@ fn zero_slot() -> AtlasSlot {
     }
 }
 
+/// Compute the `(start, end)` inclusive point-index range of each
+/// contour from TrueType `end_pts_of_contours`, skipping malformed
+/// entries.
+///
+/// TrueType stores each contour's last point index; the first contour
+/// starts at 0 and each next contour starts at the previous `end + 1`.
+/// Per the spec the entries are non-decreasing, but a *malformed*
+/// font (untrusted input — [`HarfRustFontRegistry::load_bundle`] accepts
+/// arbitrary bytes up to [`MAX_FONT_SIZE`]) may store non-monotonic or
+/// out-of-range indices. read-fonts does not validate monotonicity, so
+/// this helper defensively clamps:
+///
+/// - `end >= points_len` — stop (the remaining entries describe points
+///   past the end of the point array; continuing would misattribute
+///   them).
+/// - `end < start` — skip the entry (a non-monotonic pair would
+///   otherwise construct a negative-length slice and panic).
+///
+/// This keeps `draw_glyph_outline` panic-free on hostile fonts.
+fn contour_ranges(end_pts: &[u16], points_len: usize) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::with_capacity(end_pts.len());
+    let mut start = 0usize;
+    for &end_be in end_pts {
+        let end = end_be as usize;
+        if end >= points_len {
+            break;
+        }
+        if end < start {
+            // Non-monotonic (malformed) contour table: skip the entry
+            // rather than constructing an inverted slice.
+            continue;
+        }
+        ranges.push((start, end));
+        start = end + 1;
+    }
+    ranges
+}
+
 /// Draw a glyph's outline (scaled by `scale`) into `pen` as path commands.
 ///
 /// For [`Glyph::Simple`], iterates each contour and emits `move_to`/
@@ -1345,14 +1383,12 @@ fn draw_glyph_outline<P: OutlinePen>(glyph: &Glyph<'_>, scale: f32, pen: &mut P)
             if points.is_empty() {
                 return;
             }
-            let mut start = 0usize;
-            for end_be in end_pts {
-                let end = end_be.get() as usize;
-                if end >= points.len() {
-                    break;
-                }
+            // Defensive contour iteration: malformed fonts (non-monotonic
+            // or out-of-range end_pts) must not panic — see
+            // [`contour_ranges`].
+            let raw: Vec<u16> = end_pts.iter().map(|be| be.get()).collect();
+            for (start, end) in contour_ranges(&raw, points.len()) {
                 draw_contour(&points[start..=end], scale, pen);
-                start = end + 1;
             }
         }
         Glyph::Composite(_) => {
@@ -2240,6 +2276,43 @@ mod tests {
         assert_eq!(a.len(), b.len());
         assert_eq!(a.page_count(), b.page_count());
         assert!(a.is_empty() && b.is_empty());
+    }
+
+    // -- contour_ranges (malformed-font hardening) -------------------------
+
+    #[test]
+    fn contour_ranges_well_formed_table() {
+        // Two contours: points 0..=3 and 4..=7.
+        assert_eq!(contour_ranges(&[3, 7], 8), vec![(0, 3), (4, 7)]);
+        // Single contour covering all points.
+        assert_eq!(contour_ranges(&[9], 10), vec![(0, 9)]);
+    }
+
+    #[test]
+    fn contour_ranges_out_of_range_stops() {
+        // end >= points_len stops iteration (no misattribution).
+        assert_eq!(contour_ranges(&[3, 99], 8), vec![(0, 3)]);
+        assert_eq!(contour_ranges(&[99], 8), Vec::<(usize, usize)>::new());
+    }
+
+    #[test]
+    fn contour_ranges_non_monotonic_table_skips_instead_of_panicking() {
+        // A malformed font with non-monotonic end_pts_of_contours (e.g.
+        // [5, 3]) previously constructed points[6..=3] and panicked; the
+        // helper must skip the inverted entry and keep going.
+        let ranges = contour_ranges(&[5, 3, 9], 10);
+        // Entry 5 -> (0,5); entry 3 (inverted vs start=6) skipped;
+        // entry 9 -> (6,9).
+        assert_eq!(ranges, vec![(0, 5), (6, 9)]);
+        // Repeated values (degenerate but non-inverted) skip cleanly:
+        // [2, 2, 4] -> (0,2); second 2 is inverted vs start=3 -> skipped;
+        // 4 -> (3,4).
+        assert_eq!(contour_ranges(&[2, 2, 4], 5), vec![(0, 2), (3, 4)]);
+    }
+
+    #[test]
+    fn contour_ranges_empty_table() {
+        assert!(contour_ranges(&[], 10).is_empty());
     }
 
     #[test]

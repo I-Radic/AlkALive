@@ -686,6 +686,58 @@ mod tests {
     }
 
     #[test]
+    fn lower_text_node_infinite_font_size_errors() {
+        // A numeric literal too large for f32 parses to infinity via
+        // str::parse — the non-finite branch must reject it.
+        let err = lower_err(r#"module M { scene { text "Hi" { font-size: 99999999999999999999999999999999999999999 } } }"#);
+        assert!(
+            err.message.contains("positive finite"),
+            "got: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("inf"),
+            "message should name the offending value: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn lower_text_node_infinite_rotation_speed_errors() {
+        let err = lower_err(
+            r#"module M { scene { text "Hi" { rotation: y-axis 99999999999999999999999999999999999999999 } } }"#,
+        );
+        assert!(
+            err.message.contains("rotation speed must be finite"),
+            "got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn lower_text_node_nonfinite_custom_position_errors() {
+        let err = lower_err(
+            r#"module M { scene { text "Hi" { position: 99999999999999999999999999999999999999999 0.5 } } }"#,
+        );
+        assert!(
+            err.message.contains("finite"),
+            "got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn codegen_error_carries_source_position() {
+        // Every CodegenError must carry the offending node's line/col so
+        // the CLI can point at the source. The text node below starts on
+        // line 2 (after `module M {` on line 1), col 5.
+        let src = "module M {\n  scene {\n    text \"Hi\" { font-size: 0 }\n  }\n}";
+        let err = lower_err(src);
+        assert!(err.line >= 2, "line: {}", err.line);
+        assert!(err.col >= 1, "col: {}", err.col);
+    }
+
+    #[test]
     fn lower_input_field_defaults() {
         let ir = lower_ok(r#"module M { scene { text "Hi" { } input-field { } } }"#);
         match &ir.nodes[1] {
