@@ -1006,12 +1006,14 @@ fn start_frame_loop() {
                         .renderer
                         .render_frame(&runtime.scene, &runtime.schedule, runtime.time);
                 } else {
-                    // ADR-025 incremental path: check which signals changed
-                    // since the last frame, propagate dirtiness through the
-                    // dependency graph, and pass the dirty pass indices to
-                    // the renderer so it can skip unchanged passes.
-                    let changed = runtime.signals.check_changes();
-                    if changed.is_empty() {
+                    // ADR-025 incremental path: run the dirty-propagation
+                    // engine's full re-evaluation cycle (check which
+                    // signals changed → propagate to dirty nodes → reduce
+                    // to dirty pass indices) in one call, and pass the
+                    // dirty pass indices to the renderer so it can skip
+                    // unchanged passes.
+                    let dirty_passes = runtime.signals.reevaluate(&runtime.dep_graph);
+                    if dirty_passes.is_empty() {
                         // Nothing changed — skip rendering entirely. The
                         // browser's swap chain preserves the previous frame
                         // (the WebGL2 default framebuffer's contents are
@@ -1021,12 +1023,8 @@ fn start_frame_loop() {
                         //
                         // Note: in practice this branch is rare because
                         // TIME is bumped every frame (above), so the
-                        // `changed` list always includes TIME.
+                        // re-evaluation cycle always finds TIME changed.
                     } else {
-                        let dirty_nodes = runtime.signals.propagate(&changed, &runtime.dep_graph);
-                        let dirty_passes = runtime
-                            .signals
-                            .dirty_passes(&dirty_nodes, &runtime.dep_graph);
                         // Pass dirty_passes to the renderer so it can skip
                         // unchanged passes. The renderer's
                         // `render_frame_with_dirty` is a hint-aware variant

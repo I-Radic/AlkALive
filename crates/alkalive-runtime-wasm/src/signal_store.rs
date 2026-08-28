@@ -232,6 +232,61 @@ impl SignalStore {
             .collect()
     }
 
+    /// Run one complete re-evaluation cycle (spec §4.2's dirty-propagation
+    /// engine: check → propagate → re-evaluate).
+    ///
+    /// This is the single call the frame loop makes each tick: it consumes
+    /// the signals that changed since the last cycle
+    /// ([`check_changes`](Self::check_changes)), propagates them to dirty
+    /// dependency nodes ([`propagate`](Self::propagate)), and reduces the
+    /// dirty nodes to the schedule pass indices that must re-execute
+    /// ([`dirty_passes`](Self::dirty_passes)). An empty return means
+    /// "nothing changed — the previous frame's output is still valid"
+    /// (zero-work idle).
+    ///
+    /// The spec's `reevaluate(dirty: &[DepNodeId], cache: &mut Cache)`
+    /// signature is realised with the store itself as the cache: the
+    /// per-signal version/last-version maps *are* the cache, updated in
+    /// place by this call. The "dirty" input of the spec's signature is
+    /// produced internally by [`propagate`](Self::propagate) — callers
+    /// that need the intermediate dirty-node list can still call the three
+    /// steps manually.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use alkalive_runtime_wasm::signal_store::{SignalStore, SignalValue};
+    /// # use alkalive_compiler::{
+    /// #     incremental_analysis, mint_module_id, AlgorithmIR, ColorIR, NodeIR,
+    /// #     PositionIR, SignalId, schedule_lowering, ScheduledScene,
+    /// # };
+    /// # let mut algo = AlgorithmIR::new(mint_module_id("M"), "M");
+    /// # algo.nodes.push(NodeIR::Text {
+    /// #     content: "Hi".into(), color: ColorIR::Gold, font_size: 32.0,
+    /// #     rotation_speed: 0.0, position: PositionIR::Center,
+    /// # });
+    /// # let schedule = schedule_lowering(&algo);
+    /// # let scheduled = ScheduledScene { algorithm: algo, schedule };
+    /// # let dep_graph = incremental_analysis(&scheduled);
+    /// let mut store = SignalStore::new();
+    /// // First cycle: nothing was ever set -> no changes.
+    /// assert!(store.reevaluate(&dep_graph).is_empty());
+    /// // Set INPUT_TEXT -> TitleText + InputText passes become dirty.
+    /// store.set(SignalId(0), SignalValue::Text("hello".into()));
+    /// let dirty = store.reevaluate(&dep_graph);
+    /// assert!(!dirty.is_empty());
+    /// // Second cycle with no further sets -> idle.
+    /// assert!(store.reevaluate(&dep_graph).is_empty());
+    /// ```
+    pub fn reevaluate(&mut self, graph: &DependencyGraph) -> Vec<usize> {
+        let changed = self.check_changes();
+        if changed.is_empty() {
+            return Vec::new();
+        }
+        let dirty_nodes = self.propagate(&changed, graph);
+        self.dirty_passes(&dirty_nodes, graph)
+    }
+
     /// Returns the number of signals currently stored.
     pub fn len(&self) -> usize {
         self.values.len()
@@ -579,6 +634,104 @@ mod tests {
         let s = SignalStore::new();
         let passes = s.dirty_passes(&[], &graph);
         assert!(passes.is_empty());
+    }
+
+    // ---- SignalStore: reevaluate (composed cycle) ----
+
+    #[test]
+    fn reevaluate_on_fresh_store_is_idle() {
+        let scheduled = hello_world_scheduled();
+        let graph = alkalive_compiler::incremental_analysis(&scheduled);
+        let mut s = SignalStore::new();
+        assert!(
+            s.reevaluate(&graph).is_empty(),
+            "no signals ever set -> nothing to re-evaluate"
+        );
+    }
+
+    #[test]
+    fn reevaluate_returns_dirty_passes_for_input_text_change() {
+        let scheduled = hello_world_scheduled();
+        let graph = alkalive_compiler::incremental_analysis(&scheduled);
+        let mut s = SignalStore::new();
+
+        s.set(
+            signals::INPUT_TEXT,
+            SignalValue::Text("hello".to_string()),
+        );
+        let dirty = s.reevaluate(&graph);
+        // INPUT_TEXT is read by TitleText (pass 3) and InputText (pass 4)
+        // in the canonical 5-pass schedule.
+        assert_eq!(dirty, vec![3, 4]);
+    }
+
+    #[test]
+    fn reevaluate_is_idle_without_new_sets() {
+        let scheduled = hello_world_scheduled();
+        let graph = alkalive_compiler::incremental_analysis(&scheduled);
+        let mut s = SignalStore::new();
+        s.set(
+            signals::INPUT_TEXT,
+            SignalValue::Text("hello".to_string()),
+        );
+        let first = s.reevaluate(&graph);
+        assert_eq!(first, vec![3, 4]);
+        // No further sets: the second cycle must be idle (the version
+        // bookkeeping was consumed by the first cycle).
+        assert!(s.reevaluate(&graph).is_empty());
+    }
+
+    #[test]
+    fn reevaluate_changed_unread_signal_dirties_nothing() {
+        let scheduled = hello_world_scheduled();
+        let graph = alkalive_compiler::incremental_analysis(&scheduled);
+        let mut s = SignalStore::new();
+        // Signal 99 is read by no pass: the cycle must consume the change
+        // and still return an empty dirty-pass list.
+        s.set(SignalId(99), SignalValue::Float(1.0));
+        assert!(s.reevaluate(&graph).is_empty());
+    }
+
+    #[test]
+    fn reevaluate_matches_manual_three_step_composition() {
+        // The composed cycle must be exactly equivalent to calling
+        // check_changes → propagate → dirty_passes manually, across a
+        // sequence of mutations.
+        let scheduled = hello_world_scheduled();
+        let graph = alkalive_compiler::incremental_analysis(&scheduled);
+
+        let mut composed = SignalStore::new();
+        let mut manual = SignalStore::new();
+
+        // Mutation 1: input text.
+        composed.set(
+            signals::INPUT_TEXT,
+            SignalValue::Text("a".to_string()),
+        );
+        manual.set(
+            signals::INPUT_TEXT,
+            SignalValue::Text("a".to_string()),
+        );
+        let via_composed = composed.reevaluate(&graph);
+        let changed = manual.check_changes();
+        let dirty_nodes = manual.propagate(&changed, &graph);
+        let via_manual = manual.dirty_passes(&dirty_nodes, &graph);
+        assert_eq!(via_composed, via_manual);
+
+        // Mutation 2: canvas resize (dirties all passes).
+        composed.set(signals::CANVAS_WIDTH, SignalValue::Uint(1024));
+        composed.set(signals::CANVAS_HEIGHT, SignalValue::Uint(768));
+        manual.set(signals::CANVAS_WIDTH, SignalValue::Uint(1024));
+        manual.set(signals::CANVAS_HEIGHT, SignalValue::Uint(768));
+        let via_composed = composed.reevaluate(&graph);
+        let changed = manual.check_changes();
+        let dirty_nodes = manual.propagate(&changed, &graph);
+        let via_manual = manual.dirty_passes(&dirty_nodes, &graph);
+        assert_eq!(via_composed, via_manual);
+
+        // Both stores idle afterwards.
+        assert!(composed.reevaluate(&graph).is_empty());
+        assert!(manual.reevaluate(&graph).is_empty());
     }
 
     #[test]
