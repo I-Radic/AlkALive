@@ -28,7 +28,8 @@ use alkalive_compiler::schedule::{
     BatchingStrategy, PassKind, RenderPass, ShaderId, ThreadAffinity,
 };
 use alkalive_compiler::{
-    compile, compile_scheduled, compile_with_lints, AlgorithmIR, CompileError, SceneIR,
+    compile, compile_with_deps, compile_with_lints, AlgorithmIR, CompileError, DependencyGraph,
+    SceneIR,
 };
 
 fn main() -> ExitCode {
@@ -132,18 +133,22 @@ fn compile_file(input: &Path, output: &Path, lint: bool, scheduled: bool) -> Res
         if lint {
             eprintln!("alkalive-compiler: --lint is ignored when --scheduled is set (ADR-024)");
         }
-        let scheduled_scene =
-            compile_scheduled(&src).map_err(|e| format_compile_error(&e, input))?;
-        let json = scheduled_scene_to_json(&scheduled_scene);
+        // The --scheduled path emits the full ADR-024/025 pipeline:
+        // algorithm + schedule + dependency graph (spec §4.2's
+        // DependencyGraph serialization, surfaced for diagnostics).
+        let (scheduled_scene, dep_graph) =
+            compile_with_deps(&src).map_err(|e| format_compile_error(&e, input))?;
+        let json = scheduled_scene_to_json(&scheduled_scene, &dep_graph);
         fs::write(output, json.as_bytes())
             .map_err(|e| format!("failed to write `{}`: {}", output.display(), e))?;
 
         eprintln!(
-            "alkalive-compiler: compiled `{}` -> `{}` ({} nodes, {} passes) [scheduled]",
+            "alkalive-compiler: compiled `{}` -> `{}` ({} nodes, {} passes, {} dep nodes) [scheduled]",
             input.display(),
             output.display(),
             scheduled_scene.algorithm.nodes.len(),
             scheduled_scene.schedule.passes.len(),
+            dep_graph.len(),
         );
         return Ok(());
     }
@@ -258,7 +263,7 @@ fn algorithm_ir_to_json(ir: &AlgorithmIR) -> String {
 }
 
 /// Build a pretty-printed JSON string from a [`alkalive_compiler::ScheduledScene`]
-/// (ADR-024). Contains both the algorithm and the schedule.
+/// (ADR-024) plus its ADR-025 [`DependencyGraph`].
 ///
 /// The top-level shape is:
 /// ```json
@@ -267,10 +272,16 @@ fn algorithm_ir_to_json(ir: &AlgorithmIR) -> String {
 ///   "schedule": {
 ///     "passes": [ { ... RenderPass ... }, ... ],
 ///     "pass_order": [0, 1, 2, ...]
+///   },
+///   "dep_graph": {
+///     "nodes": [ { "id": 0, "inputs": [4, 5], "outputs": [], "pass_index": 0, "description": "Clear" }, ... ]
 ///   }
 /// }
 /// ```
-fn scheduled_scene_to_json(scheduled: &alkalive_compiler::ScheduledScene) -> String {
+fn scheduled_scene_to_json(
+    scheduled: &alkalive_compiler::ScheduledScene,
+    dep_graph: &DependencyGraph,
+) -> String {
     use serde_json::{Map, Value};
 
     // Reuse the algorithm-only serialiser and parse it back to a Value.
@@ -296,9 +307,15 @@ fn scheduled_scene_to_json(scheduled: &alkalive_compiler::ScheduledScene) -> Str
     schedule_obj.insert("passes".into(), Value::Array(passes));
     schedule_obj.insert("pass_order".into(), Value::Array(pass_order));
 
+    // ADR-025 dependency graph (spec §4.2 serialization): the same
+    // manual-JSON document the library emits, re-parsed for embedding.
+    let dep_value: Value =
+        serde_json::from_str(&dep_graph.to_json()).expect("dep-graph JSON is well-formed");
+
     let mut root = Map::new();
     root.insert("algorithm".into(), algo_value);
     root.insert("schedule".into(), Value::Object(schedule_obj));
+    root.insert("dep_graph".into(), dep_value);
 
     let value = Value::Object(root);
     serde_json::to_string_pretty(&value).expect("ScheduledScene is always JSON-serialisable")
@@ -725,11 +742,14 @@ mod tests {
             }"#,
         )
         .expect("compile should succeed");
+        let dep_graph =
+            alkalive_compiler::incremental_analysis(&scheduled);
 
-        let json = scheduled_scene_to_json(&scheduled);
-        // Top-level keys: algorithm + schedule.
+        let json = scheduled_scene_to_json(&scheduled, &dep_graph);
+        // Top-level keys: algorithm + schedule + dep_graph.
         assert!(json.contains("algorithm"), "got: {}", json);
         assert!(json.contains("schedule"), "got: {}", json);
+        assert!(json.contains("dep_graph"), "got: {}", json);
         // Algorithm sub-keys (serde_json::to_string_pretty puts a space after
         // the colon, so we don't pin the exact spacing).
         assert!(json.contains("module_name"), "got: {}", json);
@@ -755,6 +775,18 @@ mod tests {
         assert!(json.contains("\"input_field_border\""), "got: {}", json);
         assert!(json.contains("\"title_text\""), "got: {}", json);
         assert!(json.contains("\"input_text\""), "got: {}", json);
+        // The dependency graph is embedded with its node descriptions.
+        assert!(json.contains("\"nodes\""), "got: {}", json);
+        assert!(
+            json.contains("\"description\": \"Clear\""),
+            "Clear dep node missing: {}",
+            json
+        );
+        assert!(
+            json.contains("\"pass_index\""),
+            "dep node pass_index missing: {}",
+            json
+        );
         // pass_order = [0, 1, 2, 3, 4] (pretty-printed, so each on its own
         // line — we just verify the integers 0–4 all appear inside the
         // pass_order array). Since we know pass_order comes after passes,
@@ -779,6 +811,7 @@ mod tests {
         let out = std::fs::read_to_string(&output_path).unwrap();
         assert!(out.contains("algorithm"), "got: {}", out);
         assert!(out.contains("schedule"), "got: {}", out);
+        assert!(out.contains("dep_graph"), "got: {}", out);
         assert!(out.contains("\"title_text\""), "got: {}", out);
         assert!(out.contains("\"clear\""), "got: {}", out);
 
