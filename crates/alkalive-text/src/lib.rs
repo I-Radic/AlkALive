@@ -2271,7 +2271,7 @@ mod tests {
                 size_px: 16,
             });
         }
-        a.invalidate(alkalive_core::ModuleId(1), DirtyRect::default());
+        a.invalidate(alkalive_core::ModuleId(1), DirtyRect);
         b.reset();
         assert_eq!(a.len(), b.len());
         assert_eq!(a.page_count(), b.page_count());

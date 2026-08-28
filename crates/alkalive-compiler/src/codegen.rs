@@ -689,7 +689,9 @@ mod tests {
     fn lower_text_node_infinite_font_size_errors() {
         // A numeric literal too large for f32 parses to infinity via
         // str::parse — the non-finite branch must reject it.
-        let err = lower_err(r#"module M { scene { text "Hi" { font-size: 99999999999999999999999999999999999999999 } } }"#);
+        let err = lower_err(
+            r#"module M { scene { text "Hi" { font-size: 99999999999999999999999999999999999999999 } } }"#,
+        );
         assert!(
             err.message.contains("positive finite"),
             "got: {}",
@@ -719,11 +721,7 @@ mod tests {
         let err = lower_err(
             r#"module M { scene { text "Hi" { position: 99999999999999999999999999999999999999999 0.5 } } }"#,
         );
-        assert!(
-            err.message.contains("finite"),
-            "got: {}",
-            err.message
-        );
+        assert!(err.message.contains("finite"), "got: {}", err.message);
     }
 
     #[test]

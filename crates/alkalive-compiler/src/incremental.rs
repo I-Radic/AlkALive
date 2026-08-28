@@ -860,8 +860,13 @@ module HelloWorld {
         );
         // Every node has empty outputs and a description.
         assert!(json.contains("\"outputs\":[]"), "got: {}", json);
-        for kind in ["Clear", "InputFieldBackground", "InputFieldBorder", "TitleText", "InputText"]
-        {
+        for kind in [
+            "Clear",
+            "InputFieldBackground",
+            "InputFieldBorder",
+            "TitleText",
+            "InputText",
+        ] {
             assert!(
                 json.contains(&format!("\"description\":\"{}\"", kind)),
                 "description {} missing: {}",

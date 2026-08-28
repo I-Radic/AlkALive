@@ -912,8 +912,7 @@ impl RewriteRule for ReadMerge {
 /// application order (rules 1–3; rule 4, [`evaluation_reorder`], runs
 /// at extraction). [`egraph_optimization`] iterates this registry
 /// until no rule reports a change.
-pub const RULES: &[&dyn RewriteRule] =
-    &[&StateStoreLoadForward, &DeadStoreElimination, &ReadMerge];
+pub const RULES: &[&dyn RewriteRule] = &[&StateStoreLoadForward, &DeadStoreElimination, &ReadMerge];
 
 /// Rewrite rule 1: `state_store_load_forward`.
 ///

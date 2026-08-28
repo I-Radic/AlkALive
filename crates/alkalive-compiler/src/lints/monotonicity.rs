@@ -511,7 +511,9 @@ mod tests {
         assert_eq!(set.len(), 1, "got: {:?}", set.reports);
         assert_eq!(set.reports[0].severity, LintSeverity::Warning);
         assert!(
-            set.reports[0].message.contains("illegal `remove` on `@monotone`"),
+            set.reports[0]
+                .message
+                .contains("illegal `remove` on `@monotone`"),
             "got: {}",
             set.reports[0].message
         );
@@ -539,7 +541,9 @@ mod tests {
         );
         assert_eq!(set.len(), 1, "got: {:?}", set.reports);
         assert!(
-            set.reports[0].message.contains("illegal `push` on `@antitone`"),
+            set.reports[0]
+                .message
+                .contains("illegal `push` on `@antitone`"),
             "got: {}",
             set.reports[0].message
         );
@@ -621,7 +625,9 @@ mod tests {
         );
         assert_eq!(set.len(), 1, "got: {:?}", set.reports);
         assert!(
-            set.reports[0].message.contains("illegal `truncate` on `@monotone`"),
+            set.reports[0]
+                .message
+                .contains("illegal `truncate` on `@monotone`"),
             "got: {}",
             set.reports[0].message
         );

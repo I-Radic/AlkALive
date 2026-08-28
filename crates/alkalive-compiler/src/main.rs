@@ -742,8 +742,7 @@ mod tests {
             }"#,
         )
         .expect("compile should succeed");
-        let dep_graph =
-            alkalive_compiler::incremental_analysis(&scheduled);
+        let dep_graph = alkalive_compiler::incremental_analysis(&scheduled);
 
         let json = scheduled_scene_to_json(&scheduled, &dep_graph);
         // Top-level keys: algorithm + schedule + dep_graph.

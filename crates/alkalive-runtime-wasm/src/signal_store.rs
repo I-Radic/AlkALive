@@ -655,10 +655,7 @@ mod tests {
         let graph = alkalive_compiler::incremental_analysis(&scheduled);
         let mut s = SignalStore::new();
 
-        s.set(
-            signals::INPUT_TEXT,
-            SignalValue::Text("hello".to_string()),
-        );
+        s.set(signals::INPUT_TEXT, SignalValue::Text("hello".to_string()));
         let dirty = s.reevaluate(&graph);
         // INPUT_TEXT is read by TitleText (pass 3) and InputText (pass 4)
         // in the canonical 5-pass schedule.
@@ -670,10 +667,7 @@ mod tests {
         let scheduled = hello_world_scheduled();
         let graph = alkalive_compiler::incremental_analysis(&scheduled);
         let mut s = SignalStore::new();
-        s.set(
-            signals::INPUT_TEXT,
-            SignalValue::Text("hello".to_string()),
-        );
+        s.set(signals::INPUT_TEXT, SignalValue::Text("hello".to_string()));
         let first = s.reevaluate(&graph);
         assert_eq!(first, vec![3, 4]);
         // No further sets: the second cycle must be idle (the version
@@ -704,14 +698,8 @@ mod tests {
         let mut manual = SignalStore::new();
 
         // Mutation 1: input text.
-        composed.set(
-            signals::INPUT_TEXT,
-            SignalValue::Text("a".to_string()),
-        );
-        manual.set(
-            signals::INPUT_TEXT,
-            SignalValue::Text("a".to_string()),
-        );
+        composed.set(signals::INPUT_TEXT, SignalValue::Text("a".to_string()));
+        manual.set(signals::INPUT_TEXT, SignalValue::Text("a".to_string()));
         let via_composed = composed.reevaluate(&graph);
         let changed = manual.check_changes();
         let dirty_nodes = manual.propagate(&changed, &graph);

@@ -992,10 +992,7 @@ mod tests {
         // The decision table of the bounded adapter request: settled with
         // an adapter / settled without / never settled within the bound.
         assert_eq!(probe_outcome(Some(Some(()))), ProbeOutcome::Available);
-        assert_eq!(
-            probe_outcome::<()>(Some(None)),
-            ProbeOutcome::Unavailable
-        );
+        assert_eq!(probe_outcome::<()>(Some(None)), ProbeOutcome::Unavailable);
         assert_eq!(probe_outcome::<()>(None), ProbeOutcome::TimedOut);
         // All three are pairwise distinct (the runtime publishes distinct
         // fallback reasons per variant).

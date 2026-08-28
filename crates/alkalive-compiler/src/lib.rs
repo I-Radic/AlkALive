@@ -119,7 +119,7 @@ pub use egraph::{
     apply_dead_store_elimination, apply_read_merge, apply_state_store_load_forward,
     build_from_dep_graph, egraph_optimization, evaluation_reorder, extract, op_cost,
     DeadStoreElimination, EClass, EClassData, EClassId, EGraph, ENode, EOp, EOpKind, ReadMerge,
-    RewriteRule, RULES, StateStoreLoadForward,
+    RewriteRule, StateStoreLoadForward, RULES,
 };
 pub use incremental::{
     incremental_analysis, ComputationId, DepNode, DepNodeId, DependencyGraph, SignalId,
@@ -131,8 +131,8 @@ pub use lints::{run_lints, LintReport, LintSet, LintSeverity};
 pub use module_resolver::{ModuleResolver, ResolveError};
 pub use parser::{parse, ParseError, Parser};
 pub use schedule::{
-    schedule_lowering, BatchingStrategy, PassKind, RenderPass, ScheduleIR, ScheduledScene, ShaderId,
-    ThreadAffinity,
+    schedule_lowering, BatchingStrategy, PassKind, RenderPass, ScheduleIR, ScheduledScene,
+    ShaderId, ThreadAffinity,
 };
 pub use seminative::{
     collection_strategies, collection_strategy, has_seminive_collections, seminive_eligible_count,
