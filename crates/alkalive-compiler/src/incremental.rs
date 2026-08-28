@@ -79,6 +79,16 @@ use crate::schedule::{PassKind, ScheduledScene};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DepNodeId(pub u32);
 
+/// The ID of a *computation* in the dependency graph (spec §4.2).
+///
+/// This is a role-naming alias: every [`ComputationId`] *is* a
+/// [`DepNodeId`], because the as-built dependency graph models exactly
+/// one computation node per schedule pass — the two ID spaces coincide.
+/// Call sites that speak about re-evaluating computations (the runtime's
+/// dirty-propagation engine) can use this name for clarity without
+/// inventing a second, redundant ID type.
+pub type ComputationId = DepNodeId;
+
 /// Unique ID for a signal.
 ///
 /// Signals are the atomic unit of dirty tracking. Each well-known signal
@@ -720,5 +730,24 @@ module HelloWorld {
         };
         let cloned = pass.clone();
         assert_eq!(pass.kind, cloned.kind);
+    }
+
+    #[test]
+    fn computation_id_is_dep_node_id() {
+        // Spec §4.2 names ComputationId alongside DepNodeId/DepNode. The
+        // as-built graph models one computation per schedule pass, so the
+        // two ID spaces coincide — the alias must be fully interchangeable.
+        // (Type aliases cannot be used as tuple-struct constructors, so a
+        // ComputationId is minted as the underlying DepNodeId.)
+        let d: DepNodeId = DepNodeId(3);
+        let c: ComputationId = d;
+        assert_eq!(c, d);
+        assert_eq!(graph_node_id_roundtrip(c), 3);
+    }
+
+    fn graph_node_id_roundtrip(id: ComputationId) -> u32 {
+        // A ComputationId flows into any DepNodeId-taking API unchanged.
+        let as_node: DepNodeId = id;
+        as_node.0
     }
 }

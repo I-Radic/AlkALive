@@ -120,7 +120,9 @@ pub use egraph::{
     build_from_dep_graph, egraph_optimization, evaluation_reorder, extract, op_cost, EClass,
     EClassData, EClassId, EGraph, ENode, EOp, EOpKind,
 };
-pub use incremental::{incremental_analysis, DepNode, DepNodeId, DependencyGraph, SignalId};
+pub use incremental::{
+    incremental_analysis, ComputationId, DepNode, DepNodeId, DependencyGraph, SignalId,
+};
 pub use ir::{mint_module_id, AlgorithmIR, ColorIR, NodeIR, PositionIR, SceneIR};
 pub use ir::{CollectionDeclIR, Monotonicity};
 pub use lexer::{tokenize, LexError, Lexer, Token, TokenKind};
