@@ -193,7 +193,7 @@ The crate has five source modules:
 | `ir` | `src/ir.rs` | ~390 | `SceneIR { module_id, module_name, background, nodes: Vec<NodeIR> }`. `NodeIR::Text { content, color, font_size, rotation_speed, position }`, `NodeIR::InputField { placeholder, position }`. `ColorIR::Solid(r,g,b)` / `ColorIR::Gold`. `PositionIR::Center` / `BelowText` / `Custom(x,y)`. Manual JSON serialiser (`to_json()`) — no `serde` dependency. |
 | `codegen` | `src/codegen.rs` | ~520 | `lower(&ModuleDecl) -> Result<SceneIR, CodegenError>`. Applies defaults, validates (font-size positive, rotation finite, `below text` requires a text node in the same scene). `compile(src)` convenience: tokenize + parse + lower. |
 
-The binary (`src/main.rs`, ~760 LOC) is a CLI: `alkalive-compiler compile <input.alk> -o <output.scene>` with `--lint` and `--scheduled` flags. It uses `serde_json` (gated behind the `cli` feature) for pretty-printed JSON output. The library proper has zero external dependencies beyond `alkalive-core`.
+The binary (`src/main.rs`, ~760 LOC) is a CLI: `alkalive-compiler compile <input.alk> -o <output.scene>` with `--lint` and `--scheduled` flags. It uses `serde_json` (gated behind the `cli` feature) for pretty-printed JSON output. The library proper has zero external dependencies beyond `alkalive-core` and the ADR-008-amendment-sanctioned `wasm-encoder` (the `wasm_codegen.rs` module; see §6.1).
 
 **Key types and their provenance:**
 
@@ -236,7 +236,13 @@ This is the entire runtime state. There is no signal store, no dependency graph,
 
 **`build_scene_from_ir()`** (lines 207–242): walks `ir.nodes`, picks the first `NodeIR::Text` and first `NodeIR::InputField`, copies fields into `TextSceneData`. **This is the only place the runtime consumes the compiler's IR.** ADR-024's rename of `build_scene_from_ir()` → `build_scene_from_scheduled()` is a one-function change.
 
-**Frame loop** (lines 400–447): `start_frame_loop()` builds a `Closure<dyn FnMut()>` stored in `thread_local RAF_CLOSURE`. Each frame: `runtime.time += 1.0 / 60.0; runtime.renderer.render_frame(&runtime.scene, runtime.time);`. The closure reschedules itself via `requestAnimationFrame`. **Critical observation:** the frame loop calls `render_frame()` unconditionally every frame — there is no "did anything change?" check. This is the O(n) per-frame cost ADR-025 targets.
+**Frame loop** (lines 400–447): `start_frame_loop()` builds a `Closure<dyn FnMut()>` stored in `thread_local RAF_CLOSURE`. Each frame drives the ADR-025 incremental path (see §4.2): the TIME signal is set from real elapsed time and `SignalStore::reevaluate()` decides which passes re-execute. The closure reschedules itself via `requestAnimationFrame`.
+
+> **TD3 correction (2026-08-27):** earlier revisions of this section described
+> the legacy `runtime.time += 1.0 / 60.0` per-frame increment (animation speed
+> coupled to frame rate). The as-built frame loop uses real elapsed time from
+> `performance.now()` (the runtime's own `elapsed_seconds()` helper), exactly
+> the fix TD3 recommended — `signal::time` is wall-clock-based.
 
 **Input forwarding** (lines 256–320, per ADR-023): two `Closure`s attached to the hidden IME `<input>` element:
 - `keydown` listener: forwards printable chars, Backspace, Enter, Escape to `runtime.input_text`. Updates `runtime.scene.input_text` (a field on `TextSceneData`).
@@ -385,15 +391,22 @@ ScheduleIR {
 
 This is the **minimal viable ScheduleIR**. Future enhancements (WebGPU backend, multi-threaded rasterization) extend it.
 
+> **As-built note (2026-08-27):** the shipped lowering emits **five** passes for
+> the canonical scene — an explicit `Clear` pass first, then the four above —
+> with `pass_order [0..4]`; the 4-pass sketch above remains the minimal
+> subset. Every pass also carries a `ThreadAffinity` (always `MainThread`
+> under constraint C10 while ADR-021 workers are deferred), serialized in the
+> CLI `--scheduled` JSON as `"affinity"`.
+
 ### 4.2 ADR-025 — Incremental Computation
 
 **Integration points:**
 
 | File | Change | LOC |
 |------|--------|-----|
-| `crates/alkalive-compiler/src/incremental.rs` (NEW) | `DependencyGraph`, `DepNode`, `ComputationId`, `DepNodeId` types. `incremental_analysis(scheduled: &ScheduledScene) -> DependencyGraph` function. Analyzes the `AlgorithmIR` + `ScheduleIR` to build the graph. | ~500 |
+| `crates/alkalive-compiler/src/incremental.rs` (NEW) | `DependencyGraph`, `DepNode`, `ComputationId` (role alias of `DepNodeId`), `DepNodeId` types. `incremental_analysis(scheduled: &ScheduledScene) -> DependencyGraph` function. Analyzes the `AlgorithmIR` + `ScheduleIR` to build the graph. Includes `DependencyGraph::to_json()` — the manual-JSON serialization this row requires, consumed by the CLI `--scheduled` output (`dep_graph` field). | ~500+ |
 | `crates/alkalive-compiler/src/lib.rs` | `pub mod incremental;`. Augment `compile()` (or add `compile_with_deps()`) to return `ScheduledScene { algorithm, schedule, dep_graph }`. | ~30 |
-| `crates/alkalive-runtime-wasm/src/lib.rs` or `crates/alkalive-runtime/src/signal_store.rs` (NEW) | `SignalStore` type with `u64` version counters. `signal::input_text`, `signal::time`, `signal::font_size`, `signal::rotation_speed` slots. Dirty-propagation engine: `check_changes() -> Vec<SignalId>`, `propagate(changes: &[SignalId], dep_graph: &DependencyGraph) -> Vec<DepNodeId>`, `reevaluate(dirty: &[DepNodeId], cache: &mut Cache)`. | ~400–600 |
+| `crates/alkalive-runtime-wasm/src/lib.rs` or `crates/alkalive-runtime/src/signal_store.rs` (NEW) | `SignalStore` type with `u64` version counters. `signal::input_text`, `signal::time`, `signal::font_size`, `signal::rotation_speed` slots. Dirty-propagation engine: `check_changes() -> Vec<SignalId>`, `propagate(changes: &[SignalId], dep_graph: &DependencyGraph) -> Vec<DepNodeId>`, `reevaluate(...)` — as built, the composed cycle `reevaluate(&mut self, graph) -> Vec<usize>` (check → propagate → dirty-pass reduction) that the frame loop calls once per tick; the store's own version maps realise the spec's `cache` parameter. | ~400–600 |
 | `crates/alkalive-runtime-wasm/src/lib.rs` | Refactor `Runtime` struct: replace `input_text: String` and `original_text: String` with `signals: SignalStore`. The `keydown`/`input` listeners write to `signals.set(signal::input_text, ...)`. The frame loop calls `signals.check_changes()` → `propagate()` → `reevaluate()` → `render_frame(scheduled, &signals, time)`. | ~200 |
 | `crates/alkalive-backend-wgpu/src/lib.rs` | `render_frame()` reads dirty-pass info from `signals` (or receives a `dirty_passes: &[PassId]` argument). Only re-uploads the atlas if `signal::input_text` (or `signal::font_size`) is dirty. Only re-submits draw calls for dirty passes. | ~300 |
 | `crates/alkalive-text/src/lib.rs` | No public API change. The `HarfRustFontRegistry`, `HarfRustTextShaper`, `HarfRustGlyphAtlas` instances must be **lifted out** of `upload_text_atlas()` and stored as long-lived runtime state, keyed by signal versions. | ~200–500 |
@@ -420,6 +433,17 @@ This is the **minimal viable ScheduleIR**. Future enhancements (WebGPU backend, 
 | Tests | E-graph data-structure unit tests; rewrite-rule pattern-matching tests; cost-based extraction tests; end-to-end optimization tests. | ~300 |
 
 **Stability contract:** the e-graph is a pure compiler-side optimization. The runtime sees only the optimized `DependencyGraph` — it has no awareness that optimization occurred. No runtime or backend changes.
+
+> **As-built notes (2026-08-27):** (a) the union-find `find_mut` uses *path
+> halving* (re-pointing each visited e-class at its grandparent), exactly as
+> this section specifies; (b) the `RewriteRule` trait exists with
+> `StateStoreLoadForward` / `DeadStoreElimination` / `ReadMerge` unit-struct
+> impls driven through a `RULES` registry — `evaluation_reorder` (rule 4)
+> remains a free function by design: it is the extraction-time scheduling rule
+> and operates on `Vec<DepNode>`, where the node order first exists; (c)
+> `extract` takes `(graph: &EGraph, original: &DependencyGraph)` — the extra
+> `original` parameter is an as-built necessity (nodes absent from the
+> e-graph are reconstructed from the original).
 
 **Constraint (ADR-018):** the e-graph must be a custom implementation. The `egg` crate is excluded. If the custom implementation exceeds ~3,000 LOC or fails to converge on the 4 rewrite rules, an ADR amendment must be opened before considering `egg`. This is OPEN QUESTION Q3 in the reconciliation report.
 
@@ -458,7 +482,7 @@ This is the **minimal viable ScheduleIR**. Future enhancements (WebGPU backend, 
 | `crates/alkalive-compiler/src/parser.rs` | `parse_module` accepts `fn` and `let` top-level items alongside the scene block. New functions: `parse_fn`, `parse_let`, `parse_type`, `parse_base_type`, `parse_block`, `parse_stmt`, `parse_expr`, `parse_arg_list`, `expect_any_ident`. Grammar: `Type := ('monotone'\|'antitone')? BaseType`, `BaseType := 'i32'\|'f32'\|'string'\|'bool'\|'Vec' '<' Type '>' \| Ident`, `FnDecl := 'fn' Ident '(' ParamList? ')' ('->' Type)? Block`, `LetDecl := 'let' Ident ':' Type '=' Expr ';'`. | 1366 (file total) |
 | `crates/alkalive-compiler/src/ast.rs` | Added `Type { qualifier, base }`, `Qualifier` enum (`Unrestricted`, `Monotone`, `Antitone`; `#[derive(Default)]`), `BaseType` enum (`I32`, `F32`, `Str`, `Bool`, `Vec(Box<Type>)`, `Named(String)`), `ItemDecl` (`Fn` \| `Let`), `FnDecl`, `Param`, `LetDecl`, `Block`, `Stmt`, `Expr`, `Lit`, `MethodCall`. `ModuleDecl` gained `items: Vec<ItemDecl>` and `denies_monotonicity()`. | 562 (file total) |
 | `crates/alkalive-compiler/src/typechecker.rs` (NEW) | Real type-checker pass. Implements the qualifier subtyping lattice (`unrestricted <: monotone`, `unrestricted <: antitone`, monotone/antitone incomparable), `type_is_subtype` with covariant `Vec<T>`, method-call validation (shrink ops on `monotone` → error; grow ops on `antitone` → error), function-boundary qualifier flow, return-type checking, variable resolution, multi-error collection, `effective_qualifier()` (attribute takes precedence over type qualifier for Phase 1 backward compat). Entry point: `check_module(&ModuleDecl) -> TypeErrorSet`. 34 inline unit tests. | 843 (file total) |
-| `crates/alkalive-compiler/src/seminative.rs` (NEW) | Seminaïve-evaluation strategy module. `EvaluationStrategy` enum (`Full`, `SeminineNew`, `SeminineRemoved`); `collection_strategy(&CollectionDeclIR)`, `collection_strategies(&AlgorithmIR)`, `has_seminive_collections(&AlgorithmIR)`, `seminive_eligible_count(&AlgorithmIR)`. 9 inline unit tests. | 188 (file total) |
+| `crates/alkalive-compiler/src/seminative.rs` (NEW) | Seminaïve-evaluation strategy module. `EvaluationStrategy` enum (`Full`, `SeminiveNew`, `SeminiveRemoved`); `collection_strategy(&CollectionDeclIR)`, `collection_strategies(&AlgorithmIR)`, `has_seminive_collections(&AlgorithmIR)`, `seminive_eligible_count(&AlgorithmIR)`. 9 inline unit tests. | 188 (file total) |
 | `crates/alkalive-compiler/src/ir.rs` | Added `Monotonicity` enum (`Unrestricted`, `Monotone`, `Antitone`; `Default = Unrestricted`) with `from_qualifier()` and `supports_seminive()`. Added `CollectionDeclIR { name, element_type, monotonicity }`. `AlgorithmIR` gained `collections: Vec<CollectionDeclIR>`. `to_json()` serializes the `collections` array. | 505 (file total) |
 | `crates/alkalive-compiler/src/codegen.rs` | `lower()` lowers `ast::ItemDecl::Let` → `ir::CollectionDeclIR` via `lower_collection_decl()`. `CompileError::Type(TypeErrorSet)` variant added. New public entry point `compile_typecheck(src) -> Result<AlgorithmIR, CompileError>` runs parse → `check_module` → `lower`. Existing `compile()` is unchanged (no type-checking) for backward compatibility. | 1061 (file total) |
 | `crates/alkalive-compiler/src/lib.rs` | `pub mod typechecker;` `pub mod seminative;`. Re-exports: `BaseType`, `Block`, `Expr`, `FnDecl`, `ItemDecl`, `LetDecl`, `Param`, `Qualifier`, `Stmt`, `Type` (ast); `CollectionDeclIR`, `Monotonicity` (ir); `compile_typecheck` (codegen); `EvaluationStrategy`, `collection_strategy`, `collection_strategies`, `has_seminive_collections`, `seminive_eligible_count` (seminative); `check_module`, `effective_qualifier`, `param_qualifier`, `qualifier_is_subtype`, `type_is_subtype`, `TypeEnv`, `TypeError`, `TypeErrorSet` (typechecker). | 268 (file total) |
@@ -466,6 +490,13 @@ This is the **minimal viable ScheduleIR**. Future enhancements (WebGPU backend, 
 | `docs/adr/ADR.md` | ADR-008 carries a "Monotonicity Qualifiers (ADR-027 Phase 2 Amendment)" subsection; Status updated to "Amended by ADR-027 Phase 2". ADR-009 carries a "Monotonicity Verification Dimension (ADR-027 Phase 2 Amendment)" subsection; Status updated to "Amended by ADR-027 Phase 2". | — |
 | `docs/adr/ADR_027_monotonicity_types_phased.md` | Status updated to "Phase 1: Implemented. Phase 2: Implemented." Added Phase 2 Implementation, Prerequisite Satisfaction, and Confidence sections. | — |
 | `docs/adr/ADR_027_PHASE2_TRACEABILITY.md` (NEW) | Requirement-to-implementation traceability matrix for Phase 2. | — |
+
+> **LOC figures refreshed 2026-08-27:** the per-file totals in the table above
+> were accurate at Phase-2 landing; the files have since grown with the module
+> system, OO model, and type-inference work while keeping their documented
+> roles — lexer ~1300, parser ~1925, ast ~867, typechecker ~2600 (70 tests
+> across three suites), codegen ~1160, lib ~280. `seminative.rs` (188) and
+> `ir.rs` (505) are unchanged.
 
 **Stability contract:** Phase 2 is a **breaking change** to the `.alk` grammar (`monotone` and `antitone` are now reserved keywords). Existing `.alk` source that uses `monotone` or `antitone` as identifiers will fail to parse. Phase 1 attribute syntax (`@monotone` / `@antitone`) is still parsed and still drives the lint pass; `effective_qualifier()` honours the attribute form where present, providing a transitional migration bridge for users who adopted Phase 1. The `compile()` entry point is unchanged in behaviour (it does not run the type checker); `compile_typecheck()` is the new entry point that runs the type checker.
 
@@ -505,12 +536,17 @@ If re-evaluated (per the four criteria in ADR-028), the integration would be:
 - `parse(src: &str) -> Result<ModuleDecl, ParseError>` — parse.
 - Types: `SceneIR`, `NodeIR`, `ColorIR`, `PositionIR`, `ModuleId`, `Token`, `TokenKind`, `CompileError`, `CodegenError`, `ParseError`, `LexError`.
 
-**Future API (after all five enhancements):**
-- `compile(src: &str) -> Result<ScheduledScene, CompileError>` — full pipeline (ADR-024 changes return type).
-- `compile_with_lints(src: &str, config: &LintConfig) -> Result<(ScheduledScene, LintReport), CompileError>` — Phase 1 lint.
-- Types added: `AlgorithmIR` (rename of `SceneIR`), `ScheduleIR`, `RenderPass`, `BatchingStrategy`, `ThreadAffinity`, `ShaderId`, `ScheduledScene`, `DependencyGraph`, `DepNode`, `ComputationId`, `DepNodeId`, `EGraph`, `RewriteRule`, `LintReport`, `LintSeverity`, `Monotonicity` (Phase 2).
+**API after the five enhancements (as built, 2026-08-27):**
+- `compile(src: &str) -> Result<AlgorithmIR, CompileError>` — legacy pipeline, **preserved unchanged in behaviour** (parse → lower; no type checker) for backward compatibility, per the §3.2 Wave-5 audit correction. `SceneIR` is a type alias of `AlgorithmIR`.
+- `compile_typecheck(src)` — parse → type-check → lower (ADR-027 P2 entry point).
+- `compile_scheduled(src)` — typechecked ADR-024 path returning `ScheduledScene`.
+- `compile_with_deps(src)` — ADR-024+025 path returning `(ScheduledScene, DependencyGraph)`.
+- `compile_full(src)` / `compile_full_in(src, resolver)` — the production chain the runtime uses: type-check → lower → schedule lowering → incremental analysis → e-graph optimization, returning `(ScheduledScene, DependencyGraph)`.
+- `compile_with_lints(src) -> Result<(AlgorithmIR, LintSet), CompileError>` — Phase 1 lint (advisory; `#![deny(monotonicity)]` upgrades). The earlier draft of this table sketched `compile_with_lints(src, &LintConfig) -> (ScheduledScene, LintReport)`; the as-built shape follows §4.4's stability contract (Phase 1 ships standalone: no schedule dependency, no type-checker dependency).
+- `DependencyGraph::to_json()` — manual-JSON serialization (§4.2) for diagnostics/transport; the CLI `--scheduled` output embeds it as `dep_graph`.
+- Types added: `AlgorithmIR` (rename of `SceneIR`), `ScheduleIR`, `RenderPass`, `BatchingStrategy`, `ThreadAffinity`, `ShaderId`, `ScheduledScene`, `DependencyGraph`, `DepNode`, `ComputationId` (role alias of `DepNodeId`), `DepNodeId`, `EGraph`, `RewriteRule` (+ `RULES` registry and the `StateStoreLoadForward`/`DeadStoreElimination`/`ReadMerge` rule structs), `LintReport`, `LintSeverity`, `LintSet`, `Monotonicity` (Phase 2).
 
-**Interface contract:** `compile()` is the single entry point. Its return type changes once (ADR-024: `SceneIR` → `ScheduledScene`). After that, `ScheduledScene` grows fields (`dep_graph`, `monotonicity_metadata`) but the top-level type is stable.
+**Interface contract:** `compile()` remains a stable entry point (its return type is `AlgorithmIR`, unchanged since before ADR-024 — the ADR-024 change landed as *new* entry points rather than a breaking change to `compile()`); `ScheduledScene` grows fields but the top-level type is stable.
 
 ### 5.2 `alkalive-runtime-wasm`
 
@@ -574,23 +610,30 @@ If re-evaluated (per the four criteria in ADR-028), the integration would be:
 
 ## 6. Dependencies and Interactions
 
-### 6.1 Crate Dependency Graph (Existing)
+### 6.1 Crate Dependency Graph (as built, 2026-08-27)
 
 ```
 alkalive-core (no deps)
     ↑
     │
 alkalive-compiler ──▶ alkalive-core
-    │
-    │ (CLI feature: serde_json)
+    │                   wasm-encoder (sanctioned by the ADR-008 amendment
+    │                   — WASM codegen module; serde_json behind the `cli`
+    │ (CLI feature: serde_json)  feature, library-default-inert)
     ▼
 alkalive-runtime-wasm ──▶ alkalive-compiler
     │                     alkalive-backend-wgpu
-    │                     wasm-bindgen, web-sys, js-sys
+    │                     alkalive-text, alkalive-render, alkalive-scene-data
+    │                     wasm-bindgen, web-sys, js-sys, wasm-bindgen-futures
     ▼
 alkalive-backend-wgpu ──▶ alkalive-text
-    │                       bytemuck
-    │                       wasm-bindgen, web-sys (wasm32 only)
+    │                       alkalive-compiler, alkalive-render,
+    │                       alkalive-scene-data (breaks the historical
+    │                       render ↔ backend-wgpu cycle)
+    │                       bytemuck; wgpu (feature-gated, default-on),
+    │                       futures-util, wasm-bindgen-futures, js-sys;
+    │                       wasm-bindgen/web-sys compile on native too
+    │                       (native stub mirrors) — not wasm32-gated
     ▼
 alkalive-text ──▶ alkalive-core
     │              harfrust (vendored)
@@ -598,10 +641,20 @@ alkalive-text ──▶ alkalive-core
     │              read-fonts
     ▼
 alkalive-render ──▶ alkalive-core
-                    std collections
+    │                 alkalive-text (glyph_run_to_draw_calls consumes
+    │                 ShapedRun/GlyphAtlas — §3.5)
+    │                 alkalive-scene-data (build_render_graph input)
 ```
 
-The compiler has zero external dependencies beyond `alkalive-core` (in library mode). The runtime and backend pull in `wasm-bindgen`/`web-sys`/`js-sys` for browser bindings. The text stack pulls in vendored `harfrust` and `rasterizer` plus `read-fonts` (an external crate, grandfathered per ADR-022).
+The compiler's library mode has one sanctioned external dependency beyond
+`alkalive-core`: `wasm-encoder` (the `wasm_codegen.rs` module, per the
+ADR-008 amendment); `serde_json` stays behind the `cli` feature. The runtime
+and backend pull in `wasm-bindgen`/`web-sys`/`js-sys` for browser bindings
+(the backend keeps compiling on native via stub mirrors). The text stack
+pulls in vendored `harfrust` and `rasterizer` plus `read-fonts` (an external
+crate, grandfathered per ADR-022). The five ADR-024–028 enhancements
+themselves add **no** new external crates; `deny.toml` enforces the policy
+gate.
 
 ### 6.2 New Crate Dependencies (Planned)
 
@@ -694,9 +747,9 @@ None of the five enhancements add new external crate dependencies:
 
 | # | Debt | Location | Impact | Recommended solution |
 |---|------|----------|--------|----------------------|
-| TD1 | `WgpuRenderer::upload_text_atlas()` creates fresh `HarfRustFontRegistry`, `HarfRustTextShaper`, `HarfRustGlyphAtlas` on every re-upload. | `alkalive-backend-wgpu/src/lib.rs` lines 831–870 | Glyph cache is effectively per-frame, not persistent. Atlas re-builds lose cached glyphs. | ADR-025 lifts these to long-lived `Runtime` state. The `Runtime` struct gains `font_registry`, `text_shaper`, `glyph_atlas` fields. |
+| TD1 | ~~`WgpuRenderer::upload_text_atlas()` creates fresh `HarfRustFontRegistry`, `HarfRustTextShaper`, `HarfRustGlyphAtlas` on every re-upload.~~ **Fixed (2026-08-27):** all three instances are long-lived — registry/shaper cached on the renderer ("M7 fix"), the glyph atlas persistent on the renderer (GLSL path) / process-wide behind a `Mutex` (wgpu path), with reset-and-re-rasterize recovery on page overflow. | `alkalive-backend-wgpu/src/lib.rs`, `tessellate.rs` | ~~Glyph cache is effectively per-frame, not persistent.~~ Resolved — unchanged glyphs are cache hits across re-uploads. | ~~ADR-025 lifts these to long-lived `Runtime` state.~~ Applied (lifetime held by the renderers, the runtime's single-active-renderer ownership makes them equivalent). |
 | TD2 | `render_frame()` uses `scissor_test` + `clear_color` to draw the input field background and border. | `alkalive-backend-wgpu/src/lib.rs` lines 741–772 | No separate shader for solid-color rects; cannot batch; cannot apply rotation. Acceptable for Hello World, but does not scale. | ADR-024's `ScheduleIR` introduces a `solid_color` shader pass. Future: a proper `solid_color.vert` + `solid_color.frag` shader pair. |
-| TD3 | `Runtime::time` is incremented by `1.0 / 60.0` per frame, not by real elapsed time. | `alkalive-runtime-wasm/src/lib.rs` line 410 | Animation speed depends on frame rate, not real time. On a 30 Hz display, rotation is half-speed. | Use `WgpuRenderer::elapsed_seconds()` (already implemented, line 789). The runtime currently ignores it. Trivial fix; ADR-025's `signal::time` should use `elapsed_seconds()`. |
+| TD3 | ~~`Runtime::time` is incremented by `1.0 / 60.0` per frame, not by real elapsed time.~~ **Fixed (2026-08-27):** the frame loop sets `signal::time` from real `performance.now()` elapsed time (the runtime's `elapsed_seconds()` helper). | `alkalive-runtime-wasm/src/lib.rs` | ~~Animation speed depends on frame rate.~~ Resolved. | ~~Use `WgpuRenderer::elapsed_seconds()`.~~ Applied. |
 | TD4 | The compiler has no type checker. `codegen.rs` does light semantic validation (font-size positive, rotation finite, `below text` requires preceding text). | `crates/alkalive-compiler/src/codegen.rs` | No static type system. ADR-008 calls for a statically-typed language; the current subset is too small to need one. | ADR-027 Phase 2 introduces a real type checker. Until then, the codegen validation is the only static check. |
 | TD5 | The lexer's `TokenKind` enum has no `Attribute` or `At` variant. | `crates/alkalive-compiler/src/lexer.rs` | Phase 1 of ADR-027 cannot parse `@monotone` / `@antitone` attributes without lexer extension. | ADR-027 Phase 1 adds `TokenKind::At` and parses `@ident` as an attribute. |
 | TD6 | The `Backend`, `RenderLoop`, and `Compositor` traits in `alkalive-render` are abstract — no concrete impl. | `crates/alkalive-render/src/lib.rs` lines 356, 613, 745 | The render-graph IR exists but is not wired to the actual WebGL2 backend. `WgpuRenderer` does not implement `Backend`. | Out of scope for ADR-024–028. A future rendering-ABI ADR (RECOMMENDATION R3) bridges `ScheduleIR` → `RenderGraph` → `Backend`. |
@@ -738,15 +791,15 @@ None of the five enhancements add new external crate dependencies:
 
 AlkALive is a WASM+WebGL2 UI framework with a custom statically-typed language (`.alk`) compiling to a `SceneIR` consumed by a runtime that owns the frame loop and a WebGL2 backend that renders text via vendored HarfRust. The current implementation supports a Hello-World subset: a single text node with rotation and a single input field with IME composition. The compiler has 5 modules (lexer, parser, ast, ir, codegen) totaling ~2,500 LOC. The runtime is ~450 LOC. The backend is ~1,320 LOC. The text stack is ~2,425 LOC. The render-graph IR is ~1,496 LOC (mostly abstract).
 
-The architecture is clean: the compiler has zero external dependencies (in library mode); the runtime and backend use `wasm-bindgen`/`web-sys` for browser bindings; the text stack uses vendored HarfRust per ADR-022. `#![forbid(unsafe_code)]` is preserved in the compiler, render, text, and core crates.
+The architecture is clean: the compiler's library mode depends only on `alkalive-core` plus the sanctioned `wasm-encoder` (§6.1); the runtime and backend use `wasm-bindgen`/`web-sys` for browser bindings; the text stack uses vendored HarfRust per ADR-022. `#![forbid(unsafe_code)]` is preserved in the compiler, render, text, and core crates.
 
 ### 9.2 Target State (After ADR-024, 025, 026, 027 P1)
 
-The compiler pipeline grows from 3 stages (lex → parse → lower) to 6 stages (lex → parse → lower → schedule_lowering → incremental_analysis → egraph_optimization). Three new modules (`schedule.rs`, `incremental.rs`, `egraph.rs`) and one new lint module (`lints/monotonicity.rs`) are added. The compiler's public API changes once: `compile()` returns `ScheduledScene` instead of `SceneIR`.
+The compiler pipeline grows from 3 stages (lex → parse → lower) to 6 stages (lex → parse → lower → schedule_lowering → incremental_analysis → egraph_optimization). Three new modules (`schedule.rs`, `incremental.rs`, `egraph.rs`) and one new lint module (`lints/monotonicity.rs`) are added. As built, the pipeline is entered through the new `compile_full`/`compile_with_deps` entry points (type-check → lower → schedule → incremental → e-graph); `compile()` keeps its legacy shape (see §5.1).
 
 The runtime gains a `SignalStore` and a dirty-propagation engine. The frame loop changes from "rebuild everything" to "check dirty → propagate → re-evaluate dirty → render dirty passes." The `Runtime` struct grows from 5 fields to ~8 fields (adding `signals`, `dep_graph`, and lifted text-stack instances).
 
-The backend's `render_frame()` signature changes to accept `ScheduledScene` + `SignalStore` (or a dirty-passes slice). The hardcoded pass order becomes data-driven from `ScheduleIR`. The `upload_text_atlas()` method is refactored to use long-lived text-stack instances and to skip re-upload when no relevant signal is dirty.
+The backend's `render_frame()` signature, as built, takes `(&TextSceneData, &ScheduleIR, time)` (schedule retained for API compatibility; execution routes through the render-graph IR per the §9.2 Wave-11 amendment), with the hint-aware `render_frame_with_dirty(..., dirty_passes: &[usize])` variant carrying the dirty-pass slice the ADR-025 incremental path produces. The hardcoded pass order becomes data-driven from `ScheduleIR`. The `upload_text_atlas()` method uses long-lived text-stack instances (registry, shaper, and — since the TD1 fix — a persistent glyph atlas with overflow reset).
 
 > **Wave-11 amendment (2026-08, see `docs/alkalive-wave-11-render-graph.md`):** after the render-graph IR extraction (Gap 6), `render_frame()` re-routes through `alkalive_render::graph::build_render_graph`/`render_graph`; the `&ScheduleIR` argument is retained for API compatibility but is not consumed by `render_frame` (the graph carries the pass order). The schedule-driven `PassKind` dispatch survives in `render_frame_internal`, reachable via `render_frame_with_dirty` — the ADR-025 incremental path.
 
@@ -774,7 +827,7 @@ The following invariants must hold throughout the five enhancements:
 2. **ADR-018 (5-crate policy):** no new external crates without an ADR amendment. The custom e-graph (ADR-026) is the deliberate consequence.
 3. **`#![forbid(unsafe_code)]` in `alkalive-compiler`:** the compiler remains safe Rust. The e-graph, schedule, incremental, and lint modules are all safe.
 4. **Backward compatibility of `.alk` source:** existing source compiles unchanged through ADR-024, 025, 026, and 027 Phase 1. Only ADR-027 Phase 2 (gated by prerequisites) is a breaking change.
-5. **`compile()` is the single compiler entry point:** its return type changes once (ADR-024); after that, the top-level type (`ScheduledScene`) grows but is stable.
+5. **`compile()` is a stable compiler entry point:** its behaviour (parse → lower, no type checker) and return type (`AlgorithmIR`, via the `SceneIR` alias) are unchanged since before ADR-024 — the ADR-024/025/026 chain landed as *additional* entry points (`compile_typecheck`, `compile_scheduled`, `compile_with_deps`, `compile_full`), so no consumer ever broke. After ADR-024, the top-level `ScheduledScene` type is stable: it grows fields but its shape does not change.
 6. **`start()` is the single WASM entry point:** its signature is stable. Internal refactors do not affect the JS shell.
 
 ### 9.6 Closing
