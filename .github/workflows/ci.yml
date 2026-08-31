@@ -47,13 +47,20 @@ jobs:
         run: |
           cargo install cargo-deny --locked
           cargo install cargo-audit --locked
-      - name: cargo-deny (advisories, bans, licenses, sources)
-        run: cargo deny --workspace check advisories bans licenses sources
       - name: cargo-audit (RustSec vulnerabilities)
         # Vulnerabilities fail the build (exit != 0); the single accepted
         # unmaintained-crate warning (paste, RUSTSEC-2024-0436, justified in
         # deny.toml) remains a warning here, mirroring the local workflow.
-        run: cargo audit
+        # NOTE: audit runs BEFORE deny — both tools share ~/.cargo/advisory-db,
+        # and cargo-audit's clone refuses a directory populated by cargo-deny
+        # ("Refusing to initialize the non-empty directory"); the defensive
+        # rm also neutralizes any cached half-state from rust-cache.
+        run: |
+          rm -rf "$HOME/.cargo/advisory-db"
+          cargo audit
+      - name: cargo-deny (advisories, bans, licenses, sources)
+        # Runs second: reuses/updates the advisory-db cargo-audit fetched.
+        run: cargo deny --workspace check advisories bans licenses sources
 
   native-tests:
     runs-on: ubuntu-latest
