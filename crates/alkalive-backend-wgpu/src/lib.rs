@@ -457,6 +457,7 @@ mod wasm {
 
     use super::*;
     use std::sync::Arc;
+    use wasm_bindgen::closure::Closure;
     use wasm_bindgen::JsCast;
     use web_sys::{
         HtmlCanvasElement, Performance, WebGl2RenderingContext, WebGlBuffer, WebGlProgram,
@@ -566,6 +567,34 @@ mod wasm {
                 .map_err(|_| {
                     "getContext('webgl2') did not return a WebGL2RenderingContext".to_string()
                 })?;
+
+            // Security (T-D2, docs/security/06-mitigations.md): surface
+            // context-loss loudly instead of silently rendering into a dead
+            // context. The event is NOT preventDefault-ed: this fallback
+            // renderer does not rebuild its GPU resources, so claiming
+            // restore-readiness would be dishonest — the browser
+            // permanently discards the context and the user gets an
+            // actionable console error ("reload") instead of a silent
+            // black canvas.
+            {
+                let on_context_lost =
+                    Closure::<dyn FnMut(web_sys::Event)>::new(|_e: web_sys::Event| {
+                        web_sys::console::error_1(
+                            &"AlkALive(WebGL2): rendering context lost (driver reset or \
+                                 GPU pressure) — the context is permanently discarded; \
+                                 reload the page to recover."
+                                .into(),
+                        );
+                    });
+                canvas
+                    .add_event_listener_with_callback(
+                        "webglcontextlost",
+                        on_context_lost.as_ref().unchecked_ref(),
+                    )
+                    .map_err(|e| format!("contextlost listener failed: {e:?}"))?;
+                // Keep the closure alive for the page lifetime.
+                on_context_lost.forget();
+            }
 
             // Compile shaders.
             let vs = compile_shader(

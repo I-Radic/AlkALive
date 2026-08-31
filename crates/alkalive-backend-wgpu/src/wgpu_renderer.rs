@@ -716,6 +716,28 @@ impl WgpuBackendRenderer {
             }
         };
 
+        // Security (T-D2, docs/security/06-mitigations.md): observe GPU
+        // runtime events instead of rendering silently into a dead device.
+        // - uncaptured errors: validation/out-of-memory errors from any
+        //   encode/submit become loud console errors (frames can still be
+        //   skipped by the acquire-failure path below).
+        // - device loss: driver reset / GPU removal previously left the
+        //   frame loop spinning against an invalid device with no signal.
+        device.on_uncaptured_error(Box::new(|err| {
+            web_sys::console::error_1(
+                &format!("AlkALive(wgpu): uncaptured GPU error: {err}").into(),
+            );
+        }));
+        device.set_device_lost_callback(|reason, message| {
+            web_sys::console::error_1(
+                &format!(
+                    "AlkALive(wgpu): GPU device lost (reason {reason:?}): {message} — \
+                     rendering is degraded until reload."
+                )
+                .into(),
+            );
+        });
+
         let surface = instance
             .create_surface(wgpu::SurfaceTarget::Canvas(canvas))
             .map_err(|e| format!("create_surface failed: {e:?}"))?;
