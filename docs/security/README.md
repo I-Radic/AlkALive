@@ -14,8 +14,8 @@ actionable remediation aligned with OWASP / NIST guidance.
 | 4 | [Architecture-level security review](04-architecture-security-review.md) | PASSED |
 | 5 | [Automated & manual code scanning](05-scanning-results.md) | PASSED |
 | 6 | [Mitigation implementation log](06-mitigations.md) | PASSED |
-| 7 | [Security testing & validation](07-validation.md) | — |
-| — | [Final security report](SECURITY-REPORT.md) | — |
+| 7 | [Security testing & validation](07-validation.md) | PASSED |
+| — | [Final security report](SECURITY-REPORT.md) | FINAL |
 
 Threat IDs assigned in Wave 0 (`T-S1`, `T-T1`, `T-I1`, `T-D1`, `T-E1`, `T-P1`, …)
 are referenced by all later waves so every mitigation traces back to a specific,
