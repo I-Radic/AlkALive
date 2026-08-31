@@ -25,6 +25,7 @@ const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript',
   '.mjs': 'text/javascript',
+  '.css': 'text/css',
   '.wasm': 'application/wasm',
   '.json': 'application/json',
   '.ts': 'text/plain',
@@ -35,6 +36,17 @@ createServer(async (req, res) => {
   // ADR-003/ADR-021: cross-origin isolation via HTTP RESPONSE headers.
   res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
   res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
+  // Security hardening (docs/security/06-mitigations.md, T-I2 family):
+  // - nosniff: prevents MIME confusion of served files
+  // - DENY framing: the app is a standalone canvas, never a frame target
+  //   (belt-and-suspenders next to the page's own CSP, which cannot carry
+  //   frame-ancestors in a <meta>)
+  // - no-referrer: nothing off-origin is ever fetched; nothing to leak
+  // - permissions lockdown: no powerful APIs are used or granted
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=(), usb=(), serial=(), bluetooth=()');
 
   const url = req.url === '/' ? '/index.html' : req.url.split('?')[0];
   if (url === '/favicon.ico') {

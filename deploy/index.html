@@ -12,20 +12,22 @@
          Cross-Origin-Opener-Policy: same-origin
          Cross-Origin-Embedder-Policy: require-corp
        The runtime verifies and logs the isolation state at startup. -->
-  <style>body{margin:0;overflow:hidden}canvas{display:block;width:100vw;height:100vh}#ime{position:absolute;left:-9999px;opacity:0}</style>
+  <!-- Security (docs/security/06-mitigations.md): strict CSP.
+       - 'wasm-unsafe-eval' is the minimal allowance needed to compile the
+         WebAssembly module (CSP3 source expression); the runtime performs
+         NO script eval (JS property reads go through Reflect, so the
+         generated glue contains no eval shim).
+       - All scripts and styles ship as same-origin external files
+         (boot.js, style.css, pkg/) — no inline code, so no inline hashes
+         are needed and any injected inline script/style is rejected.
+       - Everything else is same-origin only; no objects, no base URLs,
+         no form submissions. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <link rel="stylesheet" href="./style.css">
 </head>
 <body>
   <canvas id="canvas"></canvas>
-  <input id="ime" type="text">
-  <script type="module">
-    import init from './pkg/alkalive_runtime_wasm.js';
-    const wasm = await init('./pkg/alkalive_runtime_wasm_bg.wasm');
-    const canvas = document.getElementById('canvas');
-    const ime = document.getElementById('ime');
-    // The WASM runtime owns canvas sizing (via devicePixelRatio for high-DPI),
-    // the resize listener, the frame loop, input forwarding, renderer
-    // selection (WebGPU primary, WebGL2 fallback) and threading posture.
-    await wasm.start(canvas, ime);
-  </script>
+  <input id="ime" type="text" aria-label="Text input">
+  <script type="module" src="./boot.js"></script>
 </body>
 </html>
