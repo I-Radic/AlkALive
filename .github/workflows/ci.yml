@@ -1,14 +1,18 @@
 # AlkALive CI — reproducible verification of the production pipeline.
 #
 # Jobs:
-#   1. native-tests        : full Rust workspace test suite + warning-free check
-#   2. deploy-pipeline     : wasm32 release build -> version-gated bindgen ->
+#   1. supply-chain         : cargo-deny + cargo-audit security gates against
+#                            the committed Cargo.lock (docs/security:
+#                            T-T1 mitigation — lockfile pinned, scanners
+#                            enforced in CI, no longer local-only)
+#   2. native-tests        : full Rust workspace test suite + warning-free check
+#   3. deploy-pipeline     : wasm32 release build -> version-gated bindgen ->
 #                            pinned binaryen wasm-opt -Oz -> validation gates
 #                            (size-reduction floor + artifact SHA match)
-#   3. e2e-chromium        : browser E2E of the built artifacts (renderer
+#   4. e2e-chromium        : browser E2E of the built artifacts (renderer
 #                            selection contract incl. forced WebGL2 fallback,
 #                            COOP/COEP isolation, golden-pixel rendering)
-#   4. e2e-firefox-webgpu  : REAL in-browser WebGPU proof (Firefox >=141 ships
+#   5. e2e-firefox-webgpu  : REAL in-browser WebGPU proof (Firefox >=141 ships
 #                            WebGPU): wgpu/WGSL-selected rendering asserted via
 #                            window.__alkalive + golden pixels, plus the forced
 #                            fallback case.
@@ -33,6 +37,24 @@ env:
   WASM_BINDGEN_VERSION: 0.2.127
 
 jobs:
+  supply-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install security scanners (source-built, --locked)
+        run: |
+          cargo install cargo-deny --locked
+          cargo install cargo-audit --locked
+      - name: cargo-deny (advisories, bans, licenses, sources)
+        run: cargo deny --workspace check advisories bans licenses sources
+      - name: cargo-audit (RustSec vulnerabilities)
+        # Vulnerabilities fail the build (exit != 0); the single accepted
+        # unmaintained-crate warning (paste, RUSTSEC-2024-0436, justified in
+        # deny.toml) remains a warning here, mirroring the local workflow.
+        run: cargo audit
+
   native-tests:
     runs-on: ubuntu-latest
     steps:

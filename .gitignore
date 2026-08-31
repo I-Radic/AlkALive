@@ -1,7 +1,7 @@
 # Rust build artifacts
+# NOTE: Cargo.lock IS committed (supply-chain: T-T1) — do not re-add it here.
 /target
 **/target
-Cargo.lock
 
 # IDE
 .vscode/
