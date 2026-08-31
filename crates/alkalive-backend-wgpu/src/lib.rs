@@ -1410,6 +1410,22 @@ mod wasm {
                 input_quads = build_text_quads(&input_run, atlas, input_font_size);
             }
 
+            // Security (T-D1): bound the combined vertex budget before the
+            // VBO allocation — same shared cap as the wgpu path, so the two
+            // backends cannot drift (16 B/vertex × 6 verts/quad).
+            let (title_quads, input_quads, truncated) =
+                crate::tessellate::cap_quads_to_vertex_budget(title_quads, input_quads);
+            if truncated {
+                web_sys::console::warn_1(
+                    &format!(
+                        "AlkALive: text vertex budget exceeded ({} vertices); dropping trailing \
+                         glyphs — input text is longer than the security budget allows.",
+                        crate::tessellate::MAX_TEXT_VERTICES
+                    )
+                    .into(),
+                );
+            }
+
             // 5. Upload atlas page 0 to GPU.
             let page_data = atlas
                 .page_data(0)

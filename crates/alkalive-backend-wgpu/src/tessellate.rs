@@ -44,6 +44,10 @@ pub struct SceneTessellation {
     pub atlas_page: Vec<u8>,
     /// Pixel-space `(x, y, w, h)` of the input field rectangle.
     pub input_field_bounds: (f32, f32, f32, f32),
+    /// Security (T-D1): set when the combined vertex budget
+    /// ([`MAX_TEXT_VERTICES`]) was exceeded and trailing glyph quads were
+    /// dropped — a visible prefix still renders; renderers log this.
+    pub truncated: bool,
 }
 
 impl SceneTessellation {
@@ -51,6 +55,40 @@ impl SceneTessellation {
     pub fn total_vertex_count(&self) -> u32 {
         self.title_vertex_count + self.input_vertex_count
     }
+}
+
+/// Maximum number of vertices in a combined per-frame text vertex buffer
+/// (security, T-D1: docs/security/06-mitigations.md).
+///
+/// A hostile 1 MiB input string can expand to ~1M glyphs ⇒ ~6M vertices ⇒
+/// ~96 MB of CPU+GPU allocation before the shaper's length cap binds. This
+/// budget bounds the worst case to `MAX_TEXT_VERTICES × 16` bytes of vertex
+/// data (16 MiB) while leaving two orders of magnitude of headroom over any
+/// realistic UI text (~174k glyphs). Truncation drops trailing glyph quads
+/// (a visible prefix still renders) and is reported via
+/// [`SceneTessellation::truncated`].
+pub const MAX_TEXT_VERTICES: usize = 1_048_576;
+
+/// Budget the two quad runs against [`MAX_TEXT_VERTICES`] (6 vertices per
+/// glyph quad, title first). Shared by the wgpu tessellation path and the
+/// GLSL backend's inline copy so the two cannot drift.
+pub(crate) fn cap_quads_to_vertex_budget(
+    mut title_quads: Vec<alkalive_text::Quad>,
+    mut input_quads: Vec<alkalive_text::Quad>,
+) -> (Vec<alkalive_text::Quad>, Vec<alkalive_text::Quad>, bool) {
+    const VERTS_PER_QUAD: usize = 6;
+    let budget = MAX_TEXT_VERTICES / VERTS_PER_QUAD;
+    let mut truncated = false;
+    if title_quads.len() > budget {
+        title_quads.truncate(budget);
+        truncated = true;
+    }
+    let remaining = budget - title_quads.len();
+    if input_quads.len() > remaining {
+        input_quads.truncate(remaining);
+        truncated = true;
+    }
+    (title_quads, input_quads, truncated)
 }
 
 /// Tessellate a scene into vertices + glyph atlas + layout bounds.
@@ -160,6 +198,11 @@ pub fn tessellate_scene_with_atlas(
         input_quads = build_text_quads(&input_run, atlas, input_font_size);
     }
 
+    // Security (T-D1): bound the combined vertex budget before any
+    // vertex-buffer allocation happens (16 B/vertex × 6 verts/quad).
+    let (title_quads, input_quads, truncated) =
+        cap_quads_to_vertex_budget(title_quads, input_quads);
+
     let atlas_page = atlas
         .page_data(0)
         .ok_or_else(|| "atlas page 0 missing".to_string())?
@@ -216,6 +259,7 @@ pub fn tessellate_scene_with_atlas(
         input_vertex_count,
         atlas_page,
         input_field_bounds,
+        truncated,
     })
 }
 
@@ -261,6 +305,67 @@ mod tests {
             text: "Hello World!".to_string(),
             ..Default::default()
         }
+    }
+
+    fn synthetic_quad(i: usize) -> alkalive_text::Quad {
+        alkalive_text::Quad {
+            position: (i as f32, 0.0),
+            size: (1.0, 1.0),
+            uv: alkalive_text::Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 1.0,
+                h: 1.0,
+            },
+            page: 0,
+        }
+    }
+
+    #[test]
+    fn vertex_budget_cap_truncates_and_reports() {
+        // Security (T-D1): a run exceeding MAX_TEXT_VERTICES/6 quads must be
+        // truncated to exactly the budget and flagged; a small second run
+        // must then only get the REMAINING budget.
+        let budget_quads = MAX_TEXT_VERTICES / 6;
+        let oversized_title: Vec<alkalive_text::Quad> = (0..budget_quads + 5)
+            .map(synthetic_quad)
+            .collect();
+        let (title, input, truncated) =
+            cap_quads_to_vertex_budget(oversized_title, vec![synthetic_quad(0); 3]);
+        assert!(truncated, "oversized run must report truncation");
+        assert_eq!(title.len(), budget_quads, "title truncated to exact budget");
+        assert_eq!(input.len(), 0, "no budget left for the input run");
+    }
+
+    #[test]
+    fn vertex_budget_cap_passes_small_runs_untouched() {
+        // Well-behaved scenes must pass through unchanged and unflagged.
+        let title: Vec<alkalive_text::Quad> = (0..12).map(synthetic_quad).collect();
+        let input: Vec<alkalive_text::Quad> = (0..34).map(synthetic_quad).collect();
+        let (t, i, truncated) =
+            cap_quads_to_vertex_budget(title.clone(), input.clone());
+        assert!(!truncated);
+        assert_eq!(t.len(), 12);
+        assert_eq!(i.len(), 34);
+    }
+
+    #[test]
+    fn vertex_budget_cap_splits_remaining_budget_between_runs() {
+        // Title within budget, input over the REMAINING budget: only the
+        // input run is truncated (title keeps its quads).
+        let title: Vec<alkalive_text::Quad> = (0..10).map(synthetic_quad).collect();
+        let budget_quads = MAX_TEXT_VERTICES / 6;
+        let oversized_input: Vec<alkalive_text::Quad> =
+            (0..budget_quads).map(synthetic_quad).collect();
+        let (t, i, truncated) =
+            cap_quads_to_vertex_budget(title.clone(), oversized_input);
+        assert!(truncated);
+        assert_eq!(t.len(), 10, "title untouched");
+        assert_eq!(
+            i.len(),
+            budget_quads - 10,
+            "input gets exactly the remaining budget"
+        );
     }
 
     #[test]

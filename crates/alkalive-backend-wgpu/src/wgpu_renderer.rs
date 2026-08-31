@@ -815,6 +815,19 @@ impl WgpuBackendRenderer {
         if self.tess_dirty || self.last_input_display != input_display {
             match tessellate_scene(scene, self.width as f32, self.height as f32) {
                 Ok(t) => {
+                    // Security (T-D1): surface budget truncation loudly — the
+                    // tessellation already capped the vertex allocation.
+                    if t.truncated {
+                        web_sys::console::warn_1(
+                            &format!(
+                                "AlkALive(wgpu): text vertex budget exceeded ({} vertices); \
+                                 dropping trailing glyphs — input text is longer than the \
+                                 security budget allows.",
+                                crate::tessellate::MAX_TEXT_VERTICES
+                            )
+                            .into(),
+                        );
+                    }
                     if let Err(e) = self.upload_tessellation(&t) {
                         web_sys::console::error_1(
                             &format!("AlkALive(wgpu): tessellation upload failed: {e}").into(),
