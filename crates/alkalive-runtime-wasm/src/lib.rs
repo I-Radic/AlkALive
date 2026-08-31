@@ -818,15 +818,23 @@ fn setup_input_forwarding(ime_input: &web_sys::HtmlInputElement) -> Result<(), J
                         runtime.input_text.pop();
                         handled = true;
                     } else if key == "Enter" {
-                        runtime.input_text.push('\n');
+                        // Security (T-D1): early cap at the shaper's documented
+                        // bound (SEC-04) so the buffer cannot grow past it
+                        // between shape() calls.
+                        if runtime.input_text.len() < alkalive_text::MAX_TEXT_LENGTH {
+                            runtime.input_text.push('\n');
+                        }
                         handled = true;
                     } else if key == "Escape" {
                         runtime.input_text.clear();
                         handled = true;
                     } else if key.len() == 1 {
                         // Single-char key — printable (or space, etc.)
-                        let c = key.chars().next().unwrap();
-                        runtime.input_text.push(c);
+                        // Security (T-D1): same early cap.
+                        if runtime.input_text.len() < alkalive_text::MAX_TEXT_LENGTH {
+                            let c = key.chars().next().unwrap();
+                            runtime.input_text.push(c);
+                        }
                         handled = true;
                     }
                     if handled {
@@ -861,7 +869,22 @@ fn setup_input_forwarding(ime_input: &web_sys::HtmlInputElement) -> Result<(), J
         if let Some(text) = e.data() {
             RUNTIME.with(|rt| {
                 if let Some(runtime) = rt.borrow_mut().as_mut() {
-                    runtime.input_text.push_str(&text);
+                    // Security (T-D1): cap at the shaper's documented bound
+                    // (SEC-04) AT INTAKE — an IME composition burst cannot
+                    // grow the buffer past what shape() would accept anyway.
+                    let remaining = alkalive_text::MAX_TEXT_LENGTH
+                        .saturating_sub(runtime.input_text.len());
+                    if text.len() <= remaining {
+                        runtime.input_text.push_str(&text);
+                    } else {
+                        // Accept only the longest prefix that fits without
+                        // splitting a multi-byte UTF-8 character.
+                        let mut end = remaining;
+                        while end > 0 && !text.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        runtime.input_text.push_str(&text[..end]);
+                    }
                     runtime.scene.input_text = runtime.input_text.clone();
                     runtime.signals.set(
                         alkalive_compiler::SignalId(0), // INPUT_TEXT
