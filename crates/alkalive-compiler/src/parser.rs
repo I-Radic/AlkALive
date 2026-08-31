@@ -46,14 +46,47 @@ impl core::error::Error for ParseError {}
 pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    /// Security (T-D4, docs/security/06-mitigations.md): current recursion
+    /// depth through the mutually recursive parse funnels
+    /// (expr/stmt/block/type). Bounded by [`MAX_PARSE_DEPTH`].
+    depth: usize,
 }
+
+/// Security (T-D4): recursion-depth bound for the recursive-descent
+/// parser. Hostile or accidental deep nesting (`((((…`, `{{{…`,
+/// `Vec<Vec<Vec<…`) previously recursed until stack overflow (process
+/// abort). 256 levels is two orders of magnitude beyond any sane program
+/// and far below the ~8000-level native / ~1MB-wasm stack ceilings.
+const MAX_PARSE_DEPTH: usize = 256;
 
 impl Parser {
     /// Construct a parser over a token stream (as produced by
     /// [`crate::lexer::tokenize`]). The stream MUST end with an
     /// [`TokenKind::Eof`] sentinel; `tokenize` guarantees this.
     pub fn new(tokens: Vec<Token>) -> Self {
-        Self { tokens, pos: 0 }
+        Self {
+            tokens,
+            pos: 0,
+            depth: 0,
+        }
+    }
+
+    /// Enter one recursion level; errors (with the offending token's
+    /// position) when the nesting exceeds [`MAX_PARSE_DEPTH`].
+    fn enter_scope(&mut self) -> Result<(), ParseError> {
+        self.depth += 1;
+        if self.depth > MAX_PARSE_DEPTH {
+            return Err(self.unexpected_msg(format!(
+                "nesting exceeds the {MAX_PARSE_DEPTH}-level bound \
+                 (security: stack-overflow guard)"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Leave one recursion level.
+    fn exit_scope(&mut self) {
+        self.depth -= 1;
     }
 
     /// Parse the token stream into a [`ModuleDecl`].
@@ -327,6 +360,13 @@ impl Parser {
 
     /// Parse a type: `Qualifier? BaseType`.
     fn parse_type(&mut self) -> Result<Type, ParseError> {
+        self.enter_scope()?;
+        let out = self.parse_type_inner();
+        self.exit_scope();
+        out
+    }
+
+    fn parse_type_inner(&mut self) -> Result<Type, ParseError> {
         let qualifier = match self.peek().kind {
             TokenKind::Monotone => {
                 self.advance();
@@ -687,6 +727,13 @@ impl Parser {
 
     /// Parse `{ stmt* }`.
     fn parse_block(&mut self) -> Result<Block, ParseError> {
+        self.enter_scope()?;
+        let out = self.parse_block_inner();
+        self.exit_scope();
+        out
+    }
+
+    fn parse_block_inner(&mut self) -> Result<Block, ParseError> {
         let lb = self.expect(TokenKind::LBrace)?;
         let line = lb.line;
         let col = lb.col;
@@ -717,6 +764,13 @@ impl Parser {
 
     /// Parse a single statement.
     fn parse_stmt(&mut self) -> Result<Stmt, ParseError> {
+        self.enter_scope()?;
+        let out = self.parse_stmt_inner();
+        self.exit_scope();
+        out
+    }
+
+    fn parse_stmt_inner(&mut self) -> Result<Stmt, ParseError> {
         match self.peek().kind {
             TokenKind::Let => {
                 let l = self.parse_let(Vec::new(), Visibility::Priv)?;
@@ -809,10 +863,13 @@ impl Parser {
         }
     }
 
-    /// Parse an expression: literal, variable, method call, or path call.
-    /// Parse an expression with binary operator precedence (Pratt parsing).
+    /// Parse an expression (Pratt parsing with binary operator precedence).
+    /// Security (T-D4): the recursion funnel is depth-guarded.
     fn parse_expr(&mut self) -> Result<Expr, ParseError> {
-        self.parse_binary_expr(1) // min precedence 1 = all operators
+        self.enter_scope()?;
+        let out = self.parse_binary_expr(1); // min precedence 1 = all operators
+        self.exit_scope();
+        out
     }
 
     /// Parse a binary expression with minimum precedence `min_prec`.
@@ -1504,6 +1561,64 @@ mod tests {
 
     fn parse_ok(src: &str) -> ModuleDecl {
         parse(src).unwrap_or_else(|e| panic!("parse failed: {}", e))
+    }
+
+    #[test]
+    fn parse_depth_guard_rejects_deeply_nested_parens() {
+        // Security (T-D4): 400 nested parens previously recursed until
+        // stack overflow; the guard must return a typed ParseError with a
+        // position instead of aborting the process.
+        let deep = "module M { fn f() { let x: i32 = ".to_string()
+            + &"(".repeat(400)
+            + "1"
+            + &")".repeat(400)
+            + "; } }";
+        let err = parse(&deep).unwrap_err();
+        assert!(
+            err.message.contains("nesting exceeds"),
+            "got: {}",
+            err.message
+        );
+        assert!(err.line >= 1 && err.col >= 1, "error carries a position");
+    }
+
+    #[test]
+    fn parse_depth_guard_rejects_deeply_nested_blocks() {
+        // Security (T-D4): statement-nesting via `while` bodies is a
+        // recursion cycle (parse_block <-> parse_stmt); it is guarded too.
+        // (A bare `{` is not a valid statement in AlkALive, so the nesting
+        // is expressed through nested control-flow bodies.)
+        let mut deep = String::from("module M { fn f() {");
+        for _ in 0..400 {
+            deep.push_str("while(true){");
+        }
+        for _ in 0..400 {
+            deep.push('}');
+        }
+        deep.push_str("} }");
+        let err = parse(&deep).unwrap_err();
+        assert!(
+            err.message.contains("nesting exceeds"),
+            "got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn parse_depth_guard_allows_realistic_nesting() {
+        // 64 levels of nesting is far beyond any real program and must
+        // still parse cleanly (no over-rejection).
+        let mut src = String::from("module M { fn f() { let x: i32 = ");
+        for _ in 0..64 {
+            src.push('(');
+        }
+        src.push('1');
+        for _ in 0..64 {
+            src.push(')');
+        }
+        src.push_str("; return x; } }");
+        let m = parse_ok(&src);
+        assert_eq!(m.name, "M");
     }
 
     #[test]
