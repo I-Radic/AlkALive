@@ -1,9 +1,9 @@
 {
-  "afterCargoBytes": 6200837,
-  "afterBindgenBytes": 5265760,
-  "afterWasmOptBytes": 2615807,
-  "finalSha256": "df2d026a1653773bb98b1e946e834563ffc80d7f620b35f63117610dcf9fe058",
-  "generatedAt": "2026-08-28T19:39:02.634Z",
+  "afterCargoBytes": 6204138,
+  "afterBindgenBytes": 5272650,
+  "afterWasmOptBytes": 2616477,
+  "finalSha256": "34f2489935466b6d76a001dcff6a01d4099cf5674a69291708e66035b3db108d",
+  "generatedAt": "2026-08-31T19:52:37.549Z",
   "pipeline": {
     "cargoProfile": "wasm-release",
     "wasmBindgen": "0.2.127",

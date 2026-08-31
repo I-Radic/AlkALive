@@ -389,10 +389,17 @@ pub fn start(
     //      When crossOriginIsolated is true, SharedArrayBuffer is available
     //      and a Web Worker render thread could be used. When false, the
     //      runtime falls back to single-threaded main-thread rendering.
-    let cross_origin_isolated = js_sys::eval("crossOriginIsolated")
-        .ok()
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    //
+    //      Security (T-I1): read the property via Reflect instead of
+    //      `js_sys::eval("crossOriginIsolated")` — eval shims in the
+    //      generated JS glue are a live code-execution sink; removing them
+    //      lets the deployment CSP ship without `unsafe-eval` (see
+    //      docs/security/06-mitigations.md).
+    let cross_origin_isolated =
+        js_sys::Reflect::get(&js_sys::global(), &"crossOriginIsolated".into())
+            .ok()
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
     if cross_origin_isolated {
         web_sys::console::log_1(
             &"AlkALive: cross-origin isolated (verifying SharedArrayBuffer…)".into(),
@@ -446,10 +453,11 @@ pub fn start(
     #[cfg(target_arch = "wasm32")]
     {
         if cross_origin_isolated {
-            let sab_ok = js_sys::eval("typeof SharedArrayBuffer !== 'undefined'")
-                .ok()
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
+            // Security (T-I1): Reflect property probe instead of eval, so no
+            // eval shim is generated in the JS glue (see comment in `start`).
+            let sab_ok =
+                js_sys::Reflect::has(&js_sys::global(), &"SharedArrayBuffer".into())
+                    .unwrap_or(false);
             if sab_ok {
                 web_sys::console::log_1(
                     &"AlkALive: cross-origin isolated + SharedArrayBuffer available \

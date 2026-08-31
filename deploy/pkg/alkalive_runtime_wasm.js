@@ -560,10 +560,6 @@ function __wbg_get_imports() {
         __wbg_error_dd408a7b3cb542dd: function(arg0) {
             console.error(arg0);
         },
-        __wbg_eval_62d1ea2ebeca53ad: function() { return handleError(function (arg0, arg1) {
-            const ret = eval(getStringFromWasm0(arg0, arg1));
-            return ret;
-        }, arguments); },
         __wbg_fenceSync_57ab30f550e5a5a2: function(arg0, arg1, arg2) {
             const ret = arg0.fenceSync(arg1 >>> 0, arg2 >>> 0);
             return isLikeNone(ret) ? 0 : addToExternrefTable0(ret);
@@ -726,6 +722,10 @@ function __wbg_get_imports() {
             const ret = arg0[arg1 >>> 0];
             return isLikeNone(ret) ? 0 : addToExternrefTable0(ret);
         },
+        __wbg_get_971a0c45d172643f: function() { return handleError(function (arg0, arg1) {
+            const ret = Reflect.get(arg0, arg1);
+            return ret;
+        }, arguments); },
         __wbg_get_unchecked_e20b893aeafc3fca: function(arg0, arg1) {
             const ret = arg0[arg1 >>> 0];
             return ret;
@@ -734,6 +734,10 @@ function __wbg_get_imports() {
             const ret = arg0.gpu;
             return ret;
         },
+        __wbg_has_b3a6e6d0d28295fa: function() { return handleError(function (arg0, arg1) {
+            const ret = Reflect.has(arg0, arg1);
+            return ret;
+        }, arguments); },
         __wbg_includes_a4b83ade703cb80b: function(arg0, arg1, arg2) {
             const ret = arg0.includes(arg1, arg2);
             return ret;
