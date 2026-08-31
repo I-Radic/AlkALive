@@ -307,15 +307,31 @@ pub fn build_vertex_buffer(quads: &[GlyphQuad]) -> Vec<Vertex> {
     verts
 }
 
-/// Clamp requested canvas dimensions to the minimum valid 1×1.
+/// Clamp requested canvas dimensions into the valid rendering range
+/// `[1, MAX_CANVAS_DIMENSION]`.
 ///
 /// Zero-sized canvases occur in degenerate cases (a `display:none`
 /// parent, a collapsed layout) and must not reach the GPU layer: a
 /// 0-sized WebGL viewport call is invalid, and wgpu surface
 /// configurations reject zero extents. Both backends' `resize`
 /// route their arguments through this helper.
+///
+/// Security (T-D3, docs/security/06-mitigations.md): the upper bound
+/// rejects absurd dimensions (a `u32::MAX` resize previously passed
+/// through by design, relying on GPU-side rejection) before they can
+/// trigger huge surface allocations or a reconfigure error storm.
+/// 16384 px covers 8K displays (7680) at 2× DPR with headroom, and
+/// matches the common `maxTextureDimension1D/2D` floor of downlevel GPUs.
+pub const MAX_CANVAS_DIMENSION: u32 = 16384;
+
+/// Clamp requested canvas dimensions to the minimum valid 1×1 and the
+/// maximum [`MAX_CANVAS_DIMENSION`] (see the constant's docs for the
+/// security rationale).
 pub fn clamp_dimensions(width: u32, height: u32) -> (u32, u32) {
-    (width.max(1), height.max(1))
+    (
+        width.clamp(1, MAX_CANVAS_DIMENSION),
+        height.clamp(1, MAX_CANVAS_DIMENSION),
+    )
 }
 
 /// Build baseline-relative glyph quads from a shaped run.
@@ -1730,7 +1746,31 @@ mod tests {
     fn clamp_dimensions_passes_valid_sizes_through() {
         assert_eq!(clamp_dimensions(1, 1), (1, 1));
         assert_eq!(clamp_dimensions(800, 600), (800, 600));
-        assert_eq!(clamp_dimensions(u32::MAX, u32::MAX), (u32::MAX, u32::MAX));
+        // 8K at 2x DPR fits untouched — the upper bound has real-world headroom.
+        assert_eq!(clamp_dimensions(7680, 4320), (7680, 4320));
+    }
+
+    #[test]
+    fn clamp_dimensions_bounds_absurd_sizes() {
+        // Security (T-D3): u32::MAX previously passed through by design and
+        // relied on GPU-side rejection; it is now clamped at the source.
+        assert_eq!(
+            clamp_dimensions(u32::MAX, u32::MAX),
+            (MAX_CANVAS_DIMENSION, MAX_CANVAS_DIMENSION)
+        );
+        assert_eq!(
+            clamp_dimensions(MAX_CANVAS_DIMENSION + 1, 100),
+            (MAX_CANVAS_DIMENSION, 100)
+        );
+        assert_eq!(
+            clamp_dimensions(100, MAX_CANVAS_DIMENSION + 1),
+            (100, MAX_CANVAS_DIMENSION)
+        );
+        // The boundary itself passes untouched.
+        assert_eq!(
+            clamp_dimensions(MAX_CANVAS_DIMENSION, MAX_CANVAS_DIMENSION),
+            (MAX_CANVAS_DIMENSION, MAX_CANVAS_DIMENSION)
+        );
     }
 
     #[test]

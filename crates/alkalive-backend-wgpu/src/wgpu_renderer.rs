@@ -724,20 +724,37 @@ impl WgpuBackendRenderer {
         // match the WebGL2/GLSL fallback exactly (the WebGL canvas has no
         // implicit sRGB conversion).
         let caps = surface.get_capabilities(&adapter);
+        // Security (Wave 2 review): never index the capability vecs — an
+        // empty report from a hostile/broken backend previously panicked at
+        // `caps.formats[0]` / `caps.alpha_modes[0]`. Fall back: prefer a
+        // non-sRGB format, else the first reported, else the universally
+        // supported Bgra8Unorm; likewise Auto for the alpha mode. An
+        // genuinely-empty capability set then fails cleanly at
+        // `surface.configure` (handled as init Err → fallback renderer)
+        // instead of panicking.
         let format = caps
             .formats
             .iter()
             .copied()
             .find(|f| !f.is_srgb())
-            .unwrap_or(caps.formats[0]);
+            .or_else(|| caps.formats.first().copied())
+            .unwrap_or(wgpu::TextureFormat::Bgra8Unorm);
+        // Route the initial dimensions through the shared clamp so the
+        // initial surface config gets the same [1, MAX_CANVAS_DIMENSION]
+        // bounds as resize (security, T-D3).
+        let (width, height) = crate::clamp_dimensions(width, height);
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
-            width: width.max(1),
-            height: height.max(1),
+            width,
+            height,
             present_mode: wgpu::PresentMode::AutoVsync,
             desired_maximum_frame_latency: 2,
-            alpha_mode: caps.alpha_modes[0],
+            alpha_mode: caps
+                .alpha_modes
+                .first()
+                .copied()
+                .unwrap_or(wgpu::CompositeAlphaMode::Auto),
             view_formats: vec![],
         };
         surface.configure(&device, &config);
