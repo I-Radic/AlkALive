@@ -327,9 +327,8 @@ mod tests {
         // truncated to exactly the budget and flagged; a small second run
         // must then only get the REMAINING budget.
         let budget_quads = MAX_TEXT_VERTICES / 6;
-        let oversized_title: Vec<alkalive_text::Quad> = (0..budget_quads + 5)
-            .map(synthetic_quad)
-            .collect();
+        let oversized_title: Vec<alkalive_text::Quad> =
+            (0..budget_quads + 5).map(synthetic_quad).collect();
         let (title, input, truncated) =
             cap_quads_to_vertex_budget(oversized_title, vec![synthetic_quad(0); 3]);
         assert!(truncated, "oversized run must report truncation");
@@ -342,8 +341,7 @@ mod tests {
         // Well-behaved scenes must pass through unchanged and unflagged.
         let title: Vec<alkalive_text::Quad> = (0..12).map(synthetic_quad).collect();
         let input: Vec<alkalive_text::Quad> = (0..34).map(synthetic_quad).collect();
-        let (t, i, truncated) =
-            cap_quads_to_vertex_budget(title.clone(), input.clone());
+        let (t, i, truncated) = cap_quads_to_vertex_budget(title.clone(), input.clone());
         assert!(!truncated);
         assert_eq!(t.len(), 12);
         assert_eq!(i.len(), 34);
@@ -357,8 +355,7 @@ mod tests {
         let budget_quads = MAX_TEXT_VERTICES / 6;
         let oversized_input: Vec<alkalive_text::Quad> =
             (0..budget_quads).map(synthetic_quad).collect();
-        let (t, i, truncated) =
-            cap_quads_to_vertex_budget(title.clone(), oversized_input);
+        let (t, i, truncated) = cap_quads_to_vertex_budget(title.clone(), oversized_input);
         assert!(truncated);
         assert_eq!(t.len(), 10, "title untouched");
         assert_eq!(

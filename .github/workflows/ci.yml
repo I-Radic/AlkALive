@@ -137,6 +137,12 @@ jobs:
         run: |
           npm ci
           node e2e.mjs
+      - name: Run WASM tamper penetration test (T-S1)
+        working-directory: test/e2e
+        env:
+          ALKALIVE_BROWSER_CHANNEL: chrome
+        run: |
+          node tamper-check.mjs
       - name: Upload E2E artifacts
         if: always()
         uses: actions/upload-artifact@v6

@@ -455,9 +455,8 @@ pub fn start(
         if cross_origin_isolated {
             // Security (T-I1): Reflect property probe instead of eval, so no
             // eval shim is generated in the JS glue (see comment in `start`).
-            let sab_ok =
-                js_sys::Reflect::has(&js_sys::global(), &"SharedArrayBuffer".into())
-                    .unwrap_or(false);
+            let sab_ok = js_sys::Reflect::has(&js_sys::global(), &"SharedArrayBuffer".into())
+                .unwrap_or(false);
             if sab_ok {
                 web_sys::console::log_1(
                     &"AlkALive: cross-origin isolated + SharedArrayBuffer available \
@@ -872,8 +871,8 @@ fn setup_input_forwarding(ime_input: &web_sys::HtmlInputElement) -> Result<(), J
                     // Security (T-D1): cap at the shaper's documented bound
                     // (SEC-04) AT INTAKE — an IME composition burst cannot
                     // grow the buffer past what shape() would accept anyway.
-                    let remaining = alkalive_text::MAX_TEXT_LENGTH
-                        .saturating_sub(runtime.input_text.len());
+                    let remaining =
+                        alkalive_text::MAX_TEXT_LENGTH.saturating_sub(runtime.input_text.len());
                     if text.len() <= remaining {
                         runtime.input_text.push_str(&text);
                     } else {
